@@ -1,165 +1,135 @@
 # llm-team
 
-PO/PM/DEV/QA 4개 에이전트 + Scheduler + Notifier로 구성된 다중 타겟 GitHub 자동화 프레임워크. 4개의 long-running 데몬이 1-shot Claude Code 호출로 각 에이전트를 깨우고, 협업은 GitHub의 Milestones/Issues/PR/Labels로 이루어진다.
+LLM Team은 사람과 LLM Agent가 소프트웨어 작업을 분업하기 위한 문서 우선 협업 모델이다. 핵심은 Agent를 자율 실행 주체로 보지 않고, **무상태 1회 호출로 콘텐츠만 만드는 역할**로 제한하는 것이다. 상태 전이와 영속 저장소 변경은 Caller가 수행하고, 사람은 승인·거부·회수·중단 같은 governance/input signal을 제공한다.
 
-## 개요
+이 저장소의 현재 최우선 기준은 구현 코드가 아니라 `llm-team.md`와 `docs/contracts/`에 정의된 헌법 및 규약이다.
 
-`inputs/<target>/*.md` 아이디어 문서를 시작점으로, PO가 GitHub Milestone을 만들고, PM이 Milestone을 user scenario 단위 Issue로 분해하고, DEV가 Issue마다 branch+PR을 작성하고, QA가 PR을 검증해 merge 또는 회수한다. 각 에이전트 간 핸드오프는 GitHub 라벨 상태 머신으로만 이루어지며, 사람의 승인은 `needs-human-review:*` 라벨 시점에 Discord/Slack 알림과 함께 발생한다.
+## Document Map
 
-```
-inputs/<target>/*.md
-        ↓
-PO ─→ Milestone ─→ [사람 승인]
-        ↓
-PM ─→ Issue × N ─→ [사람 승인]
-        ↓                    ↑
-DEV ─→ branch + PR     (1차 실패 시 재작업)
-        ↓                    │
-QA ─→ merge or 회수 ─────────┘
-```
-
-자세한 설계는 `.plan/26050116-architecture/planning.md`, daemon/self-fetch 변경은 `.plan/26050112-daemon-self-fetch/planning.md` 참조.
-
-## 요구사항
-
-- [`gh`](https://cli.github.com/) CLI (인증 완료 — `gh auth login`)
-- [`claude`](https://docs.claude.com/en/docs/claude-code) CLI (인증 완료)
-- `git`, `flock`
-- [`jq`](https://stedolan.github.io/jq/) — JSON 파싱
-- [`yq`](https://github.com/mikefarah/yq) — YAML 파싱
-
-macOS Homebrew 설치 예시:
-
-```bash
-brew install gh git jq yq flock
-gh auth login
-# claude는 별도 설치 + 인증 (Anthropic 가이드 참조)
-```
-
-## 새 타겟 등록 절차
-
-1. `targets/<name>.yaml` 작성. 스키마는 `targets/myapp.yaml` 참고.
-2. `cp .env.example .env` 후 `GH_TOKEN`과 필요한 webhook 값 채우기.
-3. `scripts/bootstrap-labels.sh <name>` 실행 → 12개 라벨을 타겟 repo에 생성.
-4. `inputs/<name>/` 디렉토리에 아이디어 markdown 추가 (PO Agent의 입력).
-
-## 데몬 운영 모델
-
-각 agent는 **단일 인스턴스 long-running 데몬**으로 실행한다. 시스템 전체에서 동일 agent의 동시 실행이 일어나지 않도록 `flock`이 자체 보장하며, agent 간 동시성 제어는 GitHub 라벨 atomic 전이만 사용한다 (외부 lock 추가 없음).
-
-### 수동 실행 (개발/테스트)
-
-```bash
-# 기본 polling 주기 (PO 600s / PM 300s / DEV 120s / QA 120s) 사용
-./scheduler/daemon.sh po &
-./scheduler/daemon.sh pm &
-./scheduler/daemon.sh dev &
-./scheduler/daemon.sh qa &
-
-# 종료
-kill -TERM <pid>   # graceful: 진행 중 tick 마무리 후 종료
-```
-
-### 1회 tick (smoke test)
-
-```bash
-LLM_TEAM_DAEMON_ONCE=1 LLM_TEAM_DAEMON_TARGET=myapp ./scheduler/daemon.sh po
-```
-
-### 환경 변수
-
-| 변수 | 용도 |
+| 문서 | 역할 |
 |---|---|
-| `LLM_TEAM_DAEMON_INTERVAL` | polling 주기 초 단위 override (기본은 agent별) |
-| `LLM_TEAM_DAEMON_ONCE=1` + `LLM_TEAM_DAEMON_TARGET=<name>` | 1 tick 실행 후 종료 (테스트용) |
-| `LLM_TEAM_CLAUDE_CMD` | claude CLI 호출 명령 override (기본 `claude -p --output-format text`) |
+| [`llm-team.md`](llm-team.md) | 최상위 Concept / Constitution. 철학, layer, 권한 경계, 핵심 invariant를 정의한다. |
+| [`docs/contracts/README.md`](docs/contracts/README.md) | Contract 문서 색인, 권위 순서, reference 규칙을 정의한다. |
+| [`docs/contracts/agent-and-context-contract.md`](docs/contracts/agent-and-context-contract.md) | Agent 역할, Context Manifest, revision pin, output envelope를 정의한다. |
+| [`docs/contracts/state-and-operation-contract.md`](docs/contracts/state-and-operation-contract.md) | Milestone / Task / Change Proposal 상태와 operation 전이를 정의한다. |
+| [`docs/contracts/reliability-and-gate-contract.md`](docs/contracts/reliability-and-gate-contract.md) | lease, retry, 회수, 검증, human gate, ledger, pause 규칙을 정의한다. |
+| [`docs/contracts/knowledge-contract.md`](docs/contracts/knowledge-contract.md) | 누적 스펙, manifest, decision log, context summary, AC traceability를 정의한다. |
+| [`docs/architecture/`](docs/architecture/) | 위 헌법과 contract를 특정 구현 방식에 매핑하는 adapter 문서다. |
 
-### macOS launchd 등록
+권위 순서는 다음과 같다.
 
-데몬 자동 시작/재시작은 launchd로 관리한다. 예시 plist는 `docs/superpowers/specs/launchd/`에 있다.
+1. [`llm-team.md`](llm-team.md)
+2. [`docs/contracts/`](docs/contracts/)
+3. [`docs/architecture/`](docs/architecture/) 및 구현 코드
 
-```bash
-# plist 4개를 LaunchAgents로 복사 + path 치환
-for agent in po pm dev qa; do
-  sed "s|__LLM_TEAM_ROOT__|$(pwd)|g; s|__USER_HOME__|${HOME}|g" \
-    docs/superpowers/specs/launchd/com.llm-team.${agent}.plist \
-    > ~/Library/LaunchAgents/com.llm-team.${agent}.plist
-  launchctl load ~/Library/LaunchAgents/com.llm-team.${agent}.plist
-done
+하위 문서나 구현이 상위 문서와 충돌하면 상위 문서가 우선한다.
 
-# 상태 확인 / 종료
-launchctl list | grep llm-team
-launchctl unload ~/Library/LaunchAgents/com.llm-team.po.plist
+## Core Model
+
+```text
+Human governance/input signal
+        ↓
+Caller creates or claims workflow object with lease
+        ↓
+Caller builds Context Manifest + revision pins
+        ↓
+Agent returns content-only output envelope
+        ↓
+Caller validates output + revision pins
+        ↓
+Caller performs operational write
 ```
 
-`KeepAlive=true`이므로 데몬이 죽으면 launchd가 자동 재시작한다.
+핵심 원칙은 한 줄로 요약된다.
 
-### Linux systemd 등록 (참고)
+> Agent는 콘텐츠만, Caller는 operational transition만, 사람은 governance/input signal만.
 
-systemd unit은 `docs/superpowers/specs/launchd/`에 포함되지 않으나, 동일 패턴으로 작성:
+이 분리는 race condition, 비멱등 전이, LLM 메모리 의존, 책임 불명확성을 줄이기 위한 구조적 장치다. Agent 간 직접 호출이나 공유 메모리는 사용하지 않고, 모든 핸드오프는 영속 저장소 객체를 통해 이루어진다.
 
-```ini
-# /etc/systemd/system/llm-team-po.service
-[Service]
-Type=simple
-WorkingDirectory=/path/to/llm-team
-ExecStart=/path/to/llm-team/scheduler/daemon.sh po
-EnvironmentFile=/path/to/llm-team/.env
-Restart=always
-RestartSec=10
+## Layers
 
-[Install]
-WantedBy=default.target
-```
-
-### 인증 / PATH 주의사항
-
-데몬 환경의 PATH가 좁으면 `gh`, `claude`, `jq`, `yq` 호출이 실패한다. launchd plist에서 PATH를 명시하거나 `.env`에 export하는 것을 권장:
-
-```bash
-# .env에 추가 (데몬이 source하지는 않으나, lib/config.sh#resolve_secret이 .env를 lazy-read함)
-PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
-GH_TOKEN=ghp_...
-ANTHROPIC_API_KEY=sk-ant-...   # claude CLI가 사용하는 경우
-```
-
-`gh`/`claude`가 자체 config(`~/.config/gh/`, `~/.claude/`)로 인증되어 있다면 위 토큰은 불필요. 단, launchd plist의 `EnvironmentVariables.HOME`이 사용자 홈을 가리키도록 설정되어 있어야 자체 config 접근 가능.
-
-## 사람 승인 게이트
-
-`needs-human-review:*` 라벨이 붙으면 GitHub web에서 Milestone/Issue 본문을 검토한 뒤 라벨을 다음 상태로 수동 교체한다:
-
-| 트리거 라벨 | 검토 대상 | 다음 라벨 |
+| Layer | 책임 | 금지 |
 |---|---|---|
-| `needs-human-review:milestone` | Milestone 본문 (PO 산출) | `needs-scenarios` |
-| `needs-human-review:scenario` | Issue 본문 (PM 산출) | `needs-dev` |
-| `needs-human-review:dev-failure` | Issue/PR (QA 2차 실패 또는 git 실패) | 수동 처리 (재시작 / scope 변경 / close) |
+| People | 스펙 입력, 승인·거부·회수·중단 signal, 모델 수정 승인 | 자동 workflow 전이의 비공식 우회 |
+| Agents | Context Manifest 기반 self-fetch, 콘텐츠 생성 | 영속 저장소 직접 쓰기, 상태 변경, 병합, 검증 실행 |
+| Caller | Agent 호출, output 검증, 상태 전이, lease, 회수, 알림, 병합, deterministic verification | 헌법과 contract 우회 |
+| Persistent Store | 큐, 단일 진실 원천, 누적 산출물 저장 | 임의의 비공식 상태 소유 |
 
-알림은 `targets/<name>.yaml`의 `notifier.channel` (`discord` | `slack` | `none`)에 따라 분기된다.
+## Agent Roles
 
-## 로그 위치
+현재 contract는 7개 Agent 역할을 기준으로 한다.
 
-- 각 에이전트 실행 로그: `workdir/<target>/logs/<agent>-<timestamp>.log`
-- 데몬 표준 출력: launchd plist의 `StandardOutPath` / `StandardErrorPath` 참조
-- `workdir/daemon-<agent>.lock` / `workdir/daemon-<agent>.lock.pid` — 단일 인스턴스 lock
+| Agent | 주 책임 |
+|---|---|
+| PO | 제품 의도와 문제 정의를 Milestone 수준 산출물로 정리한다. |
+| PM | Milestone을 사용자 시나리오와 acceptance criteria로 구체화한다. |
+| Planner | Task 분해, 의존성, 작업 순서, 필요한 context 범위를 설계한다. |
+| Coder | 할당된 Task 범위에서 코드 변경 콘텐츠를 만든다. |
+| Reviewer | 변경 제안의 결함, 누락, 회귀 위험, contract 위반을 검토한다. |
+| Integrator | 승인 가능한 변경을 통합 가능한 형태로 정리하고 충돌·재작업을 조정한다. |
+| QA | Caller가 실행한 결정적 검증 결과를 해석하고 release 가능성을 판단한다. |
 
-`workdir/`은 `.gitignore`에 의해 추적되지 않는다. 누적 로그 정리는 별도 cron 권장:
+각 Agent의 상세 출력 계약은 [`Agent and Context Contract`](docs/contracts/agent-and-context-contract.md)가 정의한다. 구현 관점의 역할 설명은 [`docs/architecture/agents/`](docs/architecture/agents/)에 있다.
 
+## Workflow Shape
+
+기본 진행 동사는 다음 순서를 따른다.
+
+```text
+Compose-PO → Compose-PM → Decompose → Implement → Review → Refactor → Validate
 ```
-0 3 * * * find /path/to/llm-team/workdir -name "*.log" -mtime +14 -delete
-```
 
-## cron 운영 (legacy / 대안)
+역방향 이동은 명시적 회수로만 허용된다. 자동 재시도는 유한해야 하며, 한도를 넘으면 ESCALATED 상태로 사람에게 넘어간다. Human gate에 진입한 객체는 사람의 signal 전까지 다음 큐로 진행하지 않지만, Caller 프로세스는 다른 큐 처리를 계속할 수 있다.
 
-데몬 대신 cron을 쓰고 싶다면 다음 라인을 사용. 단 macOS sleep 시 trigger가 누락되며 외부 lock 부재라 동시 실행 위험이 있으므로 **데몬 사용을 권장**한다.
+상태와 operation의 authoritative source는 [`State and Operation Contract`](docs/contracts/state-and-operation-contract.md)다.
 
-```
-*/10 * * * * cd /path/to/llm-team && set -a; [ -f .env ] && . .env; set +a; PATH=/opt/homebrew/bin:/usr/local/bin:$PATH scheduler/run-po.sh myapp >> workdir/myapp/logs/po-cron.log 2>&1
-*/5  * * * * cd /path/to/llm-team && set -a; [ -f .env ] && . .env; set +a; PATH=/opt/homebrew/bin:/usr/local/bin:$PATH scheduler/run-pm.sh myapp >> workdir/myapp/logs/pm-cron.log 2>&1
-*/2  * * * * cd /path/to/llm-team && set -a; [ -f .env ] && . .env; set +a; PATH=/opt/homebrew/bin:/usr/local/bin:$PATH scheduler/run-dev.sh myapp >> workdir/myapp/logs/dev-cron.log 2>&1
-*/2  * * * * cd /path/to/llm-team && set -a; [ -f .env ] && . .env; set +a; PATH=/opt/homebrew/bin:/usr/local/bin:$PATH scheduler/run-qa.sh myapp >> workdir/myapp/logs/qa-cron.log 2>&1
-```
+## Human Gates
 
-## MVP 통과 시나리오
+사람은 상태 라벨이나 내부 marker를 임의로 다음 단계로 바꾸는 운영자가 아니다. 사람은 다음과 같은 signal을 영속 저장소에 남긴다.
 
-`inputs/myapp/auth.md` 1개 파일을 시작점으로 PO → 사람 승인 → PM → 사람 승인 → DEV → QA → merge까지 end-to-end 1회 통과를 검증한다. 자세한 절차는 `.plan/26050116-architecture/planning.md` §10 또는 `.plan/26050116-architecture/sub-e2e-verification.md` 참조.
+- 승인
+- 거부
+- 수정 요청
+- 회수 요청
+- 시스템 pause / resume 요청
+- 헌법 또는 contract 변경 승인
+
+Caller는 signal의 권한, 대상 revision, gate 조건을 검증한 뒤 전이를 집행한다. 이 규칙은 [`Reliability and Gate Contract`](docs/contracts/reliability-and-gate-contract.md)가 정의한다.
+
+## Architecture Adapters
+
+[`docs/architecture/`](docs/architecture/)는 헌법과 contract를 구현 세계의 label, marker, helper, runner, CLI 호출에 매핑한다.
+
+읽는 순서는 다음을 권장한다.
+
+1. [`docs/architecture/state-machine.md`](docs/architecture/state-machine.md)
+2. [`docs/architecture/agent-output-format-mapping.md`](docs/architecture/agent-output-format-mapping.md)
+3. [`docs/architecture/agents/`](docs/architecture/agents/)
+4. [`docs/architecture/daemons.md`](docs/architecture/daemons.md)
+5. [`docs/architecture/tools.md`](docs/architecture/tools.md)
+
+Architecture 문서는 adapter다. 상태명, output envelope, human signal schema, retry/lease semantics를 바꾸려면 먼저 contract를 확인해야 한다.
+
+## Implementation Notes
+
+이 모델을 특정 저장소와 도구 위에 구현하려면 보통 다음 요소가 필요하다.
+
+- 이슈 트래커 또는 queue 역할을 할 영속 저장소
+- 버전 관리 시스템과 변경 제안 단위
+- Caller runner와 worker slot / lease 관리
+- LLM CLI 또는 provider adapter
+- 결정적 검증을 실행할 빌드·테스트·린트·타입체크 명령
+- 선택적 알림 채널
+
+도구 제품명은 모델의 본질이 아니다. GitHub, 다른 이슈 트래커, 다른 LLM CLI, 다른 CI 환경으로 교체해도 `llm-team.md`의 invariant와 contract가 유지되어야 한다.
+
+## Change Rules
+
+- 최상위 철학, layer, 권한 경계, invariant를 바꾸는 변경은 [`llm-team.md`](llm-team.md)를 수정해야 한다.
+- 구체 상태, output 형식, retry, gate, knowledge 형식을 바꾸는 변경은 [`docs/contracts/`](docs/contracts/)를 수정해야 한다.
+- 구현 adapter만 바꾸는 변경은 [`docs/architecture/`](docs/architecture/)에서 처리하되 contract를 override할 수 없다.
+- 같은 개념을 여러 문서에 중복 정의하지 않는다. 한 문서를 authoritative source로 두고 다른 문서는 reference한다.
+
+## Current Status
+
+현재 저장소는 문서와 contract 정합성을 우선으로 정리되어 있다. 구현 코드나 legacy 운영 스크립트가 contract와 다르면 구현을 수정하거나, 사람 승인으로 contract 변경 제안을 제출해야 한다.
