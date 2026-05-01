@@ -1,0 +1,16 @@
+name: llm-team
+github:
+  owner: bakpark
+  repo: llm-team
+  default_branch: main
+local:
+  clone_path: 
+inputs_dir: inputs/llm-team
+labels:
+  prefix: ""
+notifier:
+  channel: none
+  webhook_or_id: 
+dev_concurrency: 3
+stale_threshold_minutes: 60
+enabled: true

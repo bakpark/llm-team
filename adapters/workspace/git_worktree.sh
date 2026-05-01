@@ -179,3 +179,80 @@ ws_list() {
     ls -1 "${wt_dir}" 2>/dev/null || true
   fi
 }
+
+# ws_get_branch_head <repo> <branch>  → echo head sha of <branch>
+# `repo` 인자는 contract 시그니처 호환용 — git_worktree adapter 는 canonical clone 을
+# 사용하므로 TARGET_NAME 기반 clone path 에서 조회. 인자 검증만 수행.
+ws_get_branch_head() {
+  local repo="$1" branch="$2"
+  if [ -z "${repo}" ] || [ -z "${branch}" ]; then
+    log_error "ws_get_branch_head: repo and branch are required"
+    return 1
+  fi
+  local clone_path
+  clone_path="$(_workspace_clone_path)"
+  if [ ! -d "${clone_path}/.git" ]; then
+    log_error "ws_get_branch_head: canonical clone missing at ${clone_path}; call ws_ensure_clone first"
+    return 1
+  fi
+  # 로컬에 branch ref 가 있으면 그대로, 없으면 fetch 후 origin/<branch>.
+  (
+    cd "${clone_path}" || exit 1
+    if git rev-parse --verify --quiet "${branch}" >/dev/null 2>&1; then
+      git rev-parse "${branch}"
+      exit 0
+    fi
+    git fetch --quiet origin "${branch}" >/dev/null 2>&1 || true
+    if git rev-parse --verify --quiet "origin/${branch}" >/dev/null 2>&1; then
+      git rev-parse "origin/${branch}"
+      exit 0
+    fi
+    exit 1
+  ) || {
+    log_error "ws_get_branch_head: branch '${branch}' not found in ${clone_path}"
+    return 1
+  }
+}
+
+# ws_get_branch_base <repo> <branch>  → echo merge-base sha (branch ↔ integration)
+# integration branch 는 ${LLM_TEAM_INTEGRATION_BRANCH:-integration} 에서 결정.
+ws_get_branch_base() {
+  local repo="$1" branch="$2"
+  if [ -z "${repo}" ] || [ -z "${branch}" ]; then
+    log_error "ws_get_branch_base: repo and branch are required"
+    return 1
+  fi
+  local clone_path integration
+  clone_path="$(_workspace_clone_path)"
+  integration="${LLM_TEAM_INTEGRATION_BRANCH:-integration}"
+  if [ ! -d "${clone_path}/.git" ]; then
+    log_error "ws_get_branch_base: canonical clone missing at ${clone_path}; call ws_ensure_clone first"
+    return 1
+  fi
+  (
+    cd "${clone_path}" || exit 1
+    # branch resolution: local first, fall back to origin/<branch> after fetch.
+    local b_ref="" i_ref=""
+    if git rev-parse --verify --quiet "${branch}" >/dev/null 2>&1; then
+      b_ref="${branch}"
+    else
+      git fetch --quiet origin "${branch}" >/dev/null 2>&1 || true
+      if git rev-parse --verify --quiet "origin/${branch}" >/dev/null 2>&1; then
+        b_ref="origin/${branch}"
+      fi
+    fi
+    if git rev-parse --verify --quiet "${integration}" >/dev/null 2>&1; then
+      i_ref="${integration}"
+    else
+      git fetch --quiet origin "${integration}" >/dev/null 2>&1 || true
+      if git rev-parse --verify --quiet "origin/${integration}" >/dev/null 2>&1; then
+        i_ref="origin/${integration}"
+      fi
+    fi
+    [ -n "${b_ref}" ] && [ -n "${i_ref}" ] || exit 1
+    git merge-base "${b_ref}" "${i_ref}"
+  ) || {
+    log_error "ws_get_branch_base: cannot compute merge-base for '${branch}' against '${integration}'"
+    return 1
+  }
+}

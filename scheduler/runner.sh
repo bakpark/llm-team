@@ -1,11 +1,30 @@
 #!/usr/bin/env bash
-# Contract-era Caller runner.
+# scheduler/runner.sh — Contract-era Caller runner pipeline.
 #
 # Usage:
 #   scheduler/runner.sh <role> <target> [--dry-run]
 #
-# This runner owns operational work. Agents only receive a Context Manifest and
-# return content-only output envelopes.
+# Pipeline (sub-phase5-runner-pipeline.md):
+#   load_target → registry_rebind → PAUSED 검사 →
+#   recovery_scan (TODO Phase 8) → human_signal_drain (TODO Phase 6) →
+#   feature_request_promote (role=PO 전용) →
+#   ready_object_pick → lease_claim → claim_transition →
+#   manifest 빌드 → verification (reviewer/integrator/qa 한정) →
+#   agent_prompt_assemble → lr_invoke → agent_output_parse →
+#   agent_output_validate_extended → revision_pin_revalidate →
+#   caller_apply_output → lease_release.
+#
+# 호출 경계 (AGC-CALL-BOUNDARY): port (it_*/ws_*/lr_*/nt_*/ps_*) + lib/* helpers
+# + application/* 모듈만 사용. gh/git/curl/claude 직접 호출 0건.
+#
+# Lease: lib/lease.sh 단일 경로 — ps_lock_* 사용 금지.
+#
+# Ledger: 모든 종료 분기는 RGC-LEDGER 한 줄을 기록한다 — caller_apply_output 이
+# applied 라인을, _runner_ledger_write 가 claim_failed/invalid/stale/error/
+# duplicate 라인을 담당한다 (duplicate 은 caller_apply_output 내부에서 처리).
+#
+# Dry-run: ready_object 픽업 + manifest 스캐폴드까지만 수행. lease/transition/
+# verification/lr_invoke/caller_apply_output 모두 skip.
 
 set -euo pipefail
 
@@ -15,6 +34,27 @@ export LLM_TEAM_ROOT
 
 # shellcheck source=../lib/common.sh
 . "${LLM_TEAM_ROOT}/lib/common.sh"
+# Application layer (port-only callers).
+# shellcheck source=../application/agent_io.sh
+. "${LLM_TEAM_ROOT}/application/agent_io.sh"
+# shellcheck source=../application/ready_object.sh
+. "${LLM_TEAM_ROOT}/application/ready_object.sh"
+# shellcheck source=../application/feature_request.sh
+. "${LLM_TEAM_ROOT}/application/feature_request.sh"
+# shellcheck source=../application/caller_dispatch.sh
+. "${LLM_TEAM_ROOT}/application/caller_dispatch.sh"
+# shellcheck source=../application/release.sh
+. "${LLM_TEAM_ROOT}/application/release.sh"
+# shellcheck source=../application/verification_runner.sh
+. "${LLM_TEAM_ROOT}/application/verification_runner.sh"
+# shellcheck source=../application/human_signal.sh
+. "${LLM_TEAM_ROOT}/application/human_signal.sh"
+# shellcheck source=../application/recovery.sh
+. "${LLM_TEAM_ROOT}/application/recovery.sh"
+
+# ============================================================================
+# Argument parsing
+# ============================================================================
 
 usage() {
   cat <<EOF >&2
@@ -52,36 +92,376 @@ if [ "${DRY_RUN}" -eq 0 ]; then
   log_init "${ROLE}" "${TARGET}"
 fi
 
-log_info "runner: role=${ROLE} operation=${OPERATION} target=${TARGET} dry_run=${DRY_RUN}"
+TARGET_REPO="${TARGET_GH_OWNER:-}/${TARGET_GH_REPO:-}"
+TARGET_REPO="${TARGET_REPO#/}"   # strip leading slash if owner empty
+TARGET_REPO="${TARGET_REPO%/}"   # strip trailing slash if repo empty
+
+WORKER_ID="${LLM_TEAM_WORKER_ID:-${USER:-anonymous}-$(hostname -s 2>/dev/null || echo nohost)-$$}"
+LEASE_TTL="${LLM_TEAM_LEASE_TTL:-600}"
+
+log_info "runner: role=${ROLE} operation=${OPERATION} target=${TARGET} repo=${TARGET_REPO} dry_run=${DRY_RUN}"
+
+# Operational gates ---------------------------------------------------------
 
 if [ "$(control_state_get)" = "PAUSED" ]; then
   log_info "runner: control state is PAUSED; no lease will be claimed"
   exit 0
 fi
 
-run_stale_recovery "${TARGET}" || log_warn "runner: stale recovery returned non-zero"
+# Phase 8: recovery_scan — expired leases get state-rollback per RGC-RECOVERY.
+# run_stale_recovery now delegates to application/recovery.sh.recovery_scan.
+run_stale_recovery "${TARGET}" "${TARGET_REPO}" \
+  || log_warn "runner: stale recovery returned non-zero"
+
+# Phase 6: drain pending human governance signals before picking ready object.
+# Best-effort — transient collect errors are warned but do not abort the runner.
+# Skipped on dry-run (no live signal traffic should be consumed during smoke).
+if [ "${DRY_RUN}" -eq 0 ] && [ -n "${TARGET_REPO}" ]; then
+  human_signal_drain "${TARGET_REPO}" >/dev/null 2>&1 \
+    || log_warn "runner: human_signal_drain returned non-zero"
+fi
 
 if [ ! -f "${PROMPT_FILE}" ]; then
   log_error "runner: prompt file missing: ${PROMPT_FILE}"
   exit 1
 fi
 
-# The concrete GitHub queue adapter is intentionally small at this stage:
-# it verifies the role wiring and creates a manifest scaffold for the next
-# adapter step. No Agent is invoked without a real ready object and revision pin.
-TARGET_OBJECT_KIND="${LLM_TEAM_RUN_OBJECT_KIND:-system}"
-TARGET_OBJECT_ID="${LLM_TEAM_RUN_OBJECT_ID:-dry-run}"
-TARGET_REVISION_PIN="${LLM_TEAM_RUN_REVISION_PIN:-local}"
+# ============================================================================
+# Helpers
+# ============================================================================
 
-MANIFEST_FILE="$(context_manifest_create "${TARGET}" "${OPERATION}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}")"
-context_manifest_add_entry "${MANIFEST_FILE}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" "metadata" "${TARGET_REVISION_PIN}" true "runner scaffold target"
-context_manifest_validate "${MANIFEST_FILE}"
+# Resolve revision_pin for a picked object via port.
+_runner_pin_for() {
+  local repo="$1" obj_kind="$2" obj_id="$3"
+  local kind
+  case "${obj_kind}" in
+    milestone)                    kind=milestone ;;
+    issue|feature_request_issue)  kind=issue ;;
+    pr)                           kind=pr ;;
+    *)                            kind="${obj_kind}" ;;
+  esac
+  it_revision_pin_get "${repo}" "${kind}" "${obj_id}" 2>/dev/null \
+    || printf 'unknown'
+}
 
+# Apply READY → IN_PROGRESS claim transition based on role.
+_runner_claim_transition() {
+  local role="$1" repo="$2" obj_kind="$3" obj_id="$4"
+  case "${role}" in
+    Planner)    it_milestone_set_state "${repo}" "${obj_id}" DECOMPOSE_IN_PROGRESS DECOMPOSE_READY ;;
+    Coder)      it_issue_set_state     "${repo}" "${obj_id}" TASK_IN_PROGRESS TASK_READY ;;
+    Reviewer)   it_issue_set_state     "${repo}" "${obj_id}" TASK_REVIEW_IN_PROGRESS TASK_REVIEW_READY ;;
+    Integrator) it_milestone_set_state "${repo}" "${obj_id}" REFACTOR_IN_PROGRESS REFACTOR_READY ;;
+    QA)         it_milestone_set_state "${repo}" "${obj_id}" VALIDATE_IN_PROGRESS VALIDATE_READY ;;
+    PO|PM)      return 0 ;;
+  esac
+}
+
+# Reverse of _runner_claim_transition (used on invalid/stale envelope).
+_runner_claim_rollback() {
+  local role="$1" repo="$2" obj_kind="$3" obj_id="$4"
+  case "${role}" in
+    Planner)    it_milestone_set_state "${repo}" "${obj_id}" DECOMPOSE_READY DECOMPOSE_IN_PROGRESS ;;
+    Coder)      it_issue_set_state     "${repo}" "${obj_id}" TASK_READY TASK_IN_PROGRESS ;;
+    Reviewer)   it_issue_set_state     "${repo}" "${obj_id}" TASK_REVIEW_READY TASK_REVIEW_IN_PROGRESS ;;
+    Integrator) it_milestone_set_state "${repo}" "${obj_id}" REFACTOR_READY REFACTOR_IN_PROGRESS ;;
+    QA)         it_milestone_set_state "${repo}" "${obj_id}" VALIDATE_READY VALIDATE_IN_PROGRESS ;;
+    PO|PM)      return 0 ;;
+  esac
+}
+
+# Map role → from_state of the role's input (for ledger annotation).
+_runner_input_state_for() {
+  local role="$1"
+  case "${role}" in
+    PO)         printf 'PO_DRAFT' ;;
+    PM)         printf 'PM_DRAFT' ;;
+    Planner)    printf 'DECOMPOSE_IN_PROGRESS' ;;
+    Coder)      printf 'TASK_IN_PROGRESS' ;;
+    Reviewer)   printf 'TASK_REVIEW_IN_PROGRESS' ;;
+    Integrator) printf 'REFACTOR_IN_PROGRESS' ;;
+    QA)         printf 'VALIDATE_IN_PROGRESS' ;;
+    *)          printf 'unknown' ;;
+  esac
+}
+
+# Write a non-applied RGC-LEDGER entry (claim_failed / invalid / stale / error).
+_runner_ledger_write() {
+  local target="$1" obj_kind="$2" obj_id="$3" from_state="$4" to_state="$5"
+  local operation="$6" idempotency_key="$7" manifest_id="$8" result="$9"
+  local tmp
+  tmp="$(mktemp -t runner-ledger.XXXXXX)" || return 1
+  jq -n \
+    --arg transition_id "runner-${result}-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}" \
+    --arg object_kind "${obj_kind}" \
+    --arg object_id "${obj_id}" \
+    --arg from_state "${from_state}" \
+    --arg to_state "${to_state}" \
+    --arg operation "${operation}" \
+    --arg caller_id "${WORKER_ID}" \
+    --arg idempotency_key "${idempotency_key:-runner-${result}-${obj_id}-$(date -u +%s%N 2>/dev/null || date -u +%s)-$$}" \
+    --arg manifest_id "${manifest_id:-}" \
+    --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg result "${result}" \
+    '{
+      transition_id: $transition_id,
+      object_kind: $object_kind,
+      object_id: $object_id,
+      from_state: $from_state,
+      to_state: $to_state,
+      operation: $operation,
+      caller_id: $caller_id,
+      idempotency_key: $idempotency_key,
+      manifest_id: $manifest_id,
+      timestamp: $timestamp,
+      result: $result,
+      duplicate: false
+    }' >"${tmp}" || { rm -f "${tmp}"; return 1; }
+  transition_ledger_write "${target}" "${tmp}" || { rm -f "${tmp}"; return 1; }
+  rm -f "${tmp}"
+}
+
+# ============================================================================
+# PO 진입점: feature-request → milestone(PO_DRAFT)
+# ============================================================================
+
+# Dry-run shortcut: scaffold a manifest from env-override defaults without
+# touching the issue tracker (smoke test compatibility — no live calls).
 if [ "${DRY_RUN}" -eq 1 ]; then
+  TARGET_OBJECT_KIND="${LLM_TEAM_RUN_OBJECT_KIND:-system}"
+  TARGET_OBJECT_ID="${LLM_TEAM_RUN_OBJECT_ID:-dry-run}"
+  TARGET_REVISION_PIN="${LLM_TEAM_RUN_REVISION_PIN:-local}"
+  MANIFEST_FILE="$(context_manifest_create "${TARGET}" "${OPERATION}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}")"
+  context_manifest_add_entry "${MANIFEST_FILE}" \
+    "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" "metadata" \
+    "${TARGET_REVISION_PIN}" true "runner scaffold (dry-run)"
+  context_manifest_validate "${MANIFEST_FILE}"
   log_info "runner: dry-run manifest=${MANIFEST_FILE}"
   log_info "runner: prompt=${PROMPT_FILE}"
   exit 0
 fi
 
-log_info "runner: no ready-object adapter is enabled yet; scaffold completed without Agent invocation"
+if [ "${ROLE}" = "PO" ]; then
+  feature_request_promote "${TARGET_REPO}" >/dev/null 2>&1 || true
+fi
+
+# ============================================================================
+# Ready object pickup
+# ============================================================================
+
+PICK="$(ready_object_pick "${ROLE}" "${TARGET_REPO}" 2>/dev/null || true)"
+if [ -z "${PICK}" ]; then
+  log_info "runner: no ready object for role=${ROLE}"
+  exit 0
+fi
+TARGET_OBJECT_KIND="$(printf '%s' "${PICK}" | awk -F'\t' '{print $1}')"
+TARGET_OBJECT_ID="$(printf '%s' "${PICK}" | awk -F'\t' '{print $2}')"
+TARGET_REVISION_PIN="$(_runner_pin_for "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}")"
+
+PINS_JSON="$(jq -nc \
+  --arg kind "${TARGET_OBJECT_KIND}" \
+  --arg id "${TARGET_OBJECT_ID}" \
+  --arg pin "${TARGET_REVISION_PIN}" \
+  '[{object_kind: $kind, object_id: $id, revision_pin: $pin}]')"
+
+# ============================================================================
+# Dry-run path: build manifest scaffold and exit
+# ============================================================================
+
+if [ "${DRY_RUN}" -eq 1 ]; then
+  MANIFEST_FILE="$(context_manifest_create "${TARGET}" "${OPERATION}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}")"
+  context_manifest_add_entry "${MANIFEST_FILE}" \
+    "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" "metadata" \
+    "${TARGET_REVISION_PIN}" true "runner pickup (dry-run)"
+  context_manifest_validate "${MANIFEST_FILE}"
+  log_info "runner: dry-run manifest=${MANIFEST_FILE}"
+  log_info "runner: prompt=${PROMPT_FILE}"
+  log_info "runner: dry-run pick ${TARGET_OBJECT_KIND}/${TARGET_OBJECT_ID}"
+  exit 0
+fi
+
+# ============================================================================
+# Lease claim (single-source: lib/lease.sh)
+# ============================================================================
+
+LEASE_ID=""
+if ! LEASE_ID="$(lease_claim "${TARGET}" "${TARGET_OBJECT_ID}" "${OPERATION}" "${WORKER_ID}" "${LEASE_TTL}" "${PINS_JSON}" 2>/dev/null)"; then
+  log_info "runner: lease busy for ${TARGET_OBJECT_KIND}/${TARGET_OBJECT_ID}"
+  _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
+    "(busy)" "(busy)" "${OPERATION}" "" "" "claim_failed" || true
+  exit 0
+fi
+
+# Trap: lease release on any exit (success or failure).
+_runner_release_lease() {
+  if [ -n "${LEASE_ID:-}" ]; then
+    lease_release "${TARGET}" "${TARGET_OBJECT_ID}" "${LEASE_ID}" 2>/dev/null || true
+    LEASE_ID=""
+  fi
+}
+trap _runner_release_lease EXIT
+
+# ============================================================================
+# Claim transition (READY → IN_PROGRESS)
+# ============================================================================
+
+if ! _runner_claim_transition "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null; then
+  log_error "runner: claim_transition failed for ${ROLE} ${TARGET_OBJECT_ID}"
+  _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
+    "(claim_failed)" "(claim_failed)" "${OPERATION}" "" "" "claim_failed" || true
+  exit 1
+fi
+
+# Re-capture revision_pin after claim_transition: the *_IN_PROGRESS state is
+# what the agent sees as input, so manifest entries and revalidate compare
+# against the post-transition pin (otherwise revalidate sees a self-stale pin).
+TARGET_REVISION_PIN="$(_runner_pin_for "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}")"
+
+# ============================================================================
+# Manifest build (primary entry)
+# ============================================================================
+
+MANIFEST_FILE="$(context_manifest_create "${TARGET}" "${OPERATION}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}")"
+context_manifest_add_entry "${MANIFEST_FILE}" \
+  "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" "metadata" \
+  "${TARGET_REVISION_PIN}" true "runner pickup"
+context_manifest_validate "${MANIFEST_FILE}" || {
+  log_error "runner: manifest validate failed"
+  _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+  _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
+    "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
+    "${OPERATION}" "" "" "error" || true
+  exit 1
+}
+
+# ============================================================================
+# Workspace pre-setup (Coder needs ws before caller_apply_output → ws_apply_patch)
+# ============================================================================
+
+case "${ROLE}" in
+  Coder)
+    ws_ensure_clone "${TARGET}" >/dev/null 2>&1 || log_warn "runner: ws_ensure_clone failed (Coder)"
+    ws_ensure "task-${TARGET_OBJECT_ID}" >/dev/null 2>&1 \
+      || log_warn "runner: ws_ensure failed for task-${TARGET_OBJECT_ID} (Coder)"
+    ;;
+esac
+
+# ============================================================================
+# Verification pre-action (Reviewer/Integrator/QA)
+# ============================================================================
+
+case "${ROLE}" in
+  Reviewer|Integrator|QA)
+    ws_ensure_clone "${TARGET}" >/dev/null 2>&1 || log_warn "runner: ws_ensure_clone failed"
+    WS_PATH=""
+    WS_PATH="$(ws_ensure "task-${TARGET_OBJECT_ID}" 2>/dev/null || true)"
+    if [ -n "${WS_PATH}" ] && [ -d "${WS_PATH}" ]; then
+      VCMDS="${TARGET_VERIFICATION_COMMANDS_JSON:-["true"]}"
+      V_RUN_PATH=""
+      if V_RUN_PATH="$(verification_run_for "${TARGET}" "${TARGET_OBJECT_ID}" "${TARGET_REVISION_PIN}" "${WS_PATH}" "${VCMDS}" 2>/dev/null)"; then
+        verification_attach_to_manifest "${MANIFEST_FILE}" "${V_RUN_PATH}" \
+          || log_warn "runner: verification_attach_to_manifest failed"
+      else
+        # FAIL on verification still attaches the run envelope for agent visibility.
+        if [ -n "${V_RUN_PATH}" ] && [ -f "${V_RUN_PATH}" ]; then
+          verification_attach_to_manifest "${MANIFEST_FILE}" "${V_RUN_PATH}" \
+            || log_warn "runner: verification_attach_to_manifest failed (FAIL run)"
+        fi
+      fi
+    else
+      log_warn "runner: verification skipped (no workspace for task-${TARGET_OBJECT_ID})"
+    fi
+    ;;
+esac
+
+# ============================================================================
+# Agent invocation
+# ============================================================================
+
+PROMPT_TEXT="$(agent_prompt_assemble "${ROLE}" "${MANIFEST_FILE}")" || {
+  log_error "runner: agent_prompt_assemble failed"
+  _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+  _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
+    "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
+    "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "error" || true
+  exit 1
+}
+
+LLM_OUT=""
+if ! LLM_OUT="$(lr_invoke "${PROMPT_TEXT}" 2>/dev/null)"; then
+  log_error "runner: lr_invoke failed"
+  _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+  _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
+    "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
+    "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "error" || true
+  exit 1
+fi
+
+ENVELOPE_JSON=""
+if ! ENVELOPE_JSON="$(agent_output_parse "${LLM_OUT}" 2>/dev/null)"; then
+  log_error "runner: agent_output_parse failed"
+  _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+  _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
+    "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
+    "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "invalid" || true
+  exit 1
+fi
+
+ENVELOPE_FILE="$(mktemp -t runner-envelope.XXXXXX)"
+printf '%s' "${ENVELOPE_JSON}" >"${ENVELOPE_FILE}"
+
+_runner_cleanup_envelope() {
+  rm -f "${ENVELOPE_FILE:-}" 2>/dev/null || true
+}
+# Compose trap with lease release.
+_runner_full_cleanup() {
+  _runner_cleanup_envelope
+  _runner_release_lease
+}
+trap _runner_full_cleanup EXIT
+
+# ----- envelope validation (extended) -----
+if ! agent_output_validate_extended "${ENVELOPE_FILE}" "${ROLE}" 2>/dev/null; then
+  log_error "runner: envelope failed extended validation"
+  _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+  _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
+    "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
+    "${OPERATION}" \
+    "$(jq -r '.idempotency_key // empty' "${ENVELOPE_FILE}" 2>/dev/null)" \
+    "$(jq -r '.manifest_id // empty' "${ENVELOPE_FILE}" 2>/dev/null)" \
+    "invalid" || true
+  exit 1
+fi
+
+# ----- revision pin re-check -----
+if ! revision_pin_revalidate "${ENVELOPE_FILE}" "${TARGET_REPO}" 2>/dev/null; then
+  log_error "runner: envelope revision pins are stale"
+  _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+  _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
+    "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
+    "${OPERATION}" \
+    "$(jq -r '.idempotency_key // empty' "${ENVELOPE_FILE}")" \
+    "$(jq -r '.manifest_id // empty' "${ENVELOPE_FILE}")" \
+    "stale" || true
+  exit 1
+fi
+
+# ============================================================================
+# caller_apply_output: state transitions + CP transitions + ledger applied row
+# ============================================================================
+
+if ! caller_apply_output "${TARGET_REPO}" "${ROLE}" "${ENVELOPE_FILE}" "${MANIFEST_FILE}"; then
+  log_error "runner: caller_apply_output failed"
+  _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+  _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
+    "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
+    "${OPERATION}" \
+    "$(jq -r '.idempotency_key // empty' "${ENVELOPE_FILE}")" \
+    "$(jq -r '.manifest_id // empty' "${ENVELOPE_FILE}")" \
+    "error" || true
+  exit 1
+fi
+
+# Success: trap releases lease and removes envelope file.
+log_info "runner: applied envelope for ${ROLE} ${TARGET_OBJECT_KIND}/${TARGET_OBJECT_ID}"
 exit 0

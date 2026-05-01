@@ -39,6 +39,14 @@ log_init() {
     return 1
   }
   local log_file="${log_dir}/${agent}-${ts}.log"
+  if [ "${LLM_TEAM_LOG_TEE:-1}" = "0" ]; then
+    : >"${log_file}" || {
+      log_error "log_init: failed to create ${log_file}"
+      return 1
+    }
+    log_info "log_init agent=${agent} target=${target} log=${log_file} tee=disabled"
+    return 0
+  fi
   # Tee both stdout and stderr to the log while preserving the originals.
   exec  > >(tee -a "${log_file}")
   exec 2> >(tee -a "${log_file}" >&2)

@@ -13,4 +13,9 @@ notifier:
   webhook_or_id: DISCORD_WEBHOOK_MYAPP
 dev_concurrency: 3
 stale_threshold_minutes: 60
+verification:
+  # Caller-side deterministic verification commands (RGC-VERIFICATION).
+  # Executed by application/verification_runner.sh inside the unit workspace
+  # before the agent prompt is assembled. Default ["true"] means PASS.
+  commands: ["true"]
 enabled: true

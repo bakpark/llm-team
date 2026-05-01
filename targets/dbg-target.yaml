@@ -1,0 +1,10 @@
+name: dbg-target
+github: { owner: test-owner, repo: dbg, default_branch: main }
+local: { clone_path: /tmp/dbg-ws }
+inputs_dir: inputs/dbg
+labels: { prefix: "" }
+notifier: { channel: none, webhook_or_id: "" }
+dev_concurrency: 1
+stale_threshold_minutes: 60
+verification: { commands: ["true"] }
+enabled: true

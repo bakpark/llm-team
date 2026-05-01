@@ -46,11 +46,14 @@ load_target() {
   TARGET_DEV_CONCURRENCY="$(yq -r '.dev_concurrency // 3' "${yaml_file}")"
   TARGET_STALE_THRESHOLD_MIN="$(yq -r '.stale_threshold_minutes // 60' "${yaml_file}")"
   TARGET_ENABLED="$(yq -r '.enabled // false' "${yaml_file}")"
+  # RGC-VERIFICATION commands as compact JSON array. Default `["true"]` (PASS).
+  TARGET_VERIFICATION_COMMANDS_JSON="$(yq -o=json '.verification.commands // ["true"]' "${yaml_file}" \
+                                          | jq -c '.')"
 
   export TARGET_NAME TARGET_GH_OWNER TARGET_GH_REPO TARGET_DEFAULT_BRANCH \
     TARGET_CLONE_PATH TARGET_INPUTS_DIR TARGET_LABEL_PREFIX \
     TARGET_NOTIFIER_CHANNEL TARGET_NOTIFIER_REF TARGET_DEV_CONCURRENCY \
-    TARGET_STALE_THRESHOLD_MIN TARGET_ENABLED
+    TARGET_STALE_THRESHOLD_MIN TARGET_ENABLED TARGET_VERIFICATION_COMMANDS_JSON
 }
 
 # resolve_secret <ref>

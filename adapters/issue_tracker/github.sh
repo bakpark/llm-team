@@ -339,6 +339,20 @@ it_issue_set_blocked_by() {
   _github_issue_set_body "${repo}" "${num}" "${body}"
 }
 
+# it_issue_get_blocked_by <repo> <num>  → echo blocker_nums (one per line)
+it_issue_get_blocked_by() {
+  local repo="$1" num="$2"
+  [ -n "${repo}" ] && [ -n "${num}" ] || {
+    log_error "it_issue_get_blocked_by: repo and num are required"
+    return 1
+  }
+  local body
+  body="$(_github_issue_get_body "${repo}" "${num}")" || return 1
+  printf '%s\n' "${body}" \
+    | grep -oE '<!-- llm-team:blocked-by:#[0-9]+ -->' \
+    | sed -E 's/<!-- llm-team:blocked-by:#([0-9]+) -->/\1/'
+}
+
 # it_issue_close_with_note <repo> <num> <note>
 it_issue_close_with_note() {
   local repo="$1" num="$2" note="$3"
@@ -347,6 +361,26 @@ it_issue_close_with_note() {
       || log_warn "it_issue_close_with_note: comment failed on #${num}"
   fi
   gh_with_retry gh issue close "${num}" --repo "${repo}" >/dev/null
+}
+
+# it_issue_add_label <repo> <num> <label>  (idempotent — label may already exist)
+it_issue_add_label() {
+  local repo="$1" num="$2" label="$3"
+  [ -n "${repo}" ] && [ -n "${num}" ] && [ -n "${label}" ] || {
+    log_error "it_issue_add_label: repo, num, label are required"
+    return 1
+  }
+  gh_with_retry gh issue edit "${num}" --repo "${repo}" --add-label "${label}" >/dev/null
+}
+
+# it_issue_remove_label <repo> <num> <label>  (idempotent — absent label is OK)
+it_issue_remove_label() {
+  local repo="$1" num="$2" label="$3"
+  [ -n "${repo}" ] && [ -n "${num}" ] && [ -n "${label}" ] || {
+    log_error "it_issue_remove_label: repo, num, label are required"
+    return 1
+  }
+  gh_with_retry gh issue edit "${num}" --repo "${repo}" --remove-label "${label}" >/dev/null 2>&1 || return 0
 }
 
 # it_issue_clear_state_labels <repo> <num> [prefix]
@@ -513,6 +547,52 @@ it_pr_request_changes() {
   it_pr_set_cp_state "${repo}" "${num}" CP_REQUEST_CHANGES
 }
 
+# it_pr_close <repo> <num>
+# Close without merging. Idempotent — already-closed PRs return 0.
+it_pr_close() {
+  local repo="$1" num="$2"
+  [ -n "${repo}" ] && [ -n "${num}" ] || {
+    log_error "it_pr_close: repo and num are required"
+    return 1
+  }
+  local state
+  state="$(gh_with_retry gh api "repos/${repo}/pulls/${num}" --jq '.state // empty' 2>/dev/null || true)"
+  if [ "${state}" = "closed" ]; then
+    return 0
+  fi
+  gh_with_retry gh api -X PATCH "repos/${repo}/pulls/${num}" -f state=closed >/dev/null
+}
+
+# it_pr_get_head_sha <repo> <num>  → echo head sha
+it_pr_get_head_sha() {
+  local repo="$1" num="$2"
+  [ -n "${repo}" ] && [ -n "${num}" ] || {
+    log_error "it_pr_get_head_sha: repo and num are required"
+    return 1
+  }
+  gh_with_retry gh api "repos/${repo}/pulls/${num}" --jq '.head.sha // empty'
+}
+
+# it_pr_get_base_branch <repo> <num>  → echo base branch ref (e.g. integration)
+it_pr_get_base_branch() {
+  local repo="$1" num="$2"
+  [ -n "${repo}" ] && [ -n "${num}" ] || {
+    log_error "it_pr_get_base_branch: repo and num are required"
+    return 1
+  }
+  gh_with_retry gh api "repos/${repo}/pulls/${num}" --jq '.base.ref // empty'
+}
+
+# it_pr_get_base_sha <repo> <num>  → echo base sha (PR 가 분기한 시점의 base SHA)
+it_pr_get_base_sha() {
+  local repo="$1" num="$2"
+  [ -n "${repo}" ] && [ -n "${num}" ] || {
+    log_error "it_pr_get_base_sha: repo and num are required"
+    return 1
+  }
+  gh_with_retry gh api "repos/${repo}/pulls/${num}" --jq '.base.sha // empty'
+}
+
 # ============================================================================
 # Port API: Release
 # ============================================================================
@@ -567,27 +647,49 @@ it_comment_post() {
 }
 
 # it_comment_collect_signals <repo> <kind> <num>
-# `<!-- llm-team:human-signal …-->` 안에 감싼 JSON 을 한 줄씩 stdout.
-# 멱등성·처리 여부 추적은 caller 가 담당 (signal_id 기준).
+# 한 줄당 JSON: {actor, comment_id, body, posted_at}
+#   • body  : `<!-- llm-team:human-signal {…} -->` 안의 JSON envelope (RGC-SIGNALS).
+#   • actor : GitHub user.login (milestone 의 경우 milestone creator.login).
+#   • comment_id : GitHub comment id (milestone 의 경우 milestone num).
+#   • posted_at  : created_at (milestone 의 경우 milestone updated_at).
+# 멱등성·처리 여부 추적은 caller 가 ledger 를 통해 담당 (signal_id / comment_id 기준).
 it_comment_collect_signals() {
   local repo="$1" kind="$2" num="$3"
   [ -n "${repo}" ] && [ -n "${kind}" ] && [ -n "${num}" ] || {
     log_error "it_comment_collect_signals: repo, kind, num are required"
     return 1
   }
-  local body
   case "${kind}" in
     issue|pr)
-      body="$(gh_with_retry gh api "repos/${repo}/issues/${num}/comments" \
-                --jq '.[].body')" || return 1
+      gh_with_retry gh api "repos/${repo}/issues/${num}/comments" --jq '
+        .[]
+        | select(.body | test("<!-- llm-team:human-signal[[:space:]]+\\{.*\\}[[:space:]]*-->"))
+        | {
+            actor:      (.user.login   // ""),
+            comment_id: (.id           // null),
+            body:       ((.body | capture("<!-- llm-team:human-signal[[:space:]]+(?<json>\\{.*\\})[[:space:]]*-->") | .json) // ""),
+            posted_at:  (.created_at   // "")
+          }
+        | tostring
+      '
       ;;
     milestone)
-      body="$(_github_milestone_get_description "${repo}" "${num}")" || return 1
+      gh_with_retry gh api "repos/${repo}/milestones/${num}" --jq '
+        . as $m
+        | (.description // "")
+        | [scan("<!-- llm-team:human-signal[[:space:]]+(\\{[^}]*\\})[[:space:]]*-->")]
+        | .[]
+        | {
+            actor:      ($m.creator.login // ""),
+            comment_id: ($m.number        // null),
+            body:       (.[0]             // ""),
+            posted_at:  ($m.updated_at    // "")
+          }
+        | tostring
+      '
       ;;
     *) log_error "it_comment_collect_signals: invalid kind '${kind}'"; return 1 ;;
   esac
-  printf '%s\n' "${body}" \
-    | sed -nE 's/.*<!-- llm-team:human-signal[[:space:]]+(\{.*\})[[:space:]]*-->.*/\1/p'
 }
 
 # it_comment_has_marker <repo> <kind> <num> <marker_kind>

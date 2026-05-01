@@ -41,6 +41,34 @@ ALL_CP_LABELS=(
 
 ALL_ISSUE_LABELS=("${ALL_TASK_LABELS[@]}" "${ALL_CP_LABELS[@]}")
 
+# Operational labels (feature-request intake / human-gate queues / paused).
+# These are *not* state encodings — they mark intake stage and operator gates.
+LABEL_FEATURE_REQUEST="feature-request"
+LABEL_FEATURE_REQUEST_ACCEPTED="feature-request:accepted"
+LABEL_FEATURE_REQUEST_REJECTED="feature-request:rejected"
+LABEL_HUMAN_GATE_PO="human-gate:po"
+LABEL_HUMAN_GATE_PM="human-gate:pm"
+LABEL_HUMAN_GATE_CP="human-gate:cp"
+LABEL_PAUSED="paused"
+
+ALL_FEATURE_REQUEST_LABELS=(
+  "${LABEL_FEATURE_REQUEST}"
+  "${LABEL_FEATURE_REQUEST_ACCEPTED}"
+  "${LABEL_FEATURE_REQUEST_REJECTED}"
+)
+
+ALL_HUMAN_GATE_LABELS=(
+  "${LABEL_HUMAN_GATE_PO}"
+  "${LABEL_HUMAN_GATE_PM}"
+  "${LABEL_HUMAN_GATE_CP}"
+)
+
+ALL_OPERATIONAL_LABELS=(
+  "${ALL_FEATURE_REQUEST_LABELS[@]}"
+  "${ALL_HUMAN_GATE_LABELS[@]}"
+  "${LABEL_PAUSED}"
+)
+
 # Legacy aliases are read-only migration aids. New code must not use them as
 # queue labels.
 LEGACY_LABELS=(

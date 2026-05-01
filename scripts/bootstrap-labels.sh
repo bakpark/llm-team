@@ -44,12 +44,23 @@ color_for_label() {
     task:rejected) printf 'b60205' ;;
     task:escalated) printf 'd73a4a' ;;
     cp:*) printf '6f42c1' ;;
+    feature-request) printf 'fbca04' ;;
+    feature-request:accepted) printf '0e8a16' ;;
+    feature-request:rejected) printf 'b60205' ;;
+    human-gate:*) printf '8957e5' ;;
+    paused) printf 'cccccc' ;;
     *) printf 'cccccc' ;;
   esac
 }
 
+ALL_BOOTSTRAP_LABELS=(
+  "${ALL_TASK_LABELS[@]}"
+  "${ALL_CP_LABELS[@]}"
+  "${ALL_OPERATIONAL_LABELS[@]}"
+)
+
 count=0
-for raw_label in "${ALL_ISSUE_LABELS[@]}"; do
+for raw_label in "${ALL_BOOTSTRAP_LABELS[@]}"; do
   label="$(label_with_prefix "${PREFIX}" "${raw_label}")"
   color="$(color_for_label "${raw_label}")"
   desc="llm-team contract adapter label: ${raw_label}"

@@ -10,11 +10,17 @@ export LLM_TEAM_ROOT
 # shellcheck source=../lib/common.sh
 . "${LLM_TEAM_ROOT}/lib/common.sh"
 
+# Daemon supervisors already redirect scheduler stdout/stderr to a daemon log.
+# Avoid nested process-substitution tee from runner log_init in restricted shells.
+export LLM_TEAM_LOG_TEE="${LLM_TEAM_LOG_TEE:-0}"
+
 usage() {
   cat <<EOF >&2
 Usage: $(basename "$0") <role> [interval_seconds]
 
 role must be one of: po | pm | planner | coder | reviewer | integrator | qa
+
+Set LLM_TEAM_DAEMON_TARGET=<target> to restrict the loop to one target.
 EOF
   exit 64
 }
@@ -27,7 +33,9 @@ case "${INTERVAL}" in
 esac
 
 LOCK_PARENT="${LLM_TEAM_ROOT}/workdir"
-LOCKDIR="${LOCK_PARENT}/daemon-${ROLE}.lockd"
+LOCK_SCOPE="${LLM_TEAM_DAEMON_TARGET:-all}"
+LOCK_SCOPE_SAFE="$(printf '%s' "${LOCK_SCOPE}" | tr '/ :' '___')"
+LOCKDIR="${LOCK_PARENT}/daemon-${ROLE}-${LOCK_SCOPE_SAFE}.lockd"
 mkdir -p "${LOCK_PARENT}"
 if ! mkdir "${LOCKDIR}" 2>/dev/null; then
   log_error "daemon: ${ROLE} runner already has an active daemon lock"
@@ -45,9 +53,13 @@ if [ "${LLM_TEAM_DAEMON_ONCE:-0}" = "1" ]; then
   exit 0
 fi
 
-log_info "daemon: started role=${ROLE} interval=${INTERVAL}s"
+log_info "daemon: started role=${ROLE} target=${LOCK_SCOPE} interval=${INTERVAL}s"
 while [ "${SHUTDOWN}" -eq 0 ]; do
-  targets="$(list_active_targets 2>/dev/null || true)"
+  if [ -n "${LLM_TEAM_DAEMON_TARGET:-}" ]; then
+    targets="${LLM_TEAM_DAEMON_TARGET}"
+  else
+    targets="$(list_active_targets 2>/dev/null || true)"
+  fi
   while IFS= read -r target; do
     [ -n "${target}" ] || continue
     [ "${SHUTDOWN}" -eq 0 ] || break

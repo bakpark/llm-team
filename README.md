@@ -112,7 +112,24 @@ Architecture 문서는 adapter다. 상태명, output envelope, human signal sche
 
 ## Runtime Scaffold
 
-활성 런타임 진입점은 [`scheduler/runner.sh`](scheduler/runner.sh)다.
+권장 런타임 진입점은 [`bin/llm-team`](bin/llm-team) CLI다. CLI는 기존 runner,
+daemon, label bootstrap 스크립트를 감싸는 얇은 control plane이다.
+
+```bash
+./scripts/install-cli.sh
+llm-team doctor myapp
+llm-team target add myapp --repo owner/repo
+llm-team target add --url https://github.com/owner/repo.git
+
+./bin/llm-team doctor myapp
+./bin/llm-team target list
+./bin/llm-team labels bootstrap myapp --dry-run
+./bin/llm-team run po myapp --dry-run
+./bin/llm-team daemon status myapp
+./bin/llm-team status myapp
+```
+
+하위 실행 엔진은 [`scheduler/runner.sh`](scheduler/runner.sh)다.
 
 ```bash
 ./scheduler/runner.sh po myapp --dry-run

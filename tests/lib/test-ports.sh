@@ -47,16 +47,20 @@ registry_verify_port persistent_store  || fail "persistent_store port verificati
 # ----------------------------------------------------------------------------
 # (3) 활성 adapter 추적 변수
 # ----------------------------------------------------------------------------
-[ "${LLM_TEAM_ACTIVE_ISSUE_TRACKER_ADAPTER:-}" = "github" ] \
-  || fail "active issue_tracker adapter is not 'github' (got: '${LLM_TEAM_ACTIVE_ISSUE_TRACKER_ADAPTER:-}')"
+expected_it_adapter="${LLM_TEAM_ADAPTER_ISSUE_TRACKER:-github}"
+[ "${LLM_TEAM_ACTIVE_ISSUE_TRACKER_ADAPTER:-}" = "${expected_it_adapter}" ] \
+  || fail "active issue_tracker adapter is not '${expected_it_adapter}' (got: '${LLM_TEAM_ACTIVE_ISSUE_TRACKER_ADAPTER:-}')"
 [ "${LLM_TEAM_ACTIVE_NOTIFIER_ADAPTER:-}" = "none" ] \
   || fail "active notifier adapter is not 'none' (got: '${LLM_TEAM_ACTIVE_NOTIFIER_ADAPTER:-}')"
-[ "${LLM_TEAM_ACTIVE_LLM_RUNNER_ADAPTER:-}" = "claude_code" ] \
-  || fail "active llm_runner adapter is not 'claude_code' (got: '${LLM_TEAM_ACTIVE_LLM_RUNNER_ADAPTER:-}')"
-[ "${LLM_TEAM_ACTIVE_WORKSPACE_ADAPTER:-}" = "git_worktree" ] \
-  || fail "active workspace adapter is not 'git_worktree' (got: '${LLM_TEAM_ACTIVE_WORKSPACE_ADAPTER:-}')"
-[ "${LLM_TEAM_ACTIVE_PERSISTENT_STORE_ADAPTER:-}" = "filesystem" ] \
-  || fail "active persistent_store adapter is not 'filesystem' (got: '${LLM_TEAM_ACTIVE_PERSISTENT_STORE_ADAPTER:-}')"
+expected_lr_adapter="${LLM_TEAM_ADAPTER_LLM_RUNNER:-claude_code}"
+[ "${LLM_TEAM_ACTIVE_LLM_RUNNER_ADAPTER:-}" = "${expected_lr_adapter}" ] \
+  || fail "active llm_runner adapter is not '${expected_lr_adapter}' (got: '${LLM_TEAM_ACTIVE_LLM_RUNNER_ADAPTER:-}')"
+expected_ws_adapter="${LLM_TEAM_ADAPTER_WORKSPACE:-git_worktree}"
+[ "${LLM_TEAM_ACTIVE_WORKSPACE_ADAPTER:-}" = "${expected_ws_adapter}" ] \
+  || fail "active workspace adapter is not '${expected_ws_adapter}' (got: '${LLM_TEAM_ACTIVE_WORKSPACE_ADAPTER:-}')"
+expected_ps_adapter="${LLM_TEAM_ADAPTER_PERSISTENT_STORE:-filesystem}"
+[ "${LLM_TEAM_ACTIVE_PERSISTENT_STORE_ADAPTER:-}" = "${expected_ps_adapter}" ] \
+  || fail "active persistent_store adapter is not '${expected_ps_adapter}' (got: '${LLM_TEAM_ACTIVE_PERSISTENT_STORE_ADAPTER:-}')"
 
 # ----------------------------------------------------------------------------
 # (4) Adapter swap: notifier 를 discord 로 다시 바인딩 가능
@@ -100,9 +104,13 @@ for fn in \
     it_milestone_create it_issue_create it_pr_create it_release_create \
     it_comment_post it_comment_collect_signals it_revision_pin_get \
     it_milestone_set_state it_issue_set_state it_pr_set_cp_state \
+    it_pr_close it_pr_get_head_sha it_pr_get_base_branch it_pr_get_base_sha \
+    it_issue_add_label it_issue_remove_label \
+    it_issue_get_blocked_by \
     nt_send \
     lr_invoke \
     ws_ensure_clone ws_ensure ws_apply_patch ws_publish_branch ws_destroy ws_list ws_path_of \
+    ws_get_branch_head ws_get_branch_base \
     ps_put ps_get ps_delete ps_list_ids ps_exists ps_append_log ps_read_log \
     ps_lock_acquire ps_lock_release ps_namespace_init; do
   declare -F "${fn}" >/dev/null \
@@ -154,9 +162,14 @@ if ps_append_log "${ns}/log" 'still-not-json' 2>/dev/null; then
   fail "ps_append_log should reject invalid JSON"
 fi
 
-# Cleanup test namespace.
+# Cleanup test namespace (filesystem adapter writes under workdir; in_memory
+# adapter writes under LLM_TEAM_INMEM_PS_DIR).
 rm -rf "${LLM_TEAM_ROOT}/workdir/${ns}" "${LLM_TEAM_ROOT}/workdir/${ns}.jsonl" \
        "${LLM_TEAM_ROOT}/workdir/${ns}/log.jsonl" 2>/dev/null || true
+if [ -n "${LLM_TEAM_INMEM_PS_DIR:-}" ]; then
+  rm -rf "${LLM_TEAM_INMEM_PS_DIR}/${ns}" "${LLM_TEAM_INMEM_PS_DIR}/${ns}.jsonl" \
+         "${LLM_TEAM_INMEM_PS_DIR}/${ns}/log.jsonl" 2>/dev/null || true
+fi
 
 if [ "${failures}" -gt 0 ]; then
   echo "FAIL: ${failures} port check(s) failed" >&2

@@ -21,6 +21,8 @@ PORT_WORKSPACE_REQUIRED_FUNCTIONS=(
   ws_publish_branch   # unit_id branch_name
   ws_destroy          # unit_id
   ws_list             # target                            → echo unit_ids
+  ws_get_branch_head  # repo branch                       → echo sha
+  ws_get_branch_base  # repo branch                       → echo sha (분기 base; integration 기준)
 )
 
 PORT_WORKSPACE_INVARIANTS=(

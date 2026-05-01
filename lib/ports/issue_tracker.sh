@@ -36,11 +36,21 @@ PORT_ISSUE_TRACKER_REQUIRED_FUNCTIONS=(
   it_issue_get_state             # repo num                            → echo state | empty
   it_issue_link_to_milestone     # repo issue_num milestone_num
   it_issue_set_blocked_by        # repo num blocker_num...
+  it_issue_get_blocked_by        # repo num                            → echo blocker_nums (one per line)
   it_issue_close_with_note       # repo num note
   it_issue_list_in_state         # repo state                          → echo numbers (oldest first)
   it_issue_list_with_label       # repo label [--no-milestone]         → echo numbers
   it_issue_get_milestone         # repo num                            → echo milestone_number | empty
   it_issue_clear_state_labels    # repo num [prefix]                   (terminal cleanup)
+  # Responsibility boundary for label functions:
+  #   • State labels (`task:*`, ESCALATED) — managed by it_issue_set_state /
+  #     it_issue_clear_state_labels only. Do NOT call add/remove for these.
+  #   • Operational labels (feature-request*, human-gate:*, paused, and any
+  #     non-state queue marker) — managed by it_issue_add_label /
+  #     it_issue_remove_label. These are idempotent: add of an existing label
+  #     and remove of an absent label both return 0 with no side effect.
+  it_issue_add_label             # repo num label                      (idempotent add of operational label)
+  it_issue_remove_label          # repo num label                      (idempotent remove of operational label)
 
   # --- Pull Request ---
   it_pr_create                   # repo --head H --base B --title T --body B [--draft] → echo number
@@ -48,13 +58,21 @@ PORT_ISSUE_TRACKER_REQUIRED_FUNCTIONS=(
   it_pr_get_cp_state             # repo num                            → echo state | empty
   it_pr_merge                    # repo num --squash|--merge|--rebase  → echo merge_sha
   it_pr_request_changes          # repo num reason
+  it_pr_close                    # repo num                            (close without merge; idempotent)
+  it_pr_get_head_sha             # repo num                            → echo sha
+  it_pr_get_base_branch          # repo num                            → echo branch
+  it_pr_get_base_sha             # repo num                            → echo sha
 
   # --- Release ---
   it_release_create              # repo tag --target sha|branch --title T --notes N
 
   # --- Comments / markers / signals ---
   it_comment_post                # repo kind num body                  (kind ∈ issue|pr|milestone)
-  it_comment_collect_signals     # repo kind num                       → echo JSONL of unprocessed human-signals
+  it_comment_collect_signals     # repo kind num
+                                 # → 한 줄당 JSON: {actor, comment_id, body, posted_at}
+                                 #   body 안에 RGC-SIGNALS envelope 가 그대로 들어간다.
+                                 #   actor 는 GitHub user.login (milestone 의 경우 creator.login).
+                                 #   comment_id 는 GitHub comment id (milestone 의 경우 milestone num).
   it_comment_has_marker          # repo kind num marker_kind           (returns 0/1)
 
   # --- Revision pin ---
