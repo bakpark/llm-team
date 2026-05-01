@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  com.llm-team.po.plist — macOS launchd unit for the PO daemon.
+
+  Install:
+    sed "s|__LLM_TEAM_ROOT__|$(pwd)|g; s|__USER_HOME__|${HOME}|g" \
+      docs/superpowers/specs/launchd/com.llm-team.po.plist \
+      > ~/Library/LaunchAgents/com.llm-team.po.plist
+    launchctl load ~/Library/LaunchAgents/com.llm-team.po.plist
+
+  Notes:
+    - KeepAlive=true → daemon이 죽으면 자동 재시작
+    - ThrottleInterval=10 → 너무 잦은 재시작 방지 (10초 최소 간격)
+    - WorkingDirectory는 LLM_TEAM_ROOT (cwd 보장 — gh/git이 적절히 동작)
+    - PATH에 Homebrew bin path 추가 (cron PATH 한계 회피)
+    - HOME 명시 → gh/claude의 ~/.config 접근 보장
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.llm-team.po</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__LLM_TEAM_ROOT__/scheduler/daemon.sh</string>
+    <string>po</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__LLM_TEAM_ROOT__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>__USER_HOME__</string>
+    <key>LLM_TEAM_ROOT</key>
+    <string>__LLM_TEAM_ROOT__</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__LLM_TEAM_ROOT__/workdir/daemon-po.out</string>
+  <key>StandardErrorPath</key>
+  <string>__LLM_TEAM_ROOT__/workdir/daemon-po.err</string>
+</dict>
+</plist>
