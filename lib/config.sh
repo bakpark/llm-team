@@ -6,10 +6,8 @@
 #   resolve_secret <ref>     — print secret value from .env files; exit 1 if missing (fail-fast).
 #   list_active_targets      — print names of targets/*.yaml whose enabled is true.
 #
-# `TARGET_*` export names are a contract synchronized with planning.md §3.2.
-# The yaml key → variable mapping must remain stable; agent scripts read these
-# names directly. See sub-common-skeleton (targets/myapp.yaml) for the canonical
-# yaml shape.
+# `TARGET_*` export names are implementation adapter inputs. The yaml key to
+# variable mapping should stay stable across runner and helper code.
 
 # load_target <name>
 # Reads targets/<name>.yaml via `yq` and exports the following:

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# lib/notifier.sh — push-only Notifier (planning.md §6.3, state-machine.md §7).
+# lib/notifier.sh - push-only Notifier owned by Caller.
 #
 # Public API:
 #   notify_review_needed <target> <kind> <object_type> <object_num> <github_url> <summary>
-#     <kind>        ∈ milestone | scenario | dev-failure
+#     <kind>        arbitrary notification kind, e.g. po-gate or escalated
 #     <object_type> ∈ issue | milestone   (PR uses 'issue': issues and PRs share comment endpoint)
 #
 # Behaviour:
@@ -11,8 +11,8 @@
 #      already on the target object, return 0 without sending.
 #   2. Branch on TARGET_NOTIFIER_CHANNEL: discord | slack | none.
 #   3. On send success, append the notify marker so subsequent calls are no-ops.
-#   4. **Notifier failures NEVER abort the main agent flow**: log to stderr but
-#      always return 0. (Approval is sent through GitHub UI directly.)
+#   4. Notifier failures never abort the main flow. Blocking is represented by
+#      workflow state, not by waiting for a notification response.
 
 # notify_review_needed <target> <kind> <object_type> <object_num> <github_url> <summary>
 notify_review_needed() {

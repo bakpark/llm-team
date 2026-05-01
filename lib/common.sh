@@ -21,6 +21,10 @@ fi
 # Source order: leaf modules first, then those depending on them.
 # shellcheck source=lib/log.sh
 . "${LLM_TEAM_ROOT}/lib/log.sh"
+# shellcheck source=lib/roles.sh
+. "${LLM_TEAM_ROOT}/lib/roles.sh"
+# shellcheck source=lib/state.sh
+. "${LLM_TEAM_ROOT}/lib/state.sh"
 # shellcheck source=lib/labels.sh
 . "${LLM_TEAM_ROOT}/lib/labels.sh"
 # shellcheck source=lib/config.sh
@@ -29,6 +33,20 @@ fi
 . "${LLM_TEAM_ROOT}/lib/gh.sh"
 # shellcheck source=lib/markers.sh
 . "${LLM_TEAM_ROOT}/lib/markers.sh"
+# shellcheck source=lib/context.sh
+. "${LLM_TEAM_ROOT}/lib/context.sh"
+# shellcheck source=lib/output.sh
+. "${LLM_TEAM_ROOT}/lib/output.sh"
+# shellcheck source=lib/lease.sh
+. "${LLM_TEAM_ROOT}/lib/lease.sh"
+# shellcheck source=lib/ledger.sh
+. "${LLM_TEAM_ROOT}/lib/ledger.sh"
+# shellcheck source=lib/signals.sh
+. "${LLM_TEAM_ROOT}/lib/signals.sh"
+# shellcheck source=lib/verification.sh
+. "${LLM_TEAM_ROOT}/lib/verification.sh"
+# shellcheck source=lib/change_proposal.sh
+. "${LLM_TEAM_ROOT}/lib/change_proposal.sh"
 # shellcheck source=lib/notifier.sh
 . "${LLM_TEAM_ROOT}/lib/notifier.sh"
 # shellcheck source=lib/claude.sh

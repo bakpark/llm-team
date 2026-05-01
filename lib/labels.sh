@@ -1,54 +1,63 @@
 #!/usr/bin/env bash
-# lib/labels.sh — 12 label string constants and helpers.
+# lib/labels.sh - GitHub label names for the contract-state adapter.
 #
-# These constants MUST exactly match memory/state-machine.md §1. They are
-# treated as a stable contract by every agent (PO/PM/DEV/QA) and the
-# bootstrap-labels CLI. Changing any string here requires a synchronized
-# update of state-machine.md and a re-run of test-labels-consistency.sh.
-#
-# Public API:
-#   ALL_MILESTONE_LABELS — array of 5 milestone-state labels (in transition order).
-#   ALL_ISSUE_LABELS     — array of 7 issue-state labels (in transition order).
-#   label_with_prefix <prefix> <label> — apply optional yaml `labels.prefix`.
+# Labels are adapter encoding, not the authoritative state model. The
+# authoritative state names live in docs/contracts/state-and-operation-contract.md.
 
-# --- Milestone labels (5) ----------------------------------------------------
-LABEL_PO_IN_PROGRESS="po:in-progress"
-LABEL_PO_REVIEW="needs-human-review:milestone"
-LABEL_NEEDS_SCENARIOS="needs-scenarios"
-LABEL_PM_IN_PROGRESS="pm:in-progress"
-LABEL_PM_DONE="pm:done"
+# Task states are represented as Issue labels.
+LABEL_TASK_PENDING="task:pending"
+LABEL_TASK_READY="task:ready"
+LABEL_TASK_IN_PROGRESS="task:in-progress"
+LABEL_TASK_REVIEW_READY="task:review-ready"
+LABEL_TASK_REVIEW_IN_PROGRESS="task:review-in-progress"
+LABEL_TASK_INTEGRATED="task:integrated"
+LABEL_TASK_REJECTED="task:rejected"
+LABEL_TASK_ESCALATED="task:escalated"
 
-# --- Issue labels (7) --------------------------------------------------------
-LABEL_SCENARIO_REVIEW="needs-human-review:scenario"
-LABEL_NEEDS_DEV="needs-dev"
-LABEL_DEV_IN_PROGRESS="dev:in-progress"
-LABEL_NEEDS_QA="needs-qa"
-LABEL_QA_IN_PROGRESS="qa:in-progress"
-LABEL_QA_CHANGES_REQUESTED="qa:changes-requested"
-LABEL_DEV_FAILURE="needs-human-review:dev-failure"
-
-# Aggregate arrays (transition order).
-ALL_MILESTONE_LABELS=(
-  "${LABEL_PO_IN_PROGRESS}"
-  "${LABEL_PO_REVIEW}"
-  "${LABEL_NEEDS_SCENARIOS}"
-  "${LABEL_PM_IN_PROGRESS}"
-  "${LABEL_PM_DONE}"
+ALL_TASK_LABELS=(
+  "${LABEL_TASK_PENDING}"
+  "${LABEL_TASK_READY}"
+  "${LABEL_TASK_IN_PROGRESS}"
+  "${LABEL_TASK_REVIEW_READY}"
+  "${LABEL_TASK_REVIEW_IN_PROGRESS}"
+  "${LABEL_TASK_INTEGRATED}"
+  "${LABEL_TASK_REJECTED}"
+  "${LABEL_TASK_ESCALATED}"
 )
 
-ALL_ISSUE_LABELS=(
-  "${LABEL_SCENARIO_REVIEW}"
-  "${LABEL_NEEDS_DEV}"
-  "${LABEL_DEV_IN_PROGRESS}"
-  "${LABEL_NEEDS_QA}"
-  "${LABEL_QA_IN_PROGRESS}"
-  "${LABEL_QA_CHANGES_REQUESTED}"
-  "${LABEL_DEV_FAILURE}"
+# Change Proposal labels are optional; PR/body markers remain authoritative for
+# CP state, but labels make GitHub queues easier to inspect.
+LABEL_CP_READY_FOR_HUMAN_GATE="cp:ready-for-human-gate"
+LABEL_CP_READY_FOR_REVIEW="cp:ready-for-review"
+LABEL_CP_READY_FOR_VERIFICATION="cp:ready-for-verification"
+LABEL_CP_STALE="cp:stale"
+
+ALL_CP_LABELS=(
+  "${LABEL_CP_READY_FOR_HUMAN_GATE}"
+  "${LABEL_CP_READY_FOR_REVIEW}"
+  "${LABEL_CP_READY_FOR_VERIFICATION}"
+  "${LABEL_CP_STALE}"
 )
 
-# label_with_prefix <prefix> <label>
-# Produce the full label string with the optional yaml `labels.prefix` applied.
-# Empty prefix yields the bare label unchanged.
+ALL_ISSUE_LABELS=("${ALL_TASK_LABELS[@]}" "${ALL_CP_LABELS[@]}")
+
+# Legacy aliases are read-only migration aids. New code must not use them as
+# queue labels.
+LEGACY_LABELS=(
+  "po:in-progress"
+  "needs-human-review:milestone"
+  "needs-scenarios"
+  "pm:in-progress"
+  "pm:done"
+  "needs-human-review:scenario"
+  "needs-dev"
+  "dev:in-progress"
+  "needs-qa"
+  "qa:in-progress"
+  "qa:changes-requested"
+  "needs-human-review:dev-failure"
+)
+
 label_with_prefix() {
   local prefix="$1"
   local label="$2"
@@ -57,4 +66,13 @@ label_with_prefix() {
   else
     printf '%s' "${label}"
   fi
+}
+
+label_is_legacy() {
+  local candidate="$1"
+  local label
+  for label in "${LEGACY_LABELS[@]}"; do
+    [ "${candidate}" = "${label}" ] && return 0
+  done
+  return 1
 }

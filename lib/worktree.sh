@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lib/worktree.sh — git worktree helpers for DEV/QA agents.
+# lib/worktree.sh - git worktree helpers for Caller-owned isolated workspaces.
 #
 # Public API (caller MUST `cd "${TARGET_CLONE_PATH}"` before invoking):
 #   worktree_create <target> <branch>  — create or reuse worktree under

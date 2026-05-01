@@ -1,15 +1,10 @@
 #!/usr/bin/env bash
-# lib/concurrency.sh — DEV/QA parallel-slot accounting.
+# lib/concurrency.sh - small queue-count helper.
 #
-# Per the MVP simplification in sub-common-lib §A.10, we do NOT provide a
-# `with_concurrency_limit` wrapper. Callers (scheduler/run-dev.sh,
-# scheduler/run-qa.sh) spawn child processes with `&` + `wait` directly. This
-# module only exposes a query helper used to throttle pickup decisions.
-#
-# Public API:
-#   count_in_progress <repo> <label>  — print count of open issues with the label.
+# Lease helpers in lib/lease.sh are the authoritative concurrency mechanism.
+# This helper remains for GitHub adapter code that wants to count visible queue
+# labels for dashboards or throttling.
 
-# count_in_progress <repo> <label>
 count_in_progress() {
   local repo="$1" label="$2"
   if [ -z "${repo}" ] || [ -z "${label}" ]; then
@@ -19,8 +14,6 @@ count_in_progress() {
   local count
   count="$(gh_with_retry gh issue list --repo "${repo}" --label "${label}" \
             --state open --json number --jq 'length' 2>/dev/null || echo "0")"
-  if [ -z "${count}" ]; then
-    count="0"
-  fi
+  [ -n "${count}" ] || count="0"
   printf '%s' "${count}"
 }

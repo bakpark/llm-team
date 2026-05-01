@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lib/gh.sh — gh CLI wrapper, atomic label transitions, milestone helpers.
+# lib/gh.sh - gh CLI wrapper and GitHub adapter helpers.
 #
 # Public API:
 #   gh_with_retry <args...>                                  — exponential backoff (3 attempts).
@@ -15,12 +15,9 @@
 # Backoff intervals are overridable via env (used by the smoke tests):
 #   GH_RETRY_DELAY_1, GH_RETRY_DELAY_2, GH_RETRY_DELAY_3 (defaults: 2, 8, 30 seconds).
 #
-# Note on milestones: GitHub Milestones do not natively support labels, so this
-# library encodes "milestone state labels" inside the milestone *description*
-# using `<!-- llm-team:milestone-label:<LABEL> -->` markers. All public helpers
-# (`milestone_set_label`, `milestone_list_by_label`, the stale recovery checks)
-# use this encoding consistently. Callers should not write to milestone
-# descriptions outside these helpers without preserving these markers.
+# GitHub Milestones do not natively support labels. Contract state should be
+# encoded with `<!-- llm-team:milestone-state:<STATE> -->` markers. Legacy
+# label markers remain supported only for migration helpers.
 
 : "${GH_RETRY_DELAY_1:=2}"
 : "${GH_RETRY_DELAY_2:=8}"
@@ -59,8 +56,7 @@ gh_with_retry() {
 
 # issue_set_label <repo> <num> <new_label> <old_label>
 # Atomic transition: ADD <new_label> first, then REMOVE <old_label>.
-# This ordering is mandated by memory/state-machine.md §3 and serves as the
-# best-effort lock for the per-issue state machine.
+# Lease records remain the authoritative concurrency control.
 issue_set_label() {
   local repo="$1" num="$2" new_label="$3" old_label="$4"
   if [ -z "${repo}" ] || [ -z "${num}" ]; then
@@ -160,6 +156,38 @@ milestone_set_label() {
     _milestone_patch_description "${repo}" "${num}" "${desc}" \
       || { log_error "milestone_set_label: remove ${old_label} failed on milestone #${num}"; return 1; }
   fi
+}
+
+# milestone_set_state <repo> <num> <new_state> [<old_state>]
+# Contract-state version of milestone_set_label. New code should prefer this.
+milestone_set_state() {
+  local repo="$1" num="$2" new_state="$3" old_state="${4:-}"
+  if [ -z "${repo}" ] || [ -z "${num}" ] || [ -z "${new_state}" ]; then
+    log_error "milestone_set_state: repo, num, and new_state are required"
+    return 1
+  fi
+  state_is_valid milestone "${new_state}" || {
+    log_error "milestone_set_state: invalid milestone state '${new_state}'"
+    return 1
+  }
+  if [ -n "${old_state}" ]; then
+    state_is_valid milestone "${old_state}" || {
+      log_error "milestone_set_state: invalid old milestone state '${old_state}'"
+      return 1
+    }
+  fi
+
+  local desc new_marker old_marker
+  desc="$(_milestone_get_description "${repo}" "${num}")" || return 1
+  new_marker="$(state_marker milestone "${new_state}")"
+  if ! printf '%s' "${desc}" | grep -Fq "${new_marker}"; then
+    desc="${desc}"$'\n'"${new_marker}"
+  fi
+  if [ -n "${old_state}" ]; then
+    old_marker="$(state_marker milestone "${old_state}")"
+    desc="$(printf '%s\n' "${desc}" | grep -Fv "${old_marker}" || true)"
+  fi
+  _milestone_patch_description "${repo}" "${num}" "${desc}"
 }
 
 # milestone_list_by_label <repo> <label>

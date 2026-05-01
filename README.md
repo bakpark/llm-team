@@ -110,6 +110,20 @@ Caller는 signal의 권한, 대상 revision, gate 조건을 검증한 뒤 전이
 
 Architecture 문서는 adapter다. 상태명, output envelope, human signal schema, retry/lease semantics를 바꾸려면 먼저 contract를 확인해야 한다.
 
+## Runtime Scaffold
+
+활성 런타임 진입점은 [`scheduler/runner.sh`](scheduler/runner.sh)다.
+
+```bash
+./scheduler/runner.sh po myapp --dry-run
+./scheduler/runner.sh planner myapp --dry-run
+./scheduler/runner.sh coder myapp --dry-run
+```
+
+현재 runner는 contract 기반 골격을 먼저 보장한다. 역할과 operation을 매핑하고, Context Manifest를 만들고, prompt 위치와 기본 invariant를 검증한다. 실제 GitHub ready-object adapter는 이 골격 위에 붙여야 한다.
+
+이전 `PO/PM/DEV/QA` MVP 런타임은 [`legacy/`](legacy/)로 이동했다. legacy 코드는 참고용이며 현재 헌법/contract를 만족하는 활성 구현으로 간주하지 않는다.
+
 ## Implementation Notes
 
 이 모델을 특정 저장소와 도구 위에 구현하려면 보통 다음 요소가 필요하다.
