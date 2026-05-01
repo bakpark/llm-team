@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# lib/markers.sh - hidden HTML marker helpers for GitHub adapter artifacts.
+# lib/markers.sh - marker 문자열 helpers.
+#
+# 본 파일은 외부 시스템과 결합되지 않은 순수 문자열 빌더만 포함한다.
+# 마커가 실제로 GitHub 객체에 존재하는지 조회하는 기능은 이제
+# issue_tracker port 의 it_comment_has_marker 가 담당한다.
 
 marker_notified() {
   printf '<!-- llm-team:notified:%s -->' "$1"
@@ -11,29 +15,4 @@ marker_human_signal_open() {
 
 marker_human_signal_close() {
   printf '%s' '-->'
-}
-
-comments_have_marker() {
-  local type="$1" repo="$2" num="$3" kind="$4"
-  if [ -z "${type}" ] || [ -z "${repo}" ] || [ -z "${num}" ] || [ -z "${kind}" ]; then
-    log_error "comments_have_marker: type, repo, num, kind are required"
-    return 2
-  fi
-  local marker body
-  marker="$(marker_notified "${kind}")"
-  case "${type}" in
-    issue|pr)
-      body="$(gh_with_retry gh api "repos/${repo}/issues/${num}/comments" \
-                --jq '.[].body' 2>/dev/null || true)"
-      ;;
-    milestone)
-      body="$(gh_with_retry gh api "repos/${repo}/milestones/${num}" \
-                --jq '.description // ""' 2>/dev/null || true)"
-      ;;
-    *)
-      log_error "comments_have_marker: invalid type '${type}'"
-      return 2
-      ;;
-  esac
-  printf '%s' "${body}" | grep -Fq "${marker}"
 }

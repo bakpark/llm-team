@@ -29,8 +29,12 @@ fi
 . "${LLM_TEAM_ROOT}/lib/labels.sh"
 # shellcheck source=lib/config.sh
 . "${LLM_TEAM_ROOT}/lib/config.sh"
-# shellcheck source=lib/gh.sh
-. "${LLM_TEAM_ROOT}/lib/gh.sh"
+# shellcheck source=lib/registry.sh
+. "${LLM_TEAM_ROOT}/lib/registry.sh"
+# Load port specs + bind concrete adapters.
+#  • issue_tracker → adapters/issue_tracker/github.sh (gh_with_retry, it_*).
+#  • 다른 port 는 아직 lib/<file>.sh 에 잔존 — 아래에서 직접 source.
+registry_load_default || log_warn "common.sh: registry_load_default reported errors"
 # shellcheck source=lib/markers.sh
 . "${LLM_TEAM_ROOT}/lib/markers.sh"
 # shellcheck source=lib/context.sh

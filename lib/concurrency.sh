@@ -2,8 +2,10 @@
 # lib/concurrency.sh - small queue-count helper.
 #
 # Lease helpers in lib/lease.sh are the authoritative concurrency mechanism.
-# This helper remains for GitHub adapter code that wants to count visible queue
+# This helper exists for application code that wants to count visible queue
 # labels for dashboards or throttling.
+#
+# 본 함수는 issue_tracker port 만 호출 — `gh` 직접 결합 없음.
 
 count_in_progress() {
   local repo="$1" label="$2"
@@ -11,9 +13,11 @@ count_in_progress() {
     log_error "count_in_progress: repo and label are required"
     return 1
   fi
-  local count
-  count="$(gh_with_retry gh issue list --repo "${repo}" --label "${label}" \
-            --state open --json number --jq 'length' 2>/dev/null || echo "0")"
-  [ -n "${count}" ] || count="0"
-  printf '%s' "${count}"
+  local lines
+  lines="$(it_issue_list_with_label "${repo}" "${label}" 2>/dev/null || true)"
+  if [ -z "${lines}" ]; then
+    printf '0'
+  else
+    printf '%s' "$(printf '%s\n' "${lines}" | grep -c '^[0-9]')"
+  fi
 }

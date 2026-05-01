@@ -76,3 +76,48 @@ label_is_legacy() {
   done
   return 1
 }
+
+# task_state_to_label <state>
+# Map a TASK_* / ESCALATED state name to the corresponding label string.
+# Returns 1 (and prints nothing) if the state is not a task state.
+task_state_to_label() {
+  case "$1" in
+    TASK_PENDING)             printf '%s' "${LABEL_TASK_PENDING}" ;;
+    TASK_READY)               printf '%s' "${LABEL_TASK_READY}" ;;
+    TASK_IN_PROGRESS)         printf '%s' "${LABEL_TASK_IN_PROGRESS}" ;;
+    TASK_REVIEW_READY)        printf '%s' "${LABEL_TASK_REVIEW_READY}" ;;
+    TASK_REVIEW_IN_PROGRESS)  printf '%s' "${LABEL_TASK_REVIEW_IN_PROGRESS}" ;;
+    TASK_INTEGRATED)          printf '%s' "${LABEL_TASK_INTEGRATED}" ;;
+    TASK_REJECTED)            printf '%s' "${LABEL_TASK_REJECTED}" ;;
+    ESCALATED)                printf '%s' "${LABEL_TASK_ESCALATED}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# label_to_task_state <label>
+# Inverse of task_state_to_label. Returns 1 for unknown labels.
+label_to_task_state() {
+  case "$1" in
+    "${LABEL_TASK_PENDING}")            printf 'TASK_PENDING' ;;
+    "${LABEL_TASK_READY}")              printf 'TASK_READY' ;;
+    "${LABEL_TASK_IN_PROGRESS}")        printf 'TASK_IN_PROGRESS' ;;
+    "${LABEL_TASK_REVIEW_READY}")       printf 'TASK_REVIEW_READY' ;;
+    "${LABEL_TASK_REVIEW_IN_PROGRESS}") printf 'TASK_REVIEW_IN_PROGRESS' ;;
+    "${LABEL_TASK_INTEGRATED}")         printf 'TASK_INTEGRATED' ;;
+    "${LABEL_TASK_REJECTED}")           printf 'TASK_REJECTED' ;;
+    "${LABEL_TASK_ESCALATED}")          printf 'ESCALATED' ;;
+    *) return 1 ;;
+  esac
+}
+
+# cp_state_to_label <state>
+# Map CP_* state to label (only the queue labels — CP_DRAFT/CP_MERGED have no label).
+cp_state_to_label() {
+  case "$1" in
+    CP_READY_FOR_HUMAN_GATE)   printf '%s' "${LABEL_CP_READY_FOR_HUMAN_GATE}" ;;
+    CP_READY_FOR_REVIEW)       printf '%s' "${LABEL_CP_READY_FOR_REVIEW}" ;;
+    CP_READY_FOR_VERIFICATION) printf '%s' "${LABEL_CP_READY_FOR_VERIFICATION}" ;;
+    CP_STALE)                  printf '%s' "${LABEL_CP_STALE}" ;;
+    *) return 1 ;;
+  esac
+}
