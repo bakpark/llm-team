@@ -56,6 +56,19 @@ Caller는 signal 집행 전에 다음을 검증한다.
 
 검증 실패 시 Caller는 signal을 stale 또는 invalid로 기록하고 operational transition을 수행하지 않는다. 사람이 새 signal을 남겨야 한다.
 
+Signal별 허용 대상과 기본 집행:
+
+| `signal_type` | 허용 대상 | 허용 상태 | Caller action |
+|---|---|---|---|
+| `approve` | milestone + related Spec CP | `PO_GATE`, `PM_GATE` | 관련 Spec CP 병합 후 다음 milestone 상태로 전이 |
+| `reject` | milestone + related Spec CP | `PO_GATE`, `PM_GATE` | 관련 Spec CP를 `CP_REQUEST_CHANGES -> CP_CLOSED`로 닫고 draft 상태로 회수 |
+| `request_rework` | task 또는 change_proposal | `ESCALATED`, `CP_REQUEST_CHANGES`, `CP_CLOSED` | 대상 Task를 `TASK_READY`로 회수하거나 새 CP 생성을 허용 |
+| `request_recover` | milestone, task, change_proposal | `ESCALATED`, `CP_STALE`, stale gate state | 가장 가까운 safe READY 상태로 회수 |
+| `pause` | system | `RUNNING` | 전역 control state를 `PAUSED`로 전이 |
+| `resume` | system | `PAUSED` | 전역 control state를 `RUNNING`으로 전이 |
+| `amendment_approve` | contract 또는 concept document | pending amendment CP | Caller가 amendment CP를 병합 |
+| `stop` | system, milestone, task | any non-terminal state | 새 lease claim 중단. 대상이 있으면 ESCALATED로 전이 |
+
 <a id="RGC-LEASE"></a>
 ## RGC-LEASE: Lease and Worker Slots
 
@@ -95,7 +108,17 @@ Recover 전이:
 *_IN_PROGRESS -> ESCALATED
 ```
 
-직전 READY 상태가 없는 gate 또는 closed 객체는 별도 정책에 따라 gate 재개방, CP_STALE, 또는 ESCALATED로 전이한다.
+직전 READY 상태가 없는 상태는 다음 정책을 따른다.
+
+| 현재 상태 | 자동 recover | 사람 signal 필요 | 처리 |
+|---|---|---|---|
+| `PO_GATE` | no | yes | stale approval이면 gate 유지. reject/request_recover signal이면 `PO_DRAFT` 회수 |
+| `PM_GATE` | no | yes | stale approval이면 gate 유지. reject/request_recover signal이면 `PM_DRAFT` 회수 |
+| `CP_CLOSED` | no | yes | 자동 재개방 금지. request_rework signal 후 새 CP로 재진입 |
+| `CP_STALE` | no | optional | 동일 입력 revision이면 새 CP 생성. 대상 revision이 변했으면 재호출 필요 |
+| `CP_MERGED` | no | no | terminal. 후속 변경은 새 CP로 처리 |
+| `DONE` | no | no | terminal. 후속 작업은 새 Milestone으로 처리 |
+| `ESCALATED` | no | yes | 사람 signal에 따라 회수, 중단, amendment, 재시도 중 하나 집행 |
 
 <a id="RGC-FAILURE"></a>
 ## RGC-FAILURE: Failure Classes
@@ -152,9 +175,9 @@ Gate 진입 객체는 사람의 승인·거부 시그널 전까지 다음 큐로
 
 Gate별 기본 집행:
 
-- PO 승인: 관련 Spec CP 병합, `PO_GATE -> PM_DRAFT`
+- PO 승인: 관련 Spec CP를 `CP_READY_FOR_HUMAN_GATE -> CP_HUMAN_APPROVED -> CP_MERGED`로 전이하며 병합, `PO_GATE -> PM_DRAFT`
 - PO 거부: `PO_DRAFT` 회수 또는 ESCALATED
-- PM 승인: 관련 Spec CP 병합, `PM_GATE -> DECOMPOSE_READY`
+- PM 승인: 관련 Spec CP를 `CP_READY_FOR_HUMAN_GATE -> CP_HUMAN_APPROVED -> CP_MERGED`로 전이하며 병합, `PM_GATE -> DECOMPOSE_READY`
 - PM 거부: `PM_DRAFT` 회수 또는 ESCALATED
 - ESCALATED: 사람 시그널에 따라 재시도, 회수, 중단, 모델 수정 승인 중 하나를 Caller가 집행
 
