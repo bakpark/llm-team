@@ -139,8 +139,6 @@ llm-team target add --url https://github.com/owner/repo.git
 
 현재 runner는 contract 기반 골격을 먼저 보장한다. 역할과 operation을 매핑하고, Context Manifest를 만들고, prompt 위치와 기본 invariant를 검증한다. 실제 GitHub ready-object adapter는 이 골격 위에 붙여야 한다.
 
-이전 `PO/PM/DEV/QA` MVP 런타임은 [`legacy/`](legacy/)로 이동했다. legacy 코드는 참고용이며 현재 헌법/contract를 만족하는 활성 구현으로 간주하지 않는다.
-
 ## Implementation Notes
 
 이 모델을 특정 저장소와 도구 위에 구현하려면 보통 다음 요소가 필요하다.
@@ -163,4 +161,4 @@ llm-team target add --url https://github.com/owner/repo.git
 
 ## Current Status
 
-현재 저장소는 문서와 contract 정합성을 우선으로 정리되어 있다. 구현 코드나 legacy 운영 스크립트가 contract와 다르면 구현을 수정하거나, 사람 승인으로 contract 변경 제안을 제출해야 한다.
+현재 저장소는 문서와 contract 정합성을 우선으로 정리되어 있다. 구현 코드가 contract와 다르면 구현을 수정하거나, 사람 승인으로 contract 변경 제안을 제출해야 한다.
