@@ -1,0 +1,13 @@
+# 워크스페이스 (DEV/QA worktree, 로그)
+workdir/
+
+# 비밀
+.env
+.env.local
+*.local
+
+# macOS
+.DS_Store
+
+# 사용자 작업 공간 (프레임워크 외부)
+.human/

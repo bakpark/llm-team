@@ -1,0 +1,16 @@
+name: myapp
+github:
+  owner: bakparkbj
+  repo: myapp
+  default_branch: main
+local:
+  clone_path: ~/dev/myapp
+inputs_dir: inputs/myapp
+labels:
+  prefix: ""
+notifier:
+  channel: none
+  webhook_or_id: DISCORD_WEBHOOK_MYAPP
+dev_concurrency: 3
+stale_threshold_minutes: 60
+enabled: true
