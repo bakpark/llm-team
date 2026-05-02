@@ -82,7 +82,7 @@ Decision Log는 중요한 트레이드오프와 거부된 대안을 기록한다
 - `decision`
 - `alternatives`
 - `rationale`
-- `decided_at`
+- `decided_at` — ISO-8601(UTC). 호출자가 결정 시각을 사전 주입하지 않은 경우, ledger 기록 helper는 append-time(저장 시각)으로 자동 채운다. 이는 결정의 *시점* 이 저장 시점과 일치하지 않을 수 있을 때(예: 사후 정리) caller가 명시적으로 사전 주입해야 함을 의미한다
 - `affected_milestones`
 - `supersedes`, 해당 시
 

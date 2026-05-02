@@ -42,10 +42,18 @@ context_manifest_create() {
 
 context_manifest_add_entry() {
   local manifest_file="$1" object_kind="$2" object_id="$3" fetch_scope="$4" revision_pin="$5" required="$6" purpose="$7"
+  local truncated="${8:-false}" truncation_reason="${9:-}"
   if [ ! -f "${manifest_file}" ]; then
     log_error "context_manifest_add_entry: manifest not found: ${manifest_file}"
     return 1
   fi
+  case "${fetch_scope}" in
+    metadata|body|body+comments) ;;
+    *)
+      log_error "context_manifest_add_entry: invalid fetch_scope '${fetch_scope}' (must be metadata|body|body+comments)"
+      return 1
+      ;;
+  esac
   local tmp
   tmp="${manifest_file}.tmp.$$"
   jq \
@@ -55,14 +63,20 @@ context_manifest_add_entry() {
     --arg revision_pin "${revision_pin}" \
     --argjson required "${required}" \
     --arg purpose "${purpose}" \
-    '.entries += [{
-      object_kind: $object_kind,
-      object_id: $object_id,
-      fetch_scope: $fetch_scope,
-      revision_pin: $revision_pin,
-      required: $required,
-      purpose: $purpose
-    }]' "${manifest_file}" >"${tmp}" && mv "${tmp}" "${manifest_file}"
+    --argjson truncated "${truncated}" \
+    --arg truncation_reason "${truncation_reason}" \
+    '.entries += [
+      ({
+        object_kind: $object_kind,
+        object_id: $object_id,
+        fetch_scope: $fetch_scope,
+        revision_pin: $revision_pin,
+        required: $required,
+        purpose: $purpose
+      }
+      + (if $truncated then {truncated: true} else {} end)
+      + (if $truncation_reason != "" then {truncation_reason: $truncation_reason} else {} end))
+    ]' "${manifest_file}" >"${tmp}" && mv "${tmp}" "${manifest_file}"
 }
 
 context_manifest_validate() {
@@ -81,10 +95,12 @@ context_manifest_validate() {
     all(.entries[];
       (.object_kind | type == "string" and length > 0) and
       (.object_id | type == "string" and length > 0) and
-      (.fetch_scope | type == "string" and length > 0) and
+      (.fetch_scope | IN("metadata", "body", "body+comments")) and
       (.revision_pin | type == "string" and length > 0) and
       (.required | type == "boolean") and
-      (.purpose | type == "string" and length > 0)
+      (.purpose | type == "string" and length > 0) and
+      (if has("truncated") then (.truncated | type == "boolean") else true end) and
+      (if has("truncation_reason") then (.truncation_reason | type == "string") else true end)
     )
   ' "${manifest_file}" >/dev/null
 }

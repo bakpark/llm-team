@@ -93,6 +93,7 @@ _caller_ledger_write() {
   }
   jq -n \
     --arg transition_id "$(_caller_uuid)" \
+    --arg target_id "${target}" \
     --arg object_kind "${object_kind}" \
     --arg object_id "${object_id}" \
     --arg from_state "${from_state}" \
@@ -104,6 +105,7 @@ _caller_ledger_write() {
     --arg timestamp "$(_caller_now)" \
     "{
        transition_id: \$transition_id,
+       target_id: \$target_id,
        object_kind: \$object_kind,
        object_id: \$object_id,
        from_state: \$from_state,
@@ -729,7 +731,7 @@ _caller_apply_integrator_pkg() {
       attempt="$(jq -r '.artifacts.integrator_attempt // 1' "${env_path}")"
       local max_attempts="${LLM_TEAM_INTEGRATOR_MAX_ATTEMPTS:-3}"
       if [ -n "${cp_path}" ]; then
-        change_proposal_set_state "${cp_path}" CP_REQUEST_CHANGES \
+        change_proposal_set_state "${cp_path}" CP_REQUEST_CHANGES CP_READY_FOR_VERIFICATION \
           || log_warn "_caller_apply_integrator_pkg/FAIL: CP →CP_REQUEST_CHANGES failed"
         change_proposal_set_state "${cp_path}" CP_CLOSED CP_REQUEST_CHANGES \
           || log_warn "_caller_apply_integrator_pkg/FAIL: CP →CP_CLOSED failed"
@@ -821,7 +823,7 @@ _caller_apply_qa_pkg() {
       ;;
     FAIL)
       if [ -n "${cp_path}" ]; then
-        change_proposal_set_state "${cp_path}" CP_REQUEST_CHANGES \
+        change_proposal_set_state "${cp_path}" CP_REQUEST_CHANGES CP_READY_FOR_VERIFICATION \
           || log_warn "_caller_apply_qa_pkg/FAIL: CP →CP_REQUEST_CHANGES failed"
         change_proposal_set_state "${cp_path}" CP_CLOSED CP_REQUEST_CHANGES \
           || log_warn "_caller_apply_qa_pkg/FAIL: CP →CP_CLOSED failed"

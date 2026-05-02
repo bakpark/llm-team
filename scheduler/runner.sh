@@ -199,6 +199,7 @@ _runner_ledger_write() {
   tmp="$(mktemp -t runner-ledger.XXXXXX)" || return 1
   jq -n \
     --arg transition_id "runner-${result}-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}" \
+    --arg target_id "${target}" \
     --arg object_kind "${obj_kind}" \
     --arg object_id "${obj_id}" \
     --arg from_state "${from_state}" \
@@ -211,6 +212,7 @@ _runner_ledger_write() {
     --arg result "${result}" \
     '{
       transition_id: $transition_id,
+      target_id: $target_id,
       object_kind: $object_kind,
       object_id: $object_id,
       from_state: $from_state,

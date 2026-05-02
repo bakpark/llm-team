@@ -53,6 +53,7 @@ _recovery_ledger_write() {
   tmp="$(mktemp -t recovery-ledger.XXXXXX)" || return 1
   jq -n \
     --arg transition_id "recovery-${result}-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}" \
+    --arg target_id "${target}" \
     --arg object_kind "${object_kind}" \
     --arg object_id "${object_id}" \
     --arg from_state "${from_state}" \
@@ -65,6 +66,7 @@ _recovery_ledger_write() {
     --arg result "${result}" \
     '{
        transition_id: $transition_id,
+       target_id: $target_id,
        object_kind: $object_kind,
        object_id: $object_id,
        from_state: $from_state,

@@ -16,14 +16,14 @@
 | `recovery.sh` | 만료 lease 스윕 + 객체 회수 (`SOC-Recover`) | `recovery_scan` | `it_*`, lease | runner.sh 매 cycle 시작 | `test-recovery.sh` |
 | `human_signal.sh` | `RGC-SIGNALS` envelope drain + gate 적용 | `human_signal_drain` | `it_*`, ledger | runner.sh 진입부 | `test-human-signal.sh` |
 | `feature_request.sh` | `feature-request` issue → PO milestone 승격 | `feature_request_promote` | `it_*` | runner.sh 진입부 | `test-feature-request.sh` |
-| `agent_io.sh` | LLM 호출 + envelope 추출/검증(`AGC-INVALID`) + pin recheck | `agent_io_invoke`, `agent_io_validate_envelope` | `lr_*`, ledger | runner.sh 단계 4 | `test-agent-io.sh` |
-| `agent_workspace.sh` | 격리 worktree 생성/정리(`AGC-WORKSPACE`) | `agent_workspace_prepare` / `_release` | `ws_*` | runner.sh 단계 3, 6 | `test-agent-workspace.sh` |
+| `agent_io.sh` | LLM 호출 + envelope 추출/검증(`AGC-INVALID`) + pin recheck | `agent_prompt_assemble`, `agent_output_parse`, `agent_output_validate_extended`, `revision_pin_revalidate` | `lr_*`, ledger | runner.sh 단계 4 | `test-agent-io.sh` |
+| `agent_workspace.sh` | 격리 worktree 생성/정리(`AGC-WORKSPACE`) | `agent_workspace_for` | `ws_*` | runner.sh 단계 3, 6 | `test-agent-workspace.sh` |
 | `caller_dispatch.sh` | role × output_kind 분기별 side-effect 실행(`SOC-OPERATIONS`) | `caller_apply_output` | 전 port | runner.sh 단계 5 | `test-caller-dispatch*.sh` |
-| `verification_runner.sh` | Reviewer/Integrator/QA pre-action 의 deterministic verification(`RGC-VERIFICATION`) | `verification_run` | `ws_*`, `ps_*` | dispatch pre-action | `test-verification-runner.sh` |
-| `release.sh` | QA PASS 시 release tag/notes 발행 | `release_publish` | `it_*`, `ps_*` | dispatch QA PASS 분기 | `test-release.sh` |
-| `knowledge.sh` | decision-log / context-summary 누적(`KAC`) | `knowledge_record_decision`, `knowledge_record_summary` | `it_*` | dispatch QA PASS 분기 | `test-knowledge.sh` |
-| `ledger_summary.sh` | ledger 통계 / 최근 결과 추출(운영 도구) | `ledger_summary` | ledger | CLI 보조 | `test-ledger-summary.sh` |
-| `workspace_prune.sh` | 종료된 task worktree 정리 | `workspace_prune` | `ws_*` | 주기적/수동 | (없음) |
+| `verification_runner.sh` | Reviewer/Integrator/QA pre-action 의 deterministic verification(`RGC-VERIFICATION`) | `verification_run_for`, `verification_attach_to_manifest` | `ws_*`, `ps_*` | dispatch pre-action | `test-verification-runner.sh` |
+| `release.sh` | QA PASS 시 release tag/notes 발행 | `release_publish_from_milestone` | `it_*`, `ps_*` | dispatch QA PASS 분기 | `test-release.sh` |
+| `knowledge.sh` | decision-log / context-summary 누적(`KAC`) | `knowledge_record_decision`, `knowledge_snapshot_context_summary` | `it_*` | dispatch QA PASS 분기 | `test-knowledge.sh` |
+| `ledger_summary.sh` | ledger 통계 / 최근 결과 추출(운영 도구) | `ledger_pipeline_summary`, `ledger_caller_window`, `ledger_recent` | ledger | CLI 보조 | `test-ledger-summary.sh` |
+| `workspace_prune.sh` | 종료된 task worktree 정리 | `workspace_prune_unit`, `workspace_prune_units` | `ws_*` | 주기적/수동 | (없음) |
 
 `onboarding/` 서브디렉토리는 별도 use case set 으로 운영 진입 게이트를 담당한다(테스트 `test-onboarding-verify.sh`).
 
@@ -36,14 +36,14 @@ runner.sh (단일 cycle)
    ├─ feature_request_promote ───┤   (입수/회수/시그널 처리; ledger only)
    ├─ ready_object_pick ─────────┘
    ├─ lease_claim (lib/lease.sh, port 외)
-   ├─ agent_workspace_prepare
-   ├─ agent_io_invoke
-   ├─ agent_io_validate_envelope
-   ├─ caller_apply_output ──────┬─ verification_run (Reviewer/Integrator/QA pre-action)
-   │                            ├─ release_publish (QA PASS)
-   │                            └─ knowledge_record_* (QA PASS)
-   ├─ ledger_write
-   └─ agent_workspace_release + lease_release
+   ├─ agent_workspace_for
+   ├─ agent_prompt_assemble + lr_invoke
+   ├─ agent_output_parse + agent_output_validate_extended + revision_pin_revalidate
+   ├─ caller_apply_output ──────┬─ verification_run_for (Reviewer/Integrator/QA pre-action)
+   │                            ├─ release_publish_from_milestone (QA PASS)
+   │                            └─ knowledge_record_decision / knowledge_snapshot_context_summary (QA PASS)
+   ├─ transition_ledger_write
+   └─ workspace_prune_unit + lease_release
 ```
 
 ## 모듈 변경 규칙

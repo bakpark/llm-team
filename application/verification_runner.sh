@@ -173,8 +173,8 @@ verification_attach_to_manifest() {
   context_manifest_add_entry "${manifest_path}" \
     "verification_log" \
     "${run_id}" \
-    "${log_ref}" \
+    "metadata" \
     "${revision_pin}" \
     true \
-    "Caller-deterministic verification result (${result}) for agent verdict"
+    "Caller-deterministic verification result (${result}) — log_ref=${log_ref}"
 }

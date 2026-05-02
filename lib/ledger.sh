@@ -14,6 +14,7 @@ transition_ledger_write() {
   fi
   jq -e '
     (.transition_id | type == "string" and length > 0) and
+    (.target_id | type == "string" and length > 0) and
     (.object_id | type == "string" and length > 0) and
     (.object_kind | type == "string" and length > 0) and
     (.from_state | type == "string") and
