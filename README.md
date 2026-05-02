@@ -115,26 +115,27 @@ Architecture 문서는 adapter다. 상태명, output envelope, human signal sche
 권장 런타임 진입점은 [`bin/llm-team`](bin/llm-team) CLI다. CLI는 기존 runner,
 daemon, label bootstrap 스크립트를 감싸는 얇은 control plane이다.
 
+아래 예시에서 `<target>` 자리에는 등록한 target 이름(예: `target add` 로 만든 yaml 의 `name`)을 넣는다.
+
 ```bash
 ./scripts/install-cli.sh
-llm-team doctor myapp
-llm-team target add myapp --repo owner/repo
+llm-team target add <target> --repo owner/repo
 llm-team target add --url https://github.com/owner/repo.git
+llm-team doctor <target>
 
-./bin/llm-team doctor myapp
 ./bin/llm-team target list
-./bin/llm-team labels bootstrap myapp --dry-run
-./bin/llm-team run po myapp --dry-run
-./bin/llm-team daemon status myapp
-./bin/llm-team status myapp
+./bin/llm-team labels bootstrap <target> --dry-run
+./bin/llm-team run po <target> --dry-run
+./bin/llm-team daemon status <target>
+./bin/llm-team status <target>
 ```
 
 하위 실행 엔진은 [`scheduler/runner.sh`](scheduler/runner.sh)다.
 
 ```bash
-./scheduler/runner.sh po myapp --dry-run
-./scheduler/runner.sh planner myapp --dry-run
-./scheduler/runner.sh coder myapp --dry-run
+./scheduler/runner.sh po <target> --dry-run
+./scheduler/runner.sh planner <target> --dry-run
+./scheduler/runner.sh coder <target> --dry-run
 ```
 
 현재 runner는 contract 기반 골격을 먼저 보장한다. 역할과 operation을 매핑하고, Context Manifest를 만들고, prompt 위치와 기본 invariant를 검증한다. 실제 GitHub ready-object adapter는 이 골격 위에 붙여야 한다.
