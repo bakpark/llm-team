@@ -358,6 +358,13 @@ case "${ROLE}" in
     WS_PATH=""
     WS_PATH="$(ws_ensure "task-${TARGET_OBJECT_ID}" 2>/dev/null || true)"
     if [ -n "${WS_PATH}" ] && [ -d "${WS_PATH}" ]; then
+      # H2: reuse 된 worktree 가 origin tip 과 동기화되어 있도록 강제.
+      # Coder 가 다른 cycle 에서 push 한 새 commit 을 Reviewer/Integrator/QA
+      # 가 보지 못하는 일을 방지한다.
+      if declare -F ws_refresh >/dev/null 2>&1; then
+        ws_refresh "task-${TARGET_OBJECT_ID}" >/dev/null 2>&1 \
+          || log_warn "runner: ws_refresh failed for task-${TARGET_OBJECT_ID}"
+      fi
       VCMDS="${TARGET_VERIFICATION_COMMANDS_JSON:-["true"]}"
       V_RUN_PATH=""
       if V_RUN_PATH="$(verification_run_for "${TARGET}" "${TARGET_OBJECT_ID}" "${TARGET_REVISION_PIN}" "${WS_PATH}" "${VCMDS}" 2>/dev/null)"; then

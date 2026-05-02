@@ -47,6 +47,7 @@ fenced block 이 두 개 이상이면 invalid 로 거부된다.
 
 artifacts 권장 키 (coder):
 - `artifacts.patch_diff`: 격리된 worktree 의 unified diff 요약
+- `artifacts.commit_message`: git commit 메시지 (한 줄 요약 우선; 옵션 — 미지정 시 caller 가 기본 메시지 사용)
 - `artifacts.cp_message`: Code Change Proposal 메시지 (제목 + 본문)
 - `artifacts.risk_notes`: 리스크/롤백 노트
 - `artifacts.suggested_verification[]`: 권장 검증 명령 목록
@@ -67,6 +68,7 @@ artifacts 권장 키 (coder):
   "summary": "Implement auth-login task",
   "artifacts": {
     "patch_diff": "diff --git a/...",
+    "commit_message": "feat(auth): implement login flow",
     "cp_message": {"title": "...", "body": "..."},
     "risk_notes": "...",
     "suggested_verification": ["pnpm test:auth"]
