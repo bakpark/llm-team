@@ -1,6 +1,9 @@
 # 워크스페이스 (DEV/QA worktree, 로그)
 workdir/
 
+# git worktrees (Claude Code 작업 격리)
+.worktrees/
+
 # 비밀
 .env
 .env.local

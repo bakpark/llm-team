@@ -116,6 +116,13 @@ recovery_scan() {
             ;;
         esac
       fi
+      # L1: 만료된 lease 가 가리키던 task worktree 를 정리한다. 라벨 롤백
+      # 후 다음 worker 가 ws_ensure 로 reuse 할 때 stale 트리(부분 적용된
+      # patch / index)를 보지 않도록 한다. milestone 객체에는 task 워크트리가
+      # 없으므로 issue(task) 인 경우에만 prune.
+      if [ "${kind}" = "issue" ] && declare -F workspace_prune_unit >/dev/null 2>&1; then
+        workspace_prune_unit "${target}" "task-${object_id}" || true
+      fi
       _recovery_ledger_write "${target}" "${kind}" "${object_id}" \
         "${from_state}" "${to_state}" "${operation}" "${lease_id}" "recovered" \
         || log_warn "recovery_scan: ledger write failed for ${object_id}"

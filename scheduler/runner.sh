@@ -51,6 +51,10 @@ export LLM_TEAM_ROOT
 . "${LLM_TEAM_ROOT}/application/human_signal.sh"
 # shellcheck source=../application/recovery.sh
 . "${LLM_TEAM_ROOT}/application/recovery.sh"
+# shellcheck source=../application/workspace_prune.sh
+. "${LLM_TEAM_ROOT}/application/workspace_prune.sh"
+# shellcheck source=../application/knowledge.sh
+. "${LLM_TEAM_ROOT}/application/knowledge.sh"
 # shellcheck source=../application/agent_workspace.sh
 . "${LLM_TEAM_ROOT}/application/agent_workspace.sh"
 
@@ -345,6 +349,13 @@ case "${ROLE}" in
     ws_ensure_clone "${TARGET}" >/dev/null 2>&1 || log_warn "runner: ws_ensure_clone failed (Coder)"
     ws_ensure "task-${TARGET_OBJECT_ID}" >/dev/null 2>&1 \
       || log_warn "runner: ws_ensure failed for task-${TARGET_OBJECT_ID} (Coder)"
+    # L2: 이전 cycle 의 lr_invoke 또는 dispatch 실패로 worktree 에 잔여 변경이
+    # 남아 있을 수 있다. origin/<branch> 가 존재하면 그 tip 으로 재설정,
+    # 없으면 no-op (첫 cycle 이라 정상). idempotent.
+    if declare -F ws_refresh >/dev/null 2>&1; then
+      ws_refresh "task-${TARGET_OBJECT_ID}" >/dev/null 2>&1 \
+        || log_warn "runner: ws_refresh failed for task-${TARGET_OBJECT_ID} (Coder)"
+    fi
     ;;
 esac
 
@@ -358,6 +369,13 @@ case "${ROLE}" in
     WS_PATH=""
     WS_PATH="$(ws_ensure "task-${TARGET_OBJECT_ID}" 2>/dev/null || true)"
     if [ -n "${WS_PATH}" ] && [ -d "${WS_PATH}" ]; then
+      # H2: reuse 된 worktree 가 origin tip 과 동기화되어 있도록 강제.
+      # Coder 가 다른 cycle 에서 push 한 새 commit 을 Reviewer/Integrator/QA
+      # 가 보지 못하는 일을 방지한다.
+      if declare -F ws_refresh >/dev/null 2>&1; then
+        ws_refresh "task-${TARGET_OBJECT_ID}" >/dev/null 2>&1 \
+          || log_warn "runner: ws_refresh failed for task-${TARGET_OBJECT_ID}"
+      fi
       VCMDS="${TARGET_VERIFICATION_COMMANDS_JSON:-["true"]}"
       V_RUN_PATH=""
       if V_RUN_PATH="$(verification_run_for "${TARGET}" "${TARGET_OBJECT_ID}" "${TARGET_REVISION_PIN}" "${WS_PATH}" "${VCMDS}" 2>/dev/null)"; then

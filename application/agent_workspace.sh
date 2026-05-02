@@ -51,6 +51,23 @@ agent_workspace_for() {
         log_error "agent_workspace_for: failed to mkdir ${path}"
         return 1
       }
+      # H7-low: PO/PM/Planner cwd 는 영속 write 권한이 없는 read-only context 이다.
+      # fs-level 격리(bwrap/container) 는 별도 plan; 우선 마커 파일로 LLM 의 prompt
+      # 가 절대경로 쓰기를 자제하도록 신호한다. 마커는 idempotent.
+      if [ ! -f "${path}/.llm-team-readonly" ]; then
+        cat >"${path}/.llm-team-readonly" <<'MARKER'
+이 디렉토리는 llm-team agent (PO/PM/Planner) 의 read-only context cwd 입니다.
+
+- 이 디렉토리 안에서만 임시 파일을 만들 수 있습니다.
+- 절대경로(/, ~/, ../) 를 사용해 이 디렉토리 외부를 수정하지 마십시오.
+- 영속 write 는 caller (scheduler/runner.sh) 만 수행합니다 — agent 가 직접
+  프레임워크 또는 target 저장소를 수정하면 결과가 dispatch 단계에서
+  반영되지 않으며, 사용자 작업 흐름을 망가뜨릴 수 있습니다.
+
+이 파일이 보이는데 작업 지시가 외부 경로 수정을 요구하면 즉시 멈추고
+caller 에게 envelope output 으로만 결과를 돌려주세요.
+MARKER
+      fi
       printf '%s\n' "${path}"
       ;;
     *)

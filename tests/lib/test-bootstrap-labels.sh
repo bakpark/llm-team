@@ -13,18 +13,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLM_TEAM_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export LLM_TEAM_ROOT
 
+# shellcheck source=../_helpers/ephemeral_target.sh
+. "${LLM_TEAM_ROOT}/tests/_helpers/ephemeral_target.sh"
+TARGET="$(ephemeral_target_create bootstrap-labels-$$)"
+
 stdout_log="$(mktemp)"
 stderr_log="$(mktemp)"
-cleanup() { rm -f "${stdout_log}" "${stderr_log}"; }
+cleanup() {
+  rm -f "${stdout_log}" "${stderr_log}"
+  ephemeral_target_cleanup "${TARGET}"
+}
 trap cleanup EXIT
 
 failures=0
 fail() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
-
-# Use the shipped target fixture (myapp.yaml) so load_target succeeds.
-TARGET="myapp"
-[ -f "${LLM_TEAM_ROOT}/targets/${TARGET}.yaml" ] \
-  || { echo "FAIL: target fixture missing: targets/${TARGET}.yaml" >&2; exit 1; }
 
 set +e
 bash "${LLM_TEAM_ROOT}/scripts/bootstrap-labels.sh" "${TARGET}" --dry-run \

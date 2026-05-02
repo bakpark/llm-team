@@ -27,6 +27,7 @@
 #     artifacts.integration_branch.name  — 통합 브랜치 명 (옵션, 기본 integration)
 #   patch (Coder)
 #     artifacts.patch_diff               — unified diff (string)
+#     artifacts.commit_message           — git commit 메시지 (옵션, 기본 "task #<n>: apply patch")
 #     artifacts.cp_artifact_ref          — 워크스페이스/branch 참조 (옵션)
 #     artifacts.task_branch              — 발행 브랜치 (옵션, 기본 llm-team/task-<id>)
 #     envelope.target_id                 — issue num (task)
@@ -472,7 +473,10 @@ _caller_apply_patch() {
     return 1
   fi
   if declare -F ws_apply_patch >/dev/null 2>&1; then
-    ws_apply_patch "${unit_id}" "${patch_text}" \
+    local commit_message
+    commit_message="$(jq -r '.artifacts.commit_message // empty' "${env_path}")"
+    [ -n "${commit_message}" ] || commit_message="task #${issue_num}: apply patch"
+    ws_apply_patch "${unit_id}" "${patch_text}" "${commit_message}" \
       || { log_error "_caller_apply_patch: ws_apply_patch failed"; return 1; }
     if declare -F ws_publish_branch >/dev/null 2>&1; then
       ws_publish_branch "${unit_id}" "${branch}" \
@@ -588,6 +592,11 @@ _caller_apply_verdict() {
   it_issue_set_state "${repo}" "${issue_num}" TASK_INTEGRATED TASK_REVIEW_IN_PROGRESS \
     || { log_error "_caller_apply_verdict: issue TASK_REVIEW_IN_PROGRESS→TASK_INTEGRATED failed"; return 1; }
 
+  # H3: PR merged → unit worktree 와 task 브랜치 정리(idempotent).
+  if declare -F workspace_prune_unit >/dev/null 2>&1; then
+    workspace_prune_unit "${target}" "task-${issue_num}" || true
+  fi
+
   # Sweep milestone if all children integrated.
   local ms_num
   ms_num="$(it_issue_get_milestone "${repo}" "${issue_num}" 2>/dev/null)"
@@ -663,6 +672,18 @@ _caller_apply_integrator_pkg() {
       fi
       it_milestone_set_state "${repo}" "${ms_num}" VALIDATE_READY REFACTOR_IN_PROGRESS \
         || { log_error "_caller_apply_integrator_pkg/PASS: milestone transition failed"; return 1; }
+      # KAC-DECISION-LOG: integration PASS 자체가 1급 결정. append-only.
+      if declare -F knowledge_record_decision >/dev/null 2>&1; then
+        local decision_json
+        decision_json="$(jq -n \
+          --arg decision_id "integrator-pass-${ms_num}-${idem_key}" \
+          --arg decision "Integration PASS for milestone #${ms_num}" \
+          --arg rationale "$(jq -r '.summary // empty' "${env_path}")" \
+          --arg cp_path "${new_cp}" \
+          --arg ms_id "${ms_num}" \
+          '{decision_id: $decision_id, decision: $decision, rationale: $rationale, cp_path: $cp_path, affected_milestones: [$ms_id]}')"
+        knowledge_record_decision "${target}" "${decision_json}" || true
+      fi
       _caller_ledger_write "${target}" milestone "${ms_num}" REFACTOR_IN_PROGRESS VALIDATE_READY \
         "${operation}" "${idem_key}" "${manifest_id}" \
         ". + { outcome: \"PASS\", cp_kind: \"Integration\", cp_path: \"${new_cp}\" }"
@@ -742,6 +763,22 @@ _caller_apply_qa_pkg() {
         || { log_error "_caller_apply_qa_pkg/PASS: milestone VALIDATE_IN_PROGRESS→DONE failed"; return 1; }
       it_milestone_close "${repo}" "${ms_num}" \
         || log_warn "_caller_apply_qa_pkg/PASS: it_milestone_close failed"
+      # KAC-CONTEXT-SUMMARY / KAC-DECISION-LOG: milestone DONE 시 누적 산출.
+      if declare -F knowledge_snapshot_context_summary >/dev/null 2>&1; then
+        local _qa_summary _qa_decision
+        _qa_summary="$(jq -r '.artifacts.context_summary // .summary // empty' "${env_path}")"
+        if [ -n "${_qa_summary}" ]; then
+          knowledge_snapshot_context_summary "${target}" "${ms_num}" "${_qa_summary}" || true
+        fi
+        _qa_decision="$(jq -n \
+          --arg decision_id "qa-pass-${ms_num}-${idem_key}" \
+          --arg decision "Milestone #${ms_num} validated DONE" \
+          --arg rationale "$(jq -r '.summary // empty' "${env_path}")" \
+          --arg cp_path "${new_cp}" \
+          --arg ms_id "${ms_num}" \
+          '{decision_id: $decision_id, decision: $decision, rationale: $rationale, cp_path: $cp_path, affected_milestones: [$ms_id]}')"
+        knowledge_record_decision "${target}" "${_qa_decision}" || true
+      fi
       _caller_ledger_write "${target}" milestone "${ms_num}" VALIDATE_IN_PROGRESS DONE \
         "${operation}" "${idem_key}" "${manifest_id}" \
         ". + { outcome: \"PASS\", cp_kind: \"Milestone\", cp_path: \"${new_cp}\" }"

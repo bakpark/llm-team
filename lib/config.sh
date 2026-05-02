@@ -43,7 +43,16 @@ load_target() {
   TARGET_LABEL_PREFIX="$(yq -r '.labels.prefix // ""' "${yaml_file}")"
   TARGET_NOTIFIER_CHANNEL="$(yq -r '.notifier.channel // "none"' "${yaml_file}")"
   TARGET_NOTIFIER_REF="$(yq -r '.notifier.webhook_or_id // ""' "${yaml_file}")"
+  # H4: dev_concurrency 는 향후 cycle 내 fan-out parallelism 용으로 예약된
+  # 필드다. 현재 dispatcher 는 cycle 당 target 하나당 task 하나를 처리한다 —
+  # 실제 병렬도는 (role 데몬 수 × target 수) 다. 값이 1 보다 크면 노이즈를
+  # 내지 않기 위해 INFO 만 한 번 남긴다.
   TARGET_DEV_CONCURRENCY="$(yq -r '.dev_concurrency // 3' "${yaml_file}")"
+  if [ "${TARGET_DEV_CONCURRENCY}" -gt 1 ] 2>/dev/null \
+     && [ "${LLM_TEAM_DEV_CONCURRENCY_NOTICE:-0}" = "0" ]; then
+    log_info "config: dev_concurrency=${TARGET_DEV_CONCURRENCY} 는 아직 dispatcher 에 반영되지 않습니다 (현재 병렬도: role × target)"
+    export LLM_TEAM_DEV_CONCURRENCY_NOTICE=1
+  fi
   TARGET_STALE_THRESHOLD_MIN="$(yq -r '.stale_threshold_minutes // 60' "${yaml_file}")"
   TARGET_ENABLED="$(yq -r '.enabled // false' "${yaml_file}")"
   # RGC-VERIFICATION commands as compact JSON array. Default `["true"]` (PASS).
