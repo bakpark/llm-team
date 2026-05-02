@@ -28,6 +28,7 @@ Commands:
   run-once <target> [--roles list] [--dry-run]
   daemon <start|stop|status|logs>
   status [target]
+  dashboard [--out path] [--target name]... [--lines N] [--no-github]
   pause [--all]
   resume [--all]
 
@@ -67,6 +68,10 @@ case "${cmd}" in
   status)
     shift
     exec "${LLM_TEAM_ROOT}/scripts/cli/status.sh" "$@"
+    ;;
+  dashboard)
+    shift
+    exec "${LLM_TEAM_ROOT}/scripts/cli/dashboard.sh" "$@"
     ;;
   pause|resume)
     shift
