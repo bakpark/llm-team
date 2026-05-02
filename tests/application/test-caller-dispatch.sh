@@ -111,12 +111,33 @@ env_pm="$(write_envelope "{
   output_kind: \"spec_proposal\", agent_role: \"PM\", operation: \"Compose-PM\",
   target_id: \"${ms_pm}\", manifest_id: \"${mid_pm}\",
   input_revision_pins: [], idempotency_key: \"pm:${ms_pm}:r1\",
-  summary: \"PM spec\", artifacts: {}
+  summary: \"PM spec\",
+  artifacts: { milestone_body_proposal: \"# Logging spec\\n\\nbody\" }
 }")"
 caller_apply_output "${repo}" pm "${env_pm}" "${mf_pm}" \
   || fail "spec_proposal PM branch failed"
 [ "$(it_milestone_get_state "${repo}" "${ms_pm}")" = "PM_GATE" ] \
   || fail "spec_proposal PM: milestone should be PM_GATE"
+
+# Empty body must be rejected (architectural guard against silent state-only
+# advance — see _caller_apply_spec_proposal). Without this, PM/PO can emit a
+# structurally valid envelope with no spec content and the milestone advances
+# to *_GATE with nothing for a human reviewer to read.
+ms_pm_empty="$(it_milestone_create "${repo}" "Empty PM" "")"
+it_milestone_set_state "${repo}" "${ms_pm_empty}" PM_DRAFT
+mf_pm_empty="$(make_manifest Compose-PM milestone "${ms_pm_empty}")"
+mid_pm_empty="$(context_manifest_id "${mf_pm_empty}")"
+env_pm_empty="$(write_envelope "{
+  output_kind: \"spec_proposal\", agent_role: \"PM\", operation: \"Compose-PM\",
+  target_id: \"${ms_pm_empty}\", manifest_id: \"${mid_pm_empty}\",
+  input_revision_pins: [], idempotency_key: \"pm:${ms_pm_empty}:r1\",
+  summary: \"PM spec\", artifacts: {}
+}")"
+if caller_apply_output "${repo}" pm "${env_pm_empty}" "${mf_pm_empty}" 2>/dev/null; then
+  fail "spec_proposal PM with empty milestone_body_proposal should be rejected"
+fi
+[ "$(it_milestone_get_state "${repo}" "${ms_pm_empty}")" = "PM_DRAFT" ] \
+  || fail "spec_proposal PM empty body: milestone should remain PM_DRAFT"
 
 # --------------------------------------------------------------------------
 # Branch 3: task_plan (Planner) — happy path + dependency cycle

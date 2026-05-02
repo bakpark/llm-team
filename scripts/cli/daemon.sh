@@ -111,9 +111,34 @@ daemon_stop_role() {
   pid="$(cat "${pid_file}" 2>/dev/null || true)"
   if cli_pid_running "${pid}"; then
     kill "${pid}" >/dev/null 2>&1 || true
-    sleep 1
+    # Wait for graceful exit so the daemon's EXIT trap can release its
+    # lockdir before any subsequent `daemon start` reacquires it.
+    local timeout="${LLM_TEAM_DAEMON_STOP_TIMEOUT:-10}"
+    local waited=0
+    while cli_pid_running "${pid}" && [ "${waited}" -lt "${timeout}" ]; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if cli_pid_running "${pid}"; then
+      kill -9 "${pid}" >/dev/null 2>&1 || true
+      sleep 1
+    fi
   fi
   rm -f "${pid_file}"
+  # Defensive: if the daemon was SIGKILLed before its EXIT trap fired, its
+  # lockdir under workdir/daemon-<role>-<scope>.lockd lingers and would block
+  # the next start. Remove it only if the recorded pid (or any pid inside) is
+  # no longer alive, mirroring the "stale lock" reclaim path in daemon.sh.
+  local scope_label scope_safe lockdir lock_pid
+  scope_label="$(cli_scope_label "${scope}")"
+  scope_safe="$(printf '%s' "${scope_label}" | tr '/ :' '___')"
+  lockdir="${LLM_TEAM_ROOT}/workdir/daemon-${role}-${scope_safe}.lockd"
+  if [ -d "${lockdir}" ]; then
+    lock_pid="$(cat "${lockdir}/pid" 2>/dev/null || true)"
+    if [ -z "${lock_pid}" ] || ! cli_pid_running "${lock_pid}"; then
+      rm -rf "${lockdir}" 2>/dev/null || true
+    fi
+  fi
   printf 'stopped daemon scope=%s role=%s\n' "${scope}" "${role}"
 }
 

@@ -66,13 +66,19 @@ _caller_target() {
 
 _caller_caller_id() { printf '%s' "${LLM_TEAM_CALLER_ID:-caller_dispatch}"; }
 
-# True (rc=0) if ledger already records this idempotency_key.
+# True (rc=0) if ledger already records this idempotency_key as a successful
+# application. Failure rows (result=error|stale|invalid) do NOT count: per
+# RGC-FAILURE the transient failures must remain retryable, otherwise a single
+# adapter glitch permanently locks the next scheduled attempt out as a
+# spurious duplicate.
 _caller_ledger_has_key() {
   local target="$1" key="$2"
   local path
   path="$(transition_ledger_path "${target}")"
   [ -f "${path}" ] || return 1
-  jq -e --arg k "${key}" 'select(.idempotency_key == $k)' "${path}" >/dev/null 2>&1
+  jq -e --arg k "${key}" \
+    'select(.idempotency_key == $k) | select((.result // "") == "applied" or (.result // "") == "duplicate")' \
+    "${path}" >/dev/null 2>&1
 }
 
 # _caller_ledger_write target object_kind object_id from_state to_state \
@@ -246,6 +252,7 @@ caller_apply_output() {
     log_error "caller_apply_output: envelope missing output_kind/idempotency_key/target_id"
     return 1
   fi
+  target_id="$(_caller_target_id_strip_kind "${target_id}")"
 
   # SOC-IDEMPOTENCY: short-circuit duplicate.
   if _caller_ledger_has_key "${target}" "${idempotency_key}"; then
@@ -315,6 +322,22 @@ _caller_object_kind_for_role() {
   esac
 }
 
+# Normalize envelope.target_id by stripping a leading "<kind>:" segment for
+# adapter-level numeric ids (milestone, task, issue). Hierarchical CP ids
+# ("cp:code:...") are preserved.
+#
+# Per prompts/*.md the LLM emits target_id like "milestone:42" / "task:7", but
+# legacy test fixtures and the GitHub adapters expect bare numeric ids. The
+# contract documents (AGC-OUTPUT) do not mandate a specific format, so the
+# adapter layer absorbs both forms here.
+_caller_target_id_strip_kind() {
+  local raw="${1:-}"
+  case "${raw}" in
+    milestone:*|task:*|issue:*) printf '%s' "${raw#*:}" ;;
+    *) printf '%s' "${raw}" ;;
+  esac
+}
+
 # ============================================================================
 # Branch 1/2: spec_proposal (PO / PM)
 # ============================================================================
@@ -340,13 +363,20 @@ _caller_apply_spec_proposal() {
   change_proposal_set_state "${cp_path}" CP_READY_FOR_HUMAN_GATE CP_DRAFT \
     || { log_error "_caller_apply_spec_proposal: CP CP_DRAFT→CP_READY_FOR_HUMAN_GATE failed"; return 1; }
 
-  # Update milestone body if envelope provides one.
+  # Update milestone body — REQUIRED for spec_proposal. prompts/po.md and
+  # prompts/pm.md document the field as `milestone_body_proposal`; legacy
+  # callers may still emit `milestone_body`. Accept either, but reject when
+  # neither is present: a structurally valid envelope with no spec content
+  # would otherwise advance state to *_GATE with nothing for the human
+  # reviewer to read, defeating the gate's purpose.
   local body
-  body="$(jq -r '.artifacts.milestone_body // empty' "${env_path}")"
-  if [ -n "${body}" ]; then
-    it_milestone_update "${repo}" "${target_id}" --body "${body}" \
-      || log_warn "_caller_apply_spec_proposal: milestone_update body failed"
+  body="$(jq -r '.artifacts.milestone_body_proposal // .artifacts.milestone_body // empty' "${env_path}")"
+  if [ -z "${body}" ]; then
+    log_error "_caller_apply_spec_proposal: ${role} envelope missing artifacts.milestone_body_proposal"
+    return 1
   fi
+  it_milestone_update "${repo}" "${target_id}" --body "${body}" \
+    || { log_error "_caller_apply_spec_proposal: milestone_update body failed"; return 1; }
 
   it_milestone_set_state "${repo}" "${target_id}" "${to_state}" "${from_state}" \
     || { log_error "_caller_apply_spec_proposal: milestone ${from_state}→${to_state} failed"; return 1; }
@@ -395,7 +425,12 @@ _caller_apply_task_plan() {
   local count
   count="$(printf '%s' "${tasks}" | jq 'length')"
   if [ "${count}" -eq 0 ]; then
-    log_warn "_caller_apply_task_plan: artifacts.tasks empty"
+    # Fail-fast: an empty task list silently advances milestone to IMPLEMENTING
+    # with no work for Coder, defeating the Decompose stage entirely. Reject so
+    # the runner records `error` and the milestone stays at DECOMPOSE_READY for
+    # retry, mirroring the spec_proposal empty-body guard.
+    log_error "_caller_apply_task_plan: artifacts.tasks is empty"
+    return 1
   fi
 
   # slug → issue_num map (bash 3.2 compatible — flat parallel arrays).
