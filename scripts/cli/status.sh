@@ -45,6 +45,33 @@ status_target() {
     ledger_lines="0"
   fi
 
+  # Worktrees: workdir/<target>/wt/* (each has .git or .inmem-meta).
+  local wt_count=0 wt_names=""
+  if [ -d "${workdir}/wt" ]; then
+    local p name
+    for p in "${workdir}/wt"/*; do
+      [ -d "${p}" ] || continue
+      [ -f "${p}/.git" ] || [ -d "${p}/.git" ] || [ -f "${p}/.inmem-meta.json" ] || continue
+      name="$(basename "${p}")"
+      wt_names="${wt_names}${wt_names:+, }${name}"
+      wt_count=$((wt_count + 1))
+    done
+  fi
+
+  # Change-proposals: workdir/<target>/change-proposals/*.json with state != closed.
+  local cp_open=0
+  if [ -d "${workdir}/change-proposals" ] && command -v jq >/dev/null 2>&1; then
+    local f st
+    for f in "${workdir}/change-proposals"/*.json; do
+      [ -f "${f}" ] || continue
+      st="$(jq -r '.state // ""' "${f}" 2>/dev/null)"
+      case "${st}" in
+        ''|closed|CLOSED) ;;
+        *) cp_open=$((cp_open + 1)) ;;
+      esac
+    done
+  fi
+
   printf 'Target: %s\n' "${target}"
   printf 'Repo: %s\n' "${repo}"
   printf 'Default Branch: %s\n' "${branch}"
@@ -53,7 +80,34 @@ status_target() {
   printf 'Local State:\n'
   printf '  manifests: %s\n' "${manifests}"
   printf '  active lease files: %s\n' "${leases}"
-  printf '  ledger entries: %s\n\n' "${ledger_lines}"
+  printf '  ledger entries: %s\n' "${ledger_lines}"
+  if [ "${wt_count}" -gt 0 ]; then
+    printf '  worktrees: %s (%s)\n' "${wt_count}" "${wt_names}"
+  else
+    printf '  worktrees: 0\n'
+  fi
+  printf '  open change-proposals: %s\n\n' "${cp_open}"
+
+  # Pipeline summary: ledger 의 마지막 N라인을 (object_kind, object_id) 별로
+  # group-by 하여 가장 최근 from→to/result 를 표시.
+  local ledger="${workdir}/ledger/transitions.jsonl"
+  if [ -f "${ledger}" ] && command -v jq >/dev/null 2>&1; then
+    printf 'Pipeline (most recent per object):\n'
+    tail -n 200 "${ledger}" 2>/dev/null \
+      | jq -r 'select(.object_id != null) | [.object_kind, .object_id, .from_state, .to_state, (.result // "?")] | @tsv' 2>/dev/null \
+      | awk -F'\t' '
+        { last[$1"/"$2] = $0 }
+        END { for (k in last) print last[k] }
+      ' \
+      | sort \
+      | awk -F'\t' '{
+          if ($3 == $4) printf "  %-12s %-8s %s (%s)\n", $1, $2, $4, $5
+          else printf "  %-12s %-8s %s -> %s (%s)\n", $1, $2, $3, $4, $5
+        }' \
+      || true
+    printf '\n'
+  fi
+
   "${LLM_TEAM_ROOT}/scripts/cli/daemon.sh" status "${target}"
 }
 

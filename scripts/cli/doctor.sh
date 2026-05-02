@@ -80,6 +80,23 @@ check_target() {
     prompt="${LLM_TEAM_ROOT}/prompts/${role}.md"
     [ -f "${prompt}" ] || fail "missing prompt: ${prompt}"
   done
+
+  # workdir scaffold + agent-cwd (workspace-spec-agent-strategy.md §1).
+  # 미존재 시 "llm-team target init <name>" 안내.
+  local workdir="${LLM_TEAM_ROOT}/workdir/${target}"
+  local missing=""
+  local d
+  for d in manifests leases ledger wt change-proposals; do
+    [ -d "${workdir}/${d}" ] || missing="${missing} ${d}"
+  done
+  for d in po pm planner; do
+    [ -d "${workdir}/agent-cwd/${d}" ] || missing="${missing} agent-cwd/${d}"
+  done
+  if [ -n "${missing}" ]; then
+    fail "workdir missing:${missing} — run 'llm-team target init ${target}'"
+  else
+    ok "workdir scaffold + agent-cwd present"
+  fi
 }
 
 target=""

@@ -22,7 +22,7 @@ Usage: llm-team <command> [args]
 
 Commands:
   doctor [target]                  Check local prerequisites and target config
-  target <list|show|add|enable|disable>
+  target <list|show|add|init|enable|disable>
   labels bootstrap <target> [--dry-run]
   run <role> <target> [--dry-run]
   run-once <target> [--roles list] [--dry-run]

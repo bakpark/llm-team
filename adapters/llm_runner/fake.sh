@@ -40,6 +40,8 @@
 # 환경변수 요약:
 #   LLM_TEAM_FAKE_FIXTURE_DIR     필수. fixture 파일/디렉토리 루트.
 #   LLM_TEAM_FAKE_WRAP_FENCED     선택. 기본 "auto".
+#   LLM_TEAM_FAKE_PWD_LOG         선택. 설정 시 호출 시점의 pwd 한 줄을 append.
+#                                 cwd 격리 검증 테스트용.
 
 # Internal: prompt 의 첫 N줄에서 헤더 값 추출. echo value or empty.
 _fake_extract_header() {
@@ -127,6 +129,10 @@ lr_invoke() {
   if [ -z "${prompt}" ]; then
     log_error "lr_invoke: empty prompt"
     return 64
+  fi
+
+  if [ -n "${LLM_TEAM_FAKE_PWD_LOG:-}" ]; then
+    pwd >>"${LLM_TEAM_FAKE_PWD_LOG}" 2>/dev/null || true
   fi
 
   local role op manifest

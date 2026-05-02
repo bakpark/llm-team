@@ -15,6 +15,7 @@ Usage:
   llm-team target add [name] --repo owner/repo|github-url [--branch main] [--clone-path path] [--label-prefix prefix] [--notifier none] [--webhook-ref KEY] [--disabled] [--force]
   llm-team target add [name] --url github-url [options]
   llm-team target add [name] --from-current [--path checkout] [options]
+  llm-team target init <name> [--dry-run] [--skip-labels]
   llm-team target enable <name>
   llm-team target disable <name>
 EOF
@@ -176,6 +177,79 @@ EOF
   printf 'Created target %s at %s\n' "${name}" "${file}"
 }
 
+target_init() {
+  local target="${1:-}"
+  shift || true
+  local dry_run=0 skip_labels=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dry-run) dry_run=1; shift ;;
+      --skip-labels) skip_labels=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) cli_die "unknown target init argument: $1" ;;
+    esac
+  done
+  [ -n "${target}" ] || cli_die "target init requires <name>"
+  cli_require_target_file "${target}"
+
+  cli_source_runtime
+  load_target "${target}" || cli_die "failed to load target ${target}"
+
+  local workdir="${LLM_TEAM_ROOT}/workdir/${target}"
+  printf '[init] target %s\n' "${target}"
+
+  # 1. canonical clone (workspace adapter는 git_worktree 가 default).
+  if [ "${dry_run}" -eq 1 ]; then
+    printf '[init] (dry-run) skipping ws_ensure_clone\n'
+  else
+    local clone_out
+    if clone_out="$(ws_ensure_clone "${target}" 2>&1)"; then
+      printf '[init] clone ready: %s\n' "${clone_out}"
+    else
+      printf '[init] WARN: ws_ensure_clone failed:\n%s\n' "${clone_out}" >&2
+    fi
+  fi
+
+  # 2. workdir scaffold.
+  local d
+  for d in manifests leases ledger wt change-proposals; do
+    mkdir -p "${workdir}/${d}"
+  done
+  printf '[init] workdir scaffold: %s/{manifests,leases,ledger,wt,change-proposals}\n' "${workdir}"
+
+  # 3. agent-cwd (read-only context, agent_workspace_for 와 동일 정책).
+  local role role_lower
+  for role in po pm planner; do
+    mkdir -p "${workdir}/agent-cwd/${role}"
+  done
+  printf '[init] agent-cwd: %s/agent-cwd/{po,pm,planner}\n' "${workdir}"
+
+  # 4. labels bootstrap (best-effort — gh 인증 미설정 시 warn).
+  if [ "${skip_labels}" -eq 1 ]; then
+    printf '[init] (--skip-labels) skipping labels bootstrap\n'
+  else
+    local label_args=("${LLM_TEAM_ROOT}/scripts/bootstrap-labels.sh" "${target}")
+    [ "${dry_run}" -eq 1 ] && label_args+=(--dry-run)
+    if "${label_args[@]}" >/dev/null 2>&1; then
+      printf '[init] labels bootstrap: ok\n'
+    else
+      printf '[init] WARN: labels bootstrap failed (gh auth?). Re-run: llm-team labels bootstrap %s\n' "${target}" >&2
+    fi
+  fi
+
+  # 5. role cwd policy matrix (agent_workspace_for 와 단일 source-of-truth).
+  printf '[init] role cwd policy:\n'
+  for role in PO PM Planner; do
+    role_lower="$(printf '%s' "${role}" | tr '[:upper:]' '[:lower:]')"
+    printf '  %-10s %s\n' "${role}" "${workdir}/agent-cwd/${role_lower}"
+  done
+  for role in Coder Reviewer Integrator QA; do
+    printf '  %-10s %s/wt/task-<unit_id>\n' "${role}" "${workdir}"
+  done
+
+  printf '[init] target %s ready\n' "${target}"
+}
+
 target_set_enabled() {
   local target="${1:-}" enabled="$2" file tmp
   [ -n "${target}" ] || cli_die "target ${enabled} requires <name>"
@@ -205,6 +279,7 @@ case "${cmd}" in
   list) shift; [ "$#" -eq 0 ] || cli_die "target list takes no arguments"; target_list ;;
   show) shift; target_show "$@" ;;
   add) shift; target_add "$@" ;;
+  init) shift; target_init "$@" ;;
   enable) shift; target_set_enabled "${1:-}" true ;;
   disable) shift; target_set_enabled "${1:-}" false ;;
   *) cli_die "unknown target command: ${cmd}" ;;

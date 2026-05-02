@@ -36,7 +36,7 @@ run_capture() {
 
 out="$(run_capture help "${LLM_TEAM_ROOT}/bin/llm-team" --help)"
 assert_contains "${out}" "Usage: llm-team" "help"
-assert_contains "${out}" "target <list|show|add|enable|disable>" "help commands"
+assert_contains "${out}" "target <list|show|add|init|enable|disable>" "help commands"
 
 out="$(run_capture target-list "${LLM_TEAM_ROOT}/bin/llm-team" target list)"
 assert_contains "${out}" "myapp" "target list"

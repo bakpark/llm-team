@@ -51,6 +51,8 @@ export LLM_TEAM_ROOT
 . "${LLM_TEAM_ROOT}/application/human_signal.sh"
 # shellcheck source=../application/recovery.sh
 . "${LLM_TEAM_ROOT}/application/recovery.sh"
+# shellcheck source=../application/agent_workspace.sh
+. "${LLM_TEAM_ROOT}/application/agent_workspace.sh"
 
 # ============================================================================
 # Argument parsing
@@ -387,8 +389,23 @@ PROMPT_TEXT="$(agent_prompt_assemble "${ROLE}" "${MANIFEST_FILE}")" || {
   exit 1
 }
 
+# Resolve role-scoped agent cwd (workspace-spec-agent-strategy.md §1).
+# lr_invoke runs in this directory so target-repo edits never leak into
+# LLM_TEAM_ROOT. Coder/Reviewer/Integrator/QA require ws_ensure beforehand
+# (already done above for Coder and the Reviewer/Integrator/QA verification block).
+AGENT_CWD=""
+if ! AGENT_CWD="$(agent_workspace_for "${ROLE}" "${TARGET_OBJECT_ID}" 2>/dev/null)"; then
+  log_error "runner: agent_workspace_for failed for ${ROLE} ${TARGET_OBJECT_ID}"
+  _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+  _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
+    "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
+    "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "error" || true
+  exit 1
+fi
+log_info "runner: agent_cwd=${AGENT_CWD} role=${ROLE}"
+
 LLM_OUT=""
-if ! LLM_OUT="$(lr_invoke "${PROMPT_TEXT}" 2>/dev/null)"; then
+if ! LLM_OUT="$( cd "${AGENT_CWD}" && lr_invoke "${PROMPT_TEXT}" 2>/dev/null )"; then
   log_error "runner: lr_invoke failed"
   _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
   _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
