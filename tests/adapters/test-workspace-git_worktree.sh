@@ -242,6 +242,209 @@ if [ -d "${LOCK_DIR}" ]; then
 fi
 
 # ----------------------------------------------------------------------------
+# Test 7: B1 — ws_apply_patch rejects malformed patch via --check precheck
+# ----------------------------------------------------------------------------
+
+# Create a fresh unit for negative tests so failures don't pollute task-1.
+UNIT_NEG="task-neg"
+WS_NEG="$(ws_ensure "${UNIT_NEG}" 2>/dev/null)" || fail "ws_ensure for ${UNIT_NEG} failed"
+NEG_PRE_HEAD="$(cd "${WS_NEG}" && git rev-parse HEAD)"
+
+BAD_PATCH="${TEST_TMP}/bad.diff"
+cat >"${BAD_PATCH}" <<'EOF'
+diff --git a/missing.txt b/missing.txt
+index abcdef0..fedcba0 100644
+--- a/missing.txt
++++ b/missing.txt
+@@ -1 +1 @@
+-old
++new
+EOF
+if ws_apply_patch "${UNIT_NEG}" "${BAD_PATCH}" "test: bad patch" >/dev/null 2>&1; then
+  fail "B1 regression: ws_apply_patch accepted malformed patch (file missing, blob unknown)"
+fi
+NEG_HEAD_AFTER="$(cd "${WS_NEG}" && git rev-parse HEAD)"
+if [ "${NEG_HEAD_AFTER}" != "${NEG_PRE_HEAD}" ]; then
+  fail "I2 regression: malformed patch advanced HEAD"
+fi
+if [ -n "$(cd "${WS_NEG}" && git status --porcelain)" ]; then
+  fail "I2 regression: malformed patch left dirty working tree"
+fi
+
+# ----------------------------------------------------------------------------
+# Test 8: B1 — 3way conflict markers force rollback (working tree unchanged)
+# ----------------------------------------------------------------------------
+
+# Setup: in WS_NEG seed file foo with "A", commit. Capture blob A. Then change
+# foo to "B" and commit. Build a patch that goes A→C; apply on top of "B" must
+# trigger 3way conflict (markers in working tree).
+UNIT_CFL="task-conflict"
+WS_CFL="$(ws_ensure "${UNIT_CFL}" 2>/dev/null)" || fail "ws_ensure for ${UNIT_CFL} failed"
+(
+  cd "${WS_CFL}"
+  printf 'A\n' >foo.txt
+  git add foo.txt
+  git -c user.name=t -c user.email=t@local -c commit.gpgsign=false \
+      commit --quiet -m "seed A"
+) >/dev/null 2>&1
+A_BLOB="$(cd "${WS_CFL}" && git hash-object foo.txt)"
+HEAD_AT_A="$(cd "${WS_CFL}" && git rev-parse HEAD)"
+
+# Build A→C patch using real A blob hash so --3way can locate base.
+C_BLOB="$(printf 'C\n' | git --git-dir="${WS_CFL}/.git" hash-object --stdin -w 2>/dev/null)"
+PATCH_AC="${TEST_TMP}/ac.diff"
+cat >"${PATCH_AC}" <<EOF
+diff --git a/foo.txt b/foo.txt
+index ${A_BLOB:0:7}..${C_BLOB:0:7} 100644
+--- a/foo.txt
++++ b/foo.txt
+@@ -1 +1 @@
+-A
++C
+EOF
+
+# Advance worktree to "B".
+(
+  cd "${WS_CFL}"
+  printf 'B\n' >foo.txt
+  git -c user.name=t -c user.email=t@local -c commit.gpgsign=false \
+      commit --quiet -am "advance to B"
+) >/dev/null 2>&1
+HEAD_AT_B="$(cd "${WS_CFL}" && git rev-parse HEAD)"
+
+# Apply A→C patch on top of B. --3way will produce conflict markers; our guard
+# must detect and rollback.
+if ws_apply_patch "${UNIT_CFL}" "${PATCH_AC}" "test: should conflict" >/dev/null 2>&1; then
+  fail "B1 regression: ws_apply_patch accepted patch that produced conflict markers"
+fi
+HEAD_POST_CFL="$(cd "${WS_CFL}" && git rev-parse HEAD)"
+if [ "${HEAD_POST_CFL}" != "${HEAD_AT_B}" ]; then
+  fail "I2 regression: conflict-leaving patch advanced HEAD (expected ${HEAD_AT_B}, got ${HEAD_POST_CFL})"
+fi
+if [ -n "$(cd "${WS_CFL}" && git status --porcelain)" ]; then
+  fail "I2 regression: conflict-leaving patch left dirty working tree"
+fi
+if [ "$(cd "${WS_CFL}" && cat foo.txt)" != "B" ]; then
+  fail "I2 regression: conflict rollback did not restore foo.txt to B"
+fi
+
+# ----------------------------------------------------------------------------
+# Test 9: G1 — commit failure (gpgsign with missing key) triggers rollback
+# ----------------------------------------------------------------------------
+
+UNIT_COMMIT="task-commit-fail"
+WS_COMMIT="$(ws_ensure "${UNIT_COMMIT}" 2>/dev/null)" || fail "ws_ensure for ${UNIT_COMMIT} failed"
+HEAD_PRE_COMMIT="$(cd "${WS_COMMIT}" && git rev-parse HEAD)"
+
+# Force commit to fail by enabling gpgsign with a non-existent signing key. Our
+# function passes -c user.name/user.email but does NOT override commit.gpgsign,
+# so this propagates and `git commit` fails.
+(
+  cd "${WS_COMMIT}"
+  git config commit.gpgsign true
+  git config gpg.program /bin/false
+  git config user.signingkey "AAAAAAAAAAAAAAAA"
+)
+
+GOOD_PATCH="${TEST_TMP}/good.diff"
+cat >"${GOOD_PATCH}" <<'EOF'
+diff --git a/added.txt b/added.txt
+new file mode 100644
+index 0000000..1eb19ce
+--- /dev/null
++++ b/added.txt
+@@ -0,0 +1 @@
++payload
+EOF
+
+if ws_apply_patch "${UNIT_COMMIT}" "${GOOD_PATCH}" "test: commit fail" >/dev/null 2>&1; then
+  fail "G1 regression: ws_apply_patch reported success despite commit failure"
+fi
+HEAD_POST_COMMIT="$(cd "${WS_COMMIT}" && git rev-parse HEAD)"
+if [ "${HEAD_POST_COMMIT}" != "${HEAD_PRE_COMMIT}" ]; then
+  fail "I2 regression: commit failure case advanced HEAD"
+fi
+if [ -n "$(cd "${WS_COMMIT}" && git status --porcelain)" ]; then
+  fail "I2 regression: commit failure left dirty working tree (status not clean)"
+fi
+if [ -e "${WS_COMMIT}/added.txt" ]; then
+  fail "I2 regression: commit failure left untracked file added.txt behind"
+fi
+
+# Restore good config so this worktree could be reused later if needed.
+(
+  cd "${WS_COMMIT}"
+  git config --unset commit.gpgsign
+  git config --unset gpg.program
+  git config --unset user.signingkey
+) >/dev/null 2>&1
+
+# ----------------------------------------------------------------------------
+# Test 10: G4 — multi-hunk patch idempotent re-apply (real agent shape)
+# ----------------------------------------------------------------------------
+
+UNIT_MULTI="task-multi"
+WS_MULTI="$(ws_ensure "${UNIT_MULTI}" 2>/dev/null)" || fail "ws_ensure for ${UNIT_MULTI} failed"
+
+MULTI_PATCH="${TEST_TMP}/multi.diff"
+cat >"${MULTI_PATCH}" <<'EOF'
+diff --git a/a.txt b/a.txt
+new file mode 100644
+index 0000000..7898192
+--- /dev/null
++++ b/a.txt
+@@ -0,0 +1 @@
++a
+diff --git a/b.txt b/b.txt
+new file mode 100644
+index 0000000..6178079
+--- /dev/null
++++ b/b.txt
+@@ -0,0 +1 @@
++b
+diff --git a/c.txt b/c.txt
+new file mode 100644
+index 0000000..f2ad6c7
+--- /dev/null
++++ b/c.txt
+@@ -0,0 +1 @@
++c
+EOF
+
+ws_apply_patch "${UNIT_MULTI}" "${MULTI_PATCH}" "test: multi-file" \
+  || fail "G4 regression: ws_apply_patch failed on multi-file patch"
+HEAD_M1="$(cd "${WS_MULTI}" && git rev-parse HEAD)"
+
+# Re-apply identical patch — must be idempotent (HEAD unchanged, exit 0).
+ws_apply_patch "${UNIT_MULTI}" "${MULTI_PATCH}" "test: multi-file retry" \
+  || fail "G4 regression: idempotent retry of multi-file patch failed"
+HEAD_M2="$(cd "${WS_MULTI}" && git rev-parse HEAD)"
+if [ "${HEAD_M2}" != "${HEAD_M1}" ]; then
+  fail "G4 regression: multi-file idempotent retry advanced HEAD"
+fi
+if [ -n "$(cd "${WS_MULTI}" && git status --porcelain)" ]; then
+  fail "G4 regression: multi-file idempotent retry left dirty working tree"
+fi
+
+# ----------------------------------------------------------------------------
+# Test 11: G2 — ws_ensure / ws_refresh fail-fast when fetchlock is held
+# ----------------------------------------------------------------------------
+
+LOCK_HOLD="${LLM_TEAM_ROOT}/workdir/${TEST_TARGET}/repo.fetchlock"
+mkdir -p "$(dirname "${LOCK_HOLD}")"
+mkdir "${LOCK_HOLD}" 2>/dev/null \
+  || fail "fixture: could not pre-create lock dir for held-lock test"
+# Force fresh mtime so stale-reclaim heuristic does NOT fire (60s threshold).
+touch "${LOCK_HOLD}"
+
+UNIT_LOCKED="task-locked"
+if ws_ensure "${UNIT_LOCKED}" >/dev/null 2>&1; then
+  fail "G2 regression: ws_ensure proceeded despite fetchlock being held"
+fi
+# Released the lock.
+rmdir "${LOCK_HOLD}" 2>/dev/null || rm -rf "${LOCK_HOLD}" 2>/dev/null
+
+# ----------------------------------------------------------------------------
 # Done
 # ----------------------------------------------------------------------------
 
