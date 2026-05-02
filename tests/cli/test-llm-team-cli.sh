@@ -7,6 +7,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLM_TEAM_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export LLM_TEAM_ROOT
 
+# shellcheck source=../_helpers/ephemeral_target.sh
+. "${LLM_TEAM_ROOT}/tests/_helpers/ephemeral_target.sh"
+
+TARGET="$(ephemeral_target_create cli-smoke-$$)"
+
 fail() {
   echo "FAIL: $*" >&2
   exit 1
@@ -34,49 +39,50 @@ run_capture() {
   printf '%s\n' "${out}"
 }
 
+tmp_target="cli-url-$$"
+cleanup_all() {
+  ephemeral_target_cleanup "${TARGET}"
+  rm -f "${LLM_TEAM_ROOT}/targets/${tmp_target}.yaml" "${LLM_TEAM_ROOT}/targets/cli-inferred.yaml"
+  rm -rf "${LLM_TEAM_ROOT}/inputs/${tmp_target}" "${LLM_TEAM_ROOT}/inputs/cli-inferred"
+}
+trap cleanup_all EXIT
+
 out="$(run_capture help "${LLM_TEAM_ROOT}/bin/llm-team" --help)"
 assert_contains "${out}" "Usage: llm-team" "help"
 assert_contains "${out}" "target <list|show|add|init|enable|disable>" "help commands"
 
 out="$(run_capture target-list "${LLM_TEAM_ROOT}/bin/llm-team" target list)"
-assert_contains "${out}" "myapp" "target list"
+assert_contains "${out}" "${TARGET}" "target list"
 
-out="$(run_capture target-show "${LLM_TEAM_ROOT}/bin/llm-team" target show myapp)"
-assert_contains "${out}" "owner: bakparkbj" "target show owner"
-assert_contains "${out}" "repo: myapp" "target show repo"
+out="$(run_capture target-show "${LLM_TEAM_ROOT}/bin/llm-team" target show "${TARGET}")"
+assert_contains "${out}" "owner: example-owner" "target show owner"
+assert_contains "${out}" "repo: ${TARGET}" "target show repo"
 
 # doctor 는 workdir scaffold + agent-cwd 를 요구하므로
 # clean checkout 에서도 동작하도록 target init 을 먼저 실행한다
 # (--dry-run 은 clone/labels 네트워크 호출을 건너뛰고 디렉토리만 생성).
-out="$(run_capture target-init "${LLM_TEAM_ROOT}/bin/llm-team" target init myapp --dry-run --skip-labels)"
-assert_contains "${out}" "target myapp ready" "target init"
+out="$(run_capture target-init "${LLM_TEAM_ROOT}/bin/llm-team" target init "${TARGET}" --dry-run --skip-labels)"
+assert_contains "${out}" "target ${TARGET} ready" "target init"
 
-out="$(run_capture doctor "${LLM_TEAM_ROOT}/bin/llm-team" doctor myapp)"
+out="$(run_capture doctor "${LLM_TEAM_ROOT}/bin/llm-team" doctor "${TARGET}")"
 assert_contains "${out}" "Doctor: OK" "doctor"
 
-out="$(run_capture status "${LLM_TEAM_ROOT}/bin/llm-team" status myapp)"
-assert_contains "${out}" "Target: myapp" "status"
+out="$(run_capture status "${LLM_TEAM_ROOT}/bin/llm-team" status "${TARGET}")"
+assert_contains "${out}" "Target: ${TARGET}" "status"
 assert_contains "${out}" "scope" "status daemon table"
 
-out="$(run_capture daemon-status "${LLM_TEAM_ROOT}/bin/llm-team" daemon status myapp --role po)"
-assert_contains "${out}" "myapp" "daemon status target"
+out="$(run_capture daemon-status "${LLM_TEAM_ROOT}/bin/llm-team" daemon status "${TARGET}" --role po)"
+assert_contains "${out}" "${TARGET}" "daemon status target"
 assert_contains "${out}" "po" "daemon status role"
 
-out="$(run_capture run-dry "${LLM_TEAM_ROOT}/bin/llm-team" run po myapp --dry-run)"
+out="$(run_capture run-dry "${LLM_TEAM_ROOT}/bin/llm-team" run po "${TARGET}" --dry-run)"
 assert_contains "${out}" "dry-run manifest=" "run dry-run"
 
-out="$(run_capture run-once-dry "${LLM_TEAM_ROOT}/bin/llm-team" run-once myapp --roles po --dry-run)"
+out="$(run_capture run-once-dry "${LLM_TEAM_ROOT}/bin/llm-team" run-once "${TARGET}" --roles po --dry-run)"
 assert_contains "${out}" "dry-run manifest=" "run-once dry-run"
 
-out="$(run_capture labels-dry "${LLM_TEAM_ROOT}/bin/llm-team" labels bootstrap myapp --dry-run)"
+out="$(run_capture labels-dry "${LLM_TEAM_ROOT}/bin/llm-team" labels bootstrap "${TARGET}" --dry-run)"
 assert_contains "${out}" "task:ready" "labels bootstrap"
-
-tmp_target="cli-url-$$"
-cleanup_target() {
-  rm -f "${LLM_TEAM_ROOT}/targets/${tmp_target}.yaml" "${LLM_TEAM_ROOT}/targets/cli-inferred.yaml"
-  rm -rf "${LLM_TEAM_ROOT}/inputs/${tmp_target}" "${LLM_TEAM_ROOT}/inputs/cli-inferred"
-}
-trap cleanup_target EXIT
 
 out="$(run_capture target-add-url "${LLM_TEAM_ROOT}/bin/llm-team" target add "${tmp_target}" --url https://github.com/example/cli-url.git --branch develop --disabled --force)"
 assert_contains "${out}" "Created target ${tmp_target}" "target add url"

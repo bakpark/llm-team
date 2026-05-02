@@ -7,9 +7,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLM_TEAM_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export LLM_TEAM_ROOT
 
+# shellcheck source=../_helpers/ephemeral_target.sh
+. "${LLM_TEAM_ROOT}/tests/_helpers/ephemeral_target.sh"
+TARGET="$(ephemeral_target_create contract-smoke-$$)"
+trap 'ephemeral_target_cleanup "${TARGET}"' EXIT
+
 roles=(po pm planner coder reviewer integrator qa)
 for role in "${roles[@]}"; do
-  if ! bash "${LLM_TEAM_ROOT}/scheduler/runner.sh" "${role}" myapp --dry-run >/tmp/llm-team-runner-${role}.out 2>&1; then
+  if ! bash "${LLM_TEAM_ROOT}/scheduler/runner.sh" "${role}" "${TARGET}" --dry-run >/tmp/llm-team-runner-${role}.out 2>&1; then
     echo "FAIL: runner dry-run failed for role=${role}" >&2
     tail -20 "/tmp/llm-team-runner-${role}.out" >&2 || true
     exit 1
@@ -20,7 +25,7 @@ for role in "${roles[@]}"; do
   fi
 done
 
-if ! bash "${LLM_TEAM_ROOT}/scripts/bootstrap-labels.sh" myapp --dry-run >/tmp/llm-team-bootstrap-labels.out 2>&1; then
+if ! bash "${LLM_TEAM_ROOT}/scripts/bootstrap-labels.sh" "${TARGET}" --dry-run >/tmp/llm-team-bootstrap-labels.out 2>&1; then
   echo "FAIL: bootstrap-labels dry-run failed" >&2
   tail -20 /tmp/llm-team-bootstrap-labels.out >&2 || true
   exit 1
