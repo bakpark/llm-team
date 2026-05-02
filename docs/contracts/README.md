@@ -62,6 +62,7 @@ docs/contracts/
 - `docs/contracts/agent-and-context-contract.md#AGC-OUTPUT`
 - `docs/contracts/agent-and-context-contract.md#AGC-OUTPUT-RUNTIME-ENRICH`
 - `docs/contracts/agent-and-context-contract.md#AGC-ISSUE-BODY`
+- `docs/contracts/state-and-operation-contract.md#SOC-INTAKE`
 - `docs/contracts/state-and-operation-contract.md#SOC-OPERATIONS`
 - `docs/contracts/state-and-operation-contract.md#SOC-DISPATCH-MATRIX`
 - `docs/contracts/state-and-operation-contract.md#SOC-RECOVERY-OPERATION`

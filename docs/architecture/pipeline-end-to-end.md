@@ -93,7 +93,7 @@ Caller 는 LLM 어댑터(현 구현: `claude_code`, `fake`) 를 통해 호출하
 | QA | `verdict=STALE` | CP `STALE` | milestone `VALIDATE_READY` |
 | (any) | `failure` | ledger 기록만 | 상태 변경 없음 |
 
-각 분기는 `AGC-OUTPUT-RUNTIME-ENRICH` 에서 정의된 enrichment 결과(`pr_number`, `pr_head_sha`, `cp_path`, `cp_kind`, `artifact_ref`)를 입력으로 사용한다.
+각 분기는 단계 4 의 enrichment 가 envelope 의 `runtime_metadata` 영역에 후주입한 키들(예: 영속 저장소가 발급한 식별자, 통합 단위 HEAD)을 입력으로 사용한다. 키의 구체 이름은 영속 저장소 어댑터가 결정한다.
 
 ### 6. Cleanup + Ledger
 

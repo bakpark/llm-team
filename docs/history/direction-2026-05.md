@@ -6,7 +6,7 @@
 
 ## 1. 배경
 
-`llm-team.md` 는 10 개 invariant 와 권한 경계만 정의하고 구체 형식은 5 개 contract 에 위임한다. 분석 결과(`.human/draft/design-and-pipeline-analysis.md`, `.human/draft/pipeline-fixes-known-issues.md`, `.human/draft/pipeline-fixes-integrated-design.md`, `.human/draft/design-review-and-issue-strategy.md`)는 다음을 보고했다.
+`llm-team.md` 는 10 개 invariant 와 권한 경계만 정의하고 구체 형식은 5 개 contract 에 위임한다. 분석 결과(`.human/analysis/design-and-pipeline-analysis.md`, `.human/archive/2026-05-pipeline-fixes/pipeline-fixes-known-issues.md`, `.human/archive/2026-05-pipeline-fixes/pipeline-fixes-integrated-design.md`, `.human/archive/2026-05-pipeline-fixes/design-review-and-issue-strategy.md`)는 다음을 보고했다.
 
 - 계약-구현 정합성은 강함(13 milestone × 8 task × 10 CP 상태 1:1 매핑, output envelope 강제, 마커 단일 출처).
 - 그러나 *권한 경계 혼선* 이 contract 수준에 잔존: Reviewer/Integrator/QA 가 LLM 이 알 수 없는 runtime metadata(`pr_number`, `cp_path`, `cp_kind`, `artifact_ref`)를 envelope 에 직접 쓰도록 요구되는 부분(헌법 Inv#3 위반 소지).
@@ -61,15 +61,14 @@ draft 의 모든 issue/제안을 다음 4 개 destination 으로 분류한다. (
 
 ## 4. 5-Phase 로드맵
 
-- **Phase 0** (현재): 본 문서. 사람 승인 게이트.
-- **Phase 1** (단독 PR): AGC-OUTPUT-RUNTIME-ENRICH 신설 + SOC-OPERATIONS 의 Implement/Review/Refactor/Validate 절을 metadata-free envelope 로 정정. **이 PR 머지 전 다른 contract/architecture 작업 대기.**
-- **Phase 2**: P0 architecture 작성 — `pipeline-end-to-end.md`, `application-modules.md`, `feature-request-intake.md`, `architecture/README.md` 인덱스 갱신.
-- **Phase 3**: 운영 안전성 contract 확장 PR(분할).
-  - PR-β: AGC-CONTEXT-MANIFEST(fetch_scope), RGC-LEASE(role-specific TTL + idempotency_token), RGC-LEDGER(result enum 확장).
-  - PR-γ: AGC-ISSUE-BODY 신설, SOC-OPERATIONS side-effect 표(보강), RGC-FAILURE(partial-fail rollback), RGC-DAEMON-STARTUP 신설, KAC-MANIFEST-FROM-KNOWLEDGE.
-  - PR-δ: `target-config-contract.md`(prefix `TCC`), `agent-runner-port-contract.md`(prefix `ARC`).
-  - 이어서 P1/P2 architecture(`github-side-effect-timeline.md`, `lease-and-recovery.md`, `context-snapshot.md`, `self-hosting.md`, `agent-runner-adapters.md`) + 기존 architecture 확장(daemons, tools, state-machine, agent-output-format-mapping).
-- **Phase 4**: `.human/draft/` 의 graduate 항목 → `.human/archive/2026-05-pipeline-fixes/` 이동.
+- **Phase 0** (머지됨): 본 문서. 사람 승인 게이트.
+- **Phase 1** (머지됨, commit `8462767` 의 일부): AGC-OUTPUT-RUNTIME-ENRICH 신설 + SOC-OPERATIONS 의 Implement/Review/Refactor/Validate 절 metadata-free 정정.
+- **Phase 2** (머지됨, commit `8462767` 의 일부): P0 architecture — `pipeline-end-to-end.md`, `application-modules.md`, `feature-request-intake.md`, `architecture/README.md` 인덱스 갱신.
+- **Phase 3** (머지됨, commit `8462767` + 본 phase): 운영 안전성 contract 확장과 architecture P1/P2.
+  - contract: AGC-CONTEXT-MANIFEST(fetch_scope), RGC-LEASE(role-specific TTL + lease_token), RGC-LEDGER(result enum 확장), AGC-ISSUE-BODY, SOC-DISPATCH-MATRIX, SOC-RECOVERY-OPERATION, RGC-FAILURE(partial-fail rollback), RGC-DAEMON-STARTUP, KAC-MANIFEST-FROM-KNOWLEDGE, `target-config-contract.md`(TCC), `agent-runner-port-contract.md`(ARC).
+  - architecture P1/P2: `lease-and-recovery.md`, `context-snapshot.md`, `github-side-effect-timeline.md`, `self-hosting.md`, `agent-runner-adapters.md`.
+  - 기존 architecture 확장: `daemons.md`(Daemon Lifecycle), `tools.md`(Helper Call-Site Map), `state-machine.md`(Recover Operation Mapping), `agent-output-format-mapping.md`(Issue Body 2-Layer Rendering).
+- **Phase 4** (진행): `.human/draft/` 의 graduate 항목 → `.human/archive/2026-05-pipeline-fixes/` 이동.
 
 ## 5. Open Questions — 본 direction 의 기본 선택
 
@@ -79,7 +78,7 @@ draft 의 모든 issue/제안을 다음 4 개 destination 으로 분류한다. (
 | Q2 | 신설 contract(`target-config`, `agent-runner-port`) 분리 | 분리 | 흡수 시 RGC + AGC 비대화, prefix 미신설 |
 | Q3 | 문서 언어 | 한국어 유지 | 영문 병기 시 Phase 3 PR 분량 ×2 |
 | Q4 | anchor prefix 신설 | TCC, ARC | 거부 시 Q2 와 연동 |
-| Q5 | Phase 0 산출물 위치 | `docs/architecture/direction-2026-05.md` (본 문서) | contracts/CHANGELOG-DIRECTION.md 로 이전 시 architecture 가 단일 진입점 |
+| Q5 | Phase 0 산출물 위치 | `docs/history/direction-2026-05.md` (본 문서, Phase 0–3 머지 후 architecture 에서 history 로 이동) | contracts/CHANGELOG-DIRECTION.md 로 이전 시 architecture 가 단일 진입점 |
 
 다른 결정을 원하면 본 문서를 수정한 뒤 Phase 1 진입.
 
@@ -97,4 +96,4 @@ draft 의 모든 issue/제안을 다음 4 개 destination 으로 분류한다. (
 
 ---
 
-**Status**: Draft (Phase 0). 사람 승인 시 본 문서 §4 의 Phase 1 진입.
+**Status**: Phase 0–3 머지됨. Phase 4(draft archive 이동) 적용 후 본 문서를 archive 로 이동한다.

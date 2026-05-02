@@ -121,6 +121,21 @@ related_change_proposal_revision_pin: <pin>
 
 Caller는 signal 검증 후에만 operational write를 수행한다.
 
+## Recover Operation Mapping
+
+[`SOC-RECOVERY-OPERATION`](../contracts/state-and-operation-contract.md#SOC-RECOVERY-OPERATION) 의 4 trigger × ledger result 매트릭스가 GitHub label/marker 에 다음과 같이 인코딩된다.
+
+| Trigger | label/marker 변화 | Ledger result |
+|---|---|---|
+| stale lease | `*_IN_PROGRESS` → 직전 ready 상태 | `recovered` |
+| lease-expiry 진행 중 | `*_IN_PROGRESS` 유지 후 partial-fail rollback 결과로 분기 | `rolled_back` 또는 잔여 retry 시 `error` |
+| human-revoke | 객체별 ready 상태 + signal marker close | `recovered` |
+| partial-fail rollback | 부분 write 흔적(label/marker)을 caller 가 명시 제거 | `rolled_back` |
+
+label/marker 갱신 자체는 contract operation 이 아니라 *Recover 의 부수효과* 다. 따라서 외부 사용자가 label/marker 를 직접 수정하면 contract 위반이다.
+
+본 architecture 의 검출 한계: pin re-check([`#AGC-CONTEXT-MANIFEST`](../contracts/agent-and-context-contract.md#AGC-CONTEXT-MANIFEST))는 manifest entry 의 revision pin(예: `updatedAt`) 이 변하면 이를 감지한다. 영속 저장소가 label/marker 변경을 객체 revision pin 에 반영하면(예: GitHub 의 `updatedAt` 이 label 변경 시 갱신) 검출이 자동화된다. 그렇지 않은 어댑터에서는 외부 수정 검출은 best-effort 이며, 운영 정책으로 *외부 수정을 허용하지 않음* 을 알려야 한다(라벨 권한 격리, 외부 PR 본문 수정 차단 등). 검출 강화는 향후 architecture 갱신의 대상이다.
+
 ## Transition Ledger Encoding
 
 모든 operational transition은 [`RGC-LEDGER`](../contracts/reliability-and-gate-contract.md#RGC-LEDGER)의 필드를 기록한다.

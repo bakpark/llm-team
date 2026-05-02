@@ -53,7 +53,7 @@ Caller는 `KAC-MANIFEST` 의 항목을 manifest entry로 변환할 때 다음을
 
 - `artifact_kind`는 manifest entry의 `object_kind`에 매핑한다. 변환 시 의미가 좁아지지 않도록 1:1 또는 그룹화로 매핑하며, 임의로 폐기하지 않는다.
 - `artifact_id`는 entry의 `object_id`로, `revision_pin`은 entry의 `revision_pin`으로 그대로 보존한다. 새로 발급하지 않는다.
-- `summary`는 entry의 `purpose` 또는 부속 메타로 사용한다. 본문은 self-fetch로 얻으며, 본 절이 본문을 manifest에 직접 임베드하지 않는다.
+- `summary`는 entry의 `purpose` 또는 부속 메타로 사용한다. 본문은 self-fetch로 얻으며, 본 절이 본문을 manifest에 직접 임베드하지 않는다. self-fetch 의 `fetch_scope` 기본값은 `AGC-CONTEXT-MANIFEST` 의 역할별 default 표를 따른다(PO/PM 호출의 경우 `body`).
 - 동일 마일스톤에서 결정 우선순위가 다른 항목이 충돌하면 `KAC-CONFLICTS`의 우선순위에 따라 *상위* 항목만 entry로 포함한다. 폐기된 항목은 `KAC-DECISION-LOG`의 `supersedes` 추적으로 참조 가능하다.
 
 ### 필수 entry

@@ -80,6 +80,21 @@ Reviewer, Integrator, QA는 Verification Run log를 해석한다. 검증 명령 
 
 Ledger는 감사와 복구의 기준이다. 임시 로그만으로 대체하지 않는다.
 
+## Helper Call-Site Map
+
+[`RGC-VERIFICATION`](../contracts/reliability-and-gate-contract.md#RGC-VERIFICATION) 의 deterministic 검증과 [`AGC-CONTEXT-MANIFEST`](../contracts/agent-and-context-contract.md#AGC-CONTEXT-MANIFEST) 의 manifest 작업은 다음 call-site 에서 진입한다.
+
+| Helper | 호출 site |
+|---|---|
+| `context_manifest_create` | `application/caller_dispatch.sh` cycle 단계 [3] (Manifest + Workspace + Prompt) |
+| `context_manifest_validate` | `lib/output.sh` 의 envelope 검증 직후, operational write 직전 |
+| `lease_claim` / `lease_release` | `application/caller_dispatch.sh` cycle 단계 [2] / [6] |
+| `lease_expire_scan` | `application/recovery.sh` `recovery_scan()` |
+| `verification_run_execute` | `application/verification_runner.sh` Reviewer/QA 진입 시 |
+| `transition_ledger_write` | 모든 operation 의 cycle 단계 [6] 와 `recovery.sh` 의 결과 분기 |
+
+운영 분석 시 위 매핑은 [`#RGC-LEDGER`](../contracts/reliability-and-gate-contract.md#RGC-LEDGER) 의 timestamp 와 결합해 cycle 의 어느 helper 에서 시간이 소비/실패되었는지 추적하는 시작점이다.
+
 ## Secrets
 
 비밀은 Caller 환경 또는 secret store에만 존재한다. Agent prompt, output, comment, ledger에는 비밀 값을 포함하지 않는다.

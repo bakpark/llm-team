@@ -26,12 +26,17 @@
    - [`reviewer.md`](agents/reviewer.md)
    - [`integrator.md`](agents/integrator.md)
    - [`qa.md`](agents/qa.md)
-7. [`daemons.md`](daemons.md) — Caller runner, worker slot, lease 운영 방식.
-8. [`tools.md`](tools.md) — `gh`/`git`/LLM CLI와 `lib/*.sh` helper 매핑.
+7. [`daemons.md`](daemons.md) — Caller runner, worker slot, lease 운영 방식, daemon lifecycle.
+8. [`tools.md`](tools.md) — `gh`/`git`/LLM CLI와 `lib/*.sh` helper 매핑, helper call-site map.
+9. [`lease-and-recovery.md`](lease-and-recovery.md) — `RGC-LEASE`/`RGC-RECOVERY` 의 구현 매핑(claim/expire/recovery scan).
+10. [`context-snapshot.md`](context-snapshot.md) — `AGC-CONTEXT-MANIFEST.fetch_scope` 와 트렁케이션 책임 매핑.
+11. [`github-side-effect-timeline.md`](github-side-effect-timeline.md) — 하나의 operation 에서 발생하는 GitHub side-effect 시퀀스.
+12. [`self-hosting.md`](self-hosting.md) — `TCC-ONBOARDING.self_hosting` 의 의미와 안전 장치.
+13. [`agent-runner-adapters.md`](agent-runner-adapters.md) — agent runner 포트의 어댑터 매핑(`claude_code`, `fake`, 향후).
 
 ## 진행 중인 방향
 
-- [`direction-2026-05.md`](direction-2026-05.md) — docs 고도화 5-phase 로드맵, contract anchor 추적 매트릭스, `.human/draft/` graduation 분류표(Phase 0 산출물). 모든 항목 흡수 완료 시 archive 이동.
+- [`../history/direction-2026-05.md`](../history/direction-2026-05.md) — docs 고도화 5-phase 로드맵, contract anchor 추적 매트릭스, draft graduation 분류표. Phase 0–3 머지 후 `docs/history/` 로 이동했으며, 신규 architecture 파일이 추가된 동기를 추적할 때 참조한다.
 
 ## 구현 흐름 요약
 
