@@ -119,12 +119,13 @@ it_milestone_set_state "${REPO}" "${ms_stop}" IMPLEMENTING \
 post_signal milestone "${ms_stop}" alice sig-stop-1 stop milestone "${ms_stop}"
 
 # ----------------------------------------------------------------------------
-# (5) request_rework on issue TASK_REVIEW_READY → TASK_READY.
+# (5) request_rework on issue ESCALATED → TASK_READY.
+# Per RGC-SIGNAL-MATRIX, request_rework allowed-state for tasks is ESCALATED.
 # ----------------------------------------------------------------------------
 issue_rework="$(LLM_TEAM_INMEM_IT_ACTOR=alice \
   it_issue_create "${REPO}" --title "rework target" --body "" 2>/dev/null)"
-it_issue_set_state "${REPO}" "${issue_rework}" TASK_REVIEW_READY \
-  || fail "set TASK_REVIEW_READY on rework target failed"
+it_issue_set_state "${REPO}" "${issue_rework}" ESCALATED \
+  || fail "set ESCALATED on rework target failed"
 post_signal issue "${issue_rework}" alice sig-rework-1 request_rework issue "${issue_rework}"
 
 # ----------------------------------------------------------------------------

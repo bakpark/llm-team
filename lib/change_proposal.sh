@@ -112,6 +112,11 @@ change_proposal_set_state() {
     log_error "change_proposal_set_state: state mismatch — current='${current}', expected='${old_state}'"
     return 1
   fi
+  # Enforce contract transition matrix (SOC-STATES + SOC-DISPATCH-MATRIX).
+  if ! state_transition_allowed change_proposal "${current}" "${new_state}"; then
+    log_error "change_proposal_set_state: transition '${current}' → '${new_state}' not allowed by contract"
+    return 1
+  fi
   local tmp
   tmp="$(mktemp "${path}.tmp.XXXXXX")" || {
     log_error "change_proposal_set_state: mktemp failed"

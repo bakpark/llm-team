@@ -248,10 +248,11 @@ _human_signal_apply_approve() {
     milestone)
       local cur next
       cur="$(it_milestone_get_state "${repo}" "${id}")"
+      # Per RGC: approve target = milestone in PO_GATE / PM_GATE only.
+      # VALIDATE_READY → DONE is driven by Validate operation (QA verdict), not human signal.
       case "${cur}" in
         PO_GATE) next="PM_DRAFT" ;;
         PM_GATE) next="DECOMPOSE_READY" ;;
-        VALIDATE_READY) next="DONE" ;;
         *)
           log_error "approve: milestone #${id} not in a gate state (current='${cur}')"
           return 1
@@ -291,18 +292,24 @@ _human_signal_apply_reject() {
 
 _human_signal_apply_rework() {
   local repo="$1" kind="$2" id="$3"
+  # Per RGC: request_rework target = task or change_proposal.
+  # Task allowed-state: ESCALATED → TASK_READY. CP allowed-state: CP_REQUEST_CHANGES, CP_CLOSED
+  # (acknowledged-only; closed CP must not be reopened, new CP creation is a downstream concern).
   case "${kind}" in
     issue|task)
       local cur
       cur="$(it_issue_get_state "${repo}" "${id}")"
       case "${cur}" in
-        TASK_REVIEW_READY|TASK_REVIEW_IN_PROGRESS) ;;
+        ESCALATED) ;;
         *)
-          log_error "request_rework: issue #${id} not in review state (current='${cur}')"
+          log_error "request_rework: task #${id} not in ESCALATED state (current='${cur}')"
           return 1
           ;;
       esac
       it_issue_set_state "${repo}" "${id}" TASK_READY "${cur}"
+      ;;
+    change_proposal|cp)
+      log_warn "request_rework: change_proposal target #${id} acknowledged (no state transition; create a new CP downstream)"
       ;;
     *)
       log_error "request_rework: target_kind '${kind}' not supported"
