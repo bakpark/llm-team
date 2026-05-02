@@ -180,7 +180,10 @@ onboarding_ack_run() {
   fi
 
   if [ -n "${note}" ]; then
-    yq -i ".onboarding.acks.\"${ack_key}\" = {\"value\": true, \"note\": \"${note//\"/\\\"}\", \"ts\": \"${ts}\"}" \
+    # strenv 로 yq 표현식 인젝션과 YAML 이스케이프 재해석을 동시에 차단.
+    # ack_key 는 위에서 정규식으로 이미 검증됨.
+    NOTE_VAL="${note}" yq -i \
+      ".onboarding.acks.\"${ack_key}\" = {\"value\": true, \"note\": strenv(NOTE_VAL), \"ts\": \"${ts}\"}" \
       "${file}"
   else
     yq -i ".onboarding.acks.\"${ack_key}\" = {\"value\": true, \"ts\": \"${ts}\"}" \

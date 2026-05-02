@@ -139,6 +139,27 @@ out="$(yq -r '.onboarding.acks | keys | length' "${SANDBOX}/targets/${TARGET}.ya
 pass "ack set/unset roundtrip"
 
 # ---------------------------------------------------------------------------
+# (3b) ack --note 이스케이프: 백슬래시 / 큰따옴표 / 백슬래시-n 리터럴이
+#      yaml round-trip 후에도 그대로 보존되어야 한다 (strenv 패턴).
+# ---------------------------------------------------------------------------
+note_cases=(
+  $'backslash\\value'
+  $'has "double quotes" inside'
+  $'literal \\n not newline'
+)
+for nc in "${note_cases[@]}"; do
+  "${CLI}" onboarding ack "${TARGET}" branch_protection_policy_decided --note "${nc}" \
+    >/dev/null || fail "ack note roundtrip: set failed for ${nc}"
+  got="$(yq -r '.onboarding.acks."branch_protection_policy_decided".note' \
+    "${SANDBOX}/targets/${TARGET}.yaml")"
+  if [ "${got}" != "${nc}" ]; then
+    fail "ack note roundtrip mismatch: expected $'${nc}', got $'${got}'"
+  fi
+  "${CLI}" onboarding ack "${TARGET}" branch_protection_policy_decided --unset >/dev/null
+done
+pass "ack --note: backslash/quotes/literal escapes round-trip safely"
+
+# ---------------------------------------------------------------------------
 # (4) ack 키 검증: 잘못된 형식 거부.
 # ---------------------------------------------------------------------------
 set +e
