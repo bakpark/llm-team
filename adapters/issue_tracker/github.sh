@@ -92,6 +92,23 @@ _github_issue_add_label() {
 _github_issue_remove_label() {
   local repo="$1" num="$2" label="$3"
   local enc; enc="$(jq -rn --arg l "${label}" '$l|@uri')"
+  # Idempotent removal: REST `DELETE /issues/{n}/labels/{name}` returns 404
+  # when the issue does not have that label. The post-condition ("label is
+  # not on the issue") already holds, so treat 404 as success. Without this,
+  # state transitions like add-new → remove-old break under retry whenever
+  # the old label was already absent (e.g., add succeeded on a previous run
+  # but remove failed transiently, or another process cleared the label).
+  local err rc
+  err="$(gh api -X DELETE "repos/${repo}/issues/${num}/labels/${enc}" 2>&1 >/dev/null)"
+  rc=$?
+  if [ "${rc}" -eq 0 ]; then
+    return 0
+  fi
+  case "${err}" in
+    *"HTTP 404"*) return 0 ;;
+  esac
+  # Other failure (network, 5xx, auth) — fall back to gh_with_retry so
+  # transient errors still recover.
   gh_with_retry gh api -X DELETE "repos/${repo}/issues/${num}/labels/${enc}" >/dev/null 2>&1
 }
 
@@ -783,5 +800,54 @@ it_revision_pin_get() {
       gh_with_retry gh api "repos/${repo}/milestones/${num}" --jq '.updated_at // empty'
       ;;
     *) log_error "it_revision_pin_get: invalid kind '${kind}'"; return 1 ;;
+  esac
+}
+
+# ============================================================================
+# Port API: Context snapshot
+# ============================================================================
+
+# it_object_get_snapshot <repo> <kind> <id>  → echo markdown block | empty
+# Read-only fetch of an object's live content for prompt injection. On any
+# fetch failure we return 0 with empty stdout — the caller treats that as
+# "snapshot unavailable" and falls back to the manifest-only context.
+it_object_get_snapshot() {
+  local repo="$1" kind="$2" id="$3"
+  [ -n "${repo}" ] && [ -n "${kind}" ] && [ -n "${id}" ] || {
+    log_error "it_object_get_snapshot: repo, kind, id are required"
+    return 1
+  }
+  case "${kind}" in
+    milestone)
+      local m
+      m="$(gh_with_retry gh api "repos/${repo}/milestones/${id}" 2>/dev/null)" || return 0
+      printf '### milestone:%s\n#### title\n%s\n\n#### description\n%s\n' \
+        "${id}" \
+        "$(printf '%s' "${m}" | jq -r '.title // ""')" \
+        "$(printf '%s' "${m}" | jq -r '.description // ""')"
+      ;;
+    issue|task|feature_request_issue)
+      local s labels
+      s="$(gh_with_retry gh api "repos/${repo}/issues/${id}" 2>/dev/null)" || return 0
+      labels="$(printf '%s' "${s}" | jq -r '[.labels[].name] | join(",")')"
+      printf '### issue:%s\n#### title\n%s\n\n#### labels\n%s\n\n#### body\n%s\n' \
+        "${id}" \
+        "$(printf '%s' "${s}" | jq -r '.title // ""')" \
+        "${labels}" \
+        "$(printf '%s' "${s}" | jq -r '.body // ""')"
+      ;;
+    pr)
+      local p
+      p="$(gh_with_retry gh api "repos/${repo}/pulls/${id}" 2>/dev/null)" || return 0
+      printf '### pr:%s\n#### title\n%s\n\n#### body\n%s\n' \
+        "${id}" \
+        "$(printf '%s' "${p}" | jq -r '.title // ""')" \
+        "$(printf '%s' "${p}" | jq -r '.body // ""')"
+      ;;
+    *)
+      # Unknown kind — no snapshot, but not an error (caller only injects
+      # when populated).
+      return 0
+      ;;
   esac
 }

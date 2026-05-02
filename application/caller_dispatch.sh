@@ -354,6 +354,19 @@ _caller_apply_spec_proposal() {
     *)  log_error "_caller_apply_spec_proposal: unknown role '${role}'"; return 1 ;;
   esac
 
+  # Validate spec content BEFORE creating any CP / setting CP state. prompts/po.md
+  # and prompts/pm.md document the field as `milestone_body_proposal`; legacy
+  # callers may still emit `milestone_body`. A structurally valid envelope with
+  # no spec content would otherwise advance state to *_GATE with nothing for a
+  # human reviewer to read. Validating up front also avoids leaving an orphan
+  # CP file in CP_READY_FOR_HUMAN_GATE on retry when only the body was missing.
+  local body
+  body="$(jq -r '.artifacts.milestone_body_proposal // .artifacts.milestone_body // empty' "${env_path}")"
+  if [ -z "${body}" ]; then
+    log_error "_caller_apply_spec_proposal: ${role} envelope missing artifacts.milestone_body_proposal"
+    return 1
+  fi
+
   local artifact_ref
   artifact_ref="$(jq -r '.artifacts.cp_artifact_ref // empty' "${env_path}")"
   local cp_path
@@ -363,18 +376,6 @@ _caller_apply_spec_proposal() {
   change_proposal_set_state "${cp_path}" CP_READY_FOR_HUMAN_GATE CP_DRAFT \
     || { log_error "_caller_apply_spec_proposal: CP CP_DRAFT→CP_READY_FOR_HUMAN_GATE failed"; return 1; }
 
-  # Update milestone body — REQUIRED for spec_proposal. prompts/po.md and
-  # prompts/pm.md document the field as `milestone_body_proposal`; legacy
-  # callers may still emit `milestone_body`. Accept either, but reject when
-  # neither is present: a structurally valid envelope with no spec content
-  # would otherwise advance state to *_GATE with nothing for the human
-  # reviewer to read, defeating the gate's purpose.
-  local body
-  body="$(jq -r '.artifacts.milestone_body_proposal // .artifacts.milestone_body // empty' "${env_path}")"
-  if [ -z "${body}" ]; then
-    log_error "_caller_apply_spec_proposal: ${role} envelope missing artifacts.milestone_body_proposal"
-    return 1
-  fi
   it_milestone_update "${repo}" "${target_id}" --body "${body}" \
     || { log_error "_caller_apply_spec_proposal: milestone_update body failed"; return 1; }
 

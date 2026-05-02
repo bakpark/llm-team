@@ -77,6 +77,16 @@ PORT_ISSUE_TRACKER_REQUIRED_FUNCTIONS=(
 
   # --- Revision pin ---
   it_revision_pin_get            # repo kind num scope                 → echo etag/sha
+
+  # --- Context snapshot ---
+  # Read-only fetch of an object's live content for prompt injection.
+  # kind ∈ milestone|issue|task|feature_request_issue|pr.
+  # stdout: formatted markdown block (title + body/description + labels for
+  #         issues). Empty stdout + return 0 when the object is unavailable
+  #         (caller treats as "no snapshot" and falls back to manifest-only).
+  # Caller (scheduler/runner) must use this rather than calling `gh` directly,
+  # so that test adapters (in_memory) and future adapters can supply data.
+  it_object_get_snapshot         # repo kind id                        → echo markdown block | empty
 )
 
 # Invariant 명세 (텍스트, 검사용 아닌 문서용).

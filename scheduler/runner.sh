@@ -404,39 +404,11 @@ esac
 # (e.g. "no AC available, returning bootstrap task"). The snapshot is added as
 # Caller Notes and is read-only — the contract still mandates output via the
 # envelope, not via direct mutation.
-_runner_context_snapshot() {
-  local repo="$1" kind="$2" id="$3"
-  case "${kind}" in
-    milestone)
-      local m
-      m="$(gh_with_retry gh api "repos/${repo}/milestones/${id}" 2>/dev/null)" || return 0
-      printf '### milestone:%s\n#### title\n%s\n\n#### description\n%s\n' \
-        "${id}" \
-        "$(printf '%s' "${m}" | jq -r '.title // ""')" \
-        "$(printf '%s' "${m}" | jq -r '.description // ""')"
-      ;;
-    issue|task|feature_request_issue)
-      local s labels
-      s="$(gh_with_retry gh api "repos/${repo}/issues/${id}" 2>/dev/null)" || return 0
-      labels="$(printf '%s' "${s}" | jq -r '[.labels[].name] | join(",")')"
-      printf '### issue:%s\n#### title\n%s\n\n#### labels\n%s\n\n#### body\n%s\n' \
-        "${id}" \
-        "$(printf '%s' "${s}" | jq -r '.title // ""')" \
-        "${labels}" \
-        "$(printf '%s' "${s}" | jq -r '.body // ""')"
-      ;;
-    pr)
-      local p
-      p="$(gh_with_retry gh api "repos/${repo}/pulls/${id}" 2>/dev/null)" || return 0
-      printf '### pr:%s\n#### title\n%s\n\n#### body\n%s\n' \
-        "${id}" \
-        "$(printf '%s' "${p}" | jq -r '.title // ""')" \
-        "$(printf '%s' "${p}" | jq -r '.body // ""')"
-      ;;
-  esac
-}
-
-CONTEXT_SNAPSHOT="$(_runner_context_snapshot "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true)"
+#
+# Fetched via the issue_tracker port (`it_object_get_snapshot`) rather than a
+# direct `gh` call: scheduler/runner must not couple to the GitHub adapter, or
+# in_memory and future adapters silently lose snapshot enrichment.
+CONTEXT_SNAPSHOT="$(it_object_get_snapshot "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true)"
 EXTRA_INSTRUCTION=""
 if [ -n "${CONTEXT_SNAPSHOT}" ]; then
   EXTRA_INSTRUCTION="## Context Snapshot (read-only)

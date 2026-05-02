@@ -944,3 +944,46 @@ it_revision_pin_get() {
     *) log_error "it_revision_pin_get: invalid kind '${kind}'"; return 1 ;;
   esac
 }
+
+# ============================================================================
+# Port API: Context snapshot
+# ============================================================================
+
+it_object_get_snapshot() {
+  local repo="$1" kind="$2" id="$3"
+  [ -n "${repo}" ] && [ -n "${kind}" ] && [ -n "${id}" ] || {
+    log_error "it_object_get_snapshot: repo, kind, id are required"
+    return 1
+  }
+  case "${kind}" in
+    milestone)
+      _in_memory_milestone_exists "${id}" || return 0
+      local mp
+      mp="$(_in_memory_milestone_path "${id}")"
+      printf '### milestone:%s\n#### title\n%s\n\n#### description\n%s\n' \
+        "${id}" \
+        "$(jq -r '.title // ""' "${mp}")" \
+        "$(jq -r '.description // ""' "${mp}")"
+      ;;
+    issue|task|feature_request_issue)
+      _in_memory_issue_exists "${id}" || return 0
+      local ip
+      ip="$(_in_memory_issue_path "${id}")"
+      printf '### issue:%s\n#### title\n%s\n\n#### labels\n%s\n\n#### body\n%s\n' \
+        "${id}" \
+        "$(jq -r '.title // ""' "${ip}")" \
+        "$(jq -r '[.labels[]?] | join(",")' "${ip}")" \
+        "$(jq -r '.body // ""' "${ip}")"
+      ;;
+    pr)
+      _in_memory_pr_exists "${id}" || return 0
+      local pp
+      pp="$(_in_memory_pr_path "${id}")"
+      printf '### pr:%s\n#### title\n%s\n\n#### body\n%s\n' \
+        "${id}" \
+        "$(jq -r '.title // ""' "${pp}")" \
+        "$(jq -r '.body // ""' "${pp}")"
+      ;;
+    *) return 0 ;;
+  esac
+}
