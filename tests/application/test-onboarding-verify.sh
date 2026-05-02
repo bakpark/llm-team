@@ -305,6 +305,68 @@ s="$(status_of "inputs_dir_seeded")"
 pass "case 6b: 콘텐츠 파일 추가 후 PASS 회복"
 
 # ---------------------------------------------------------------------------
+# (7) ci_workflow_loop_guard: 안전한 트리거만 있으면 자동 PASS,
+#     pull_request_target 가 있으면 ack 요구.
+# ---------------------------------------------------------------------------
+# self_hosting=true 상태 유지 (case 3 에서 이미 활성). amendment ack 도 활성.
+mkdir -p "${WD}/repo/.github/workflows"
+cat >"${WD}/repo/.github/workflows/ci.yml" <<'YAML'
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+YAML
+
+run_verify out rc
+s="$(status_of "ci_workflow_loop_guard")"
+[ "${s}" = "PASS" ] \
+  || fail "case 7a: ci_workflow_loop_guard expected PASS with safe triggers, got '${s}'"
+pass "case 7a: 안전한 트리거(push/pull_request) → 자동 PASS"
+
+# 위험 트리거 추가 (pull_request_target).
+cat >"${WD}/repo/.github/workflows/danger.yml" <<'YAML'
+name: danger
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo unsafe
+YAML
+
+run_verify out rc
+s="$(status_of "ci_workflow_loop_guard")"
+[ "${s}" = "FAIL" ] \
+  || fail "case 7b: ci_workflow_loop_guard expected FAIL with pull_request_target, got '${s}'"
+pass "case 7b: pull_request_target 발견 시 ack 요구"
+
+# ack 추가 시 PASS.
+yq -i '.onboarding.acks.ci_workflow_loop_guard_decided = {"value": true}' "${TARGET_YAML}"
+run_verify out rc
+s="$(status_of "ci_workflow_loop_guard")"
+[ "${s}" = "PASS" ] \
+  || fail "case 7c: ci_workflow_loop_guard expected PASS via ack, got '${s}'"
+pass "case 7c: ack 후 PASS 회복"
+
+# 정리: 위험 워크플로우 제거 후 ack 없이도 PASS.
+rm -f "${WD}/repo/.github/workflows/danger.yml"
+yq -i 'del(.onboarding.acks.ci_workflow_loop_guard_decided)' "${TARGET_YAML}"
+run_verify out rc
+s="$(status_of "ci_workflow_loop_guard")"
+[ "${s}" = "PASS" ] \
+  || fail "case 7d: ci_workflow_loop_guard expected PASS after removing risky workflow, got '${s}'"
+pass "case 7d: 위험 트리거 제거 시 ack 없이도 PASS"
+
+# ---------------------------------------------------------------------------
 if [ "${failures}" -gt 0 ]; then
   echo "FAILURES: ${failures}" >&2
   exit 1

@@ -277,6 +277,14 @@ _check_ci_workflow_loop_guard() {
     printf '.github/workflows is empty'
     return 0
   fi
-  printf 'workflows present — loop guard ack required'
-  return 1
+  # 위험 트리거: pull_request_target / workflow_run / repository_dispatch.
+  # 0 건이면 자동 PASS, 1+ 면 ack 강제. yaml 풀 파싱은 별도 PR 보류 — 현 구현은
+  # `on: <trigger>:` 또는 `on:` 매핑 키 위치의 라인을 grep 으로 휴리스틱 매칭.
+  if grep -REq '^[[:space:]]*(pull_request_target|workflow_run|repository_dispatch)[[:space:]]*:' \
+       "${wf}" 2>/dev/null; then
+    printf 'workflows contain risky triggers — loop guard ack required'
+    return 1
+  fi
+  printf 'workflows have only safe triggers'
+  return 0
 }
