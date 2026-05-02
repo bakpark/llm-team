@@ -9,6 +9,13 @@
 # _check_<id>:  PASS=exit 0 (메시지를 stdout). FAIL=non-zero (실패 사유 stdout).
 # preset_remediation <id>: FAIL 시 안내 1 줄.
 
+# Contract 라벨 이름은 lib/labels.sh 가 단일 출처. 중복 정의 방지.
+if [ -z "${LLM_TEAM_LABELS_LOADED:-}" ]; then
+  # shellcheck source=../../../lib/labels.sh
+  . "${LLM_TEAM_ROOT}/lib/labels.sh"
+  LLM_TEAM_LABELS_LOADED=1
+fi
+
 # preset_items 가 TSV 를 emit. 칼럼은 항상 7 개. 빈 칼럼은 '-' 로 표기 (engine 이
 # '-' 를 빈 문자열로 변환). bash read 는 IFS=$'\t' 에서도 공백류 IFS 의 연속을
 # 한 delimiter 로 collapse 하므로 빈 칼럼을 그대로 두면 칼럼이 밀린다.
@@ -209,7 +216,13 @@ _check_labels_bootstrap_done() {
   fi
   local repo="${TARGET_GH_OWNER}/${TARGET_GH_REPO}"
   local prefix="${TARGET_LABEL_PREFIX:-}"
-  local probes=("task:ready" "cp:ready-for-review" "human-gate:po" "paused" "feature-request")
+  local probes=(
+    "${LABEL_TASK_READY}"
+    "${LABEL_CP_READY_FOR_REVIEW}"
+    "${LABEL_HUMAN_GATE_PO}"
+    "${LABEL_PAUSED}"
+    "${LABEL_FEATURE_REQUEST}"
+  )
   local missing="" l name
   for l in "${probes[@]}"; do
     name="${prefix}${l}"
