@@ -398,7 +398,28 @@ esac
 # Agent invocation
 # ============================================================================
 
-PROMPT_TEXT="$(agent_prompt_assemble "${ROLE}" "${MANIFEST_FILE}")" || {
+# Build a context snapshot for the primary manifest entry. Without this, the
+# manifest only carries object_id+revision_pin and the LLM has no way to read
+# the actual milestone description / issue body, leading to placeholder output
+# (e.g. "no AC available, returning bootstrap task"). The snapshot is added as
+# Caller Notes and is read-only — the contract still mandates output via the
+# envelope, not via direct mutation.
+#
+# Fetched via the issue_tracker port (`it_object_get_snapshot`) rather than a
+# direct `gh` call: scheduler/runner must not couple to the GitHub adapter, or
+# in_memory and future adapters silently lose snapshot enrichment.
+CONTEXT_SNAPSHOT="$(it_object_get_snapshot "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true)"
+EXTRA_INSTRUCTION=""
+if [ -n "${CONTEXT_SNAPSHOT}" ]; then
+  EXTRA_INSTRUCTION="## Context Snapshot (read-only)
+The primary manifest entry resolves to the following live content. Use this as
+authoritative context — do NOT emit placeholder/bootstrap output when this is
+populated.
+
+${CONTEXT_SNAPSHOT}"
+fi
+
+PROMPT_TEXT="$(agent_prompt_assemble "${ROLE}" "${MANIFEST_FILE}" "${EXTRA_INSTRUCTION}")" || {
   log_error "runner: agent_prompt_assemble failed"
   _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
   _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \

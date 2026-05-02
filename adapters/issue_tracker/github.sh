@@ -73,7 +73,43 @@ _github_issue_get_body() {
 
 _github_issue_set_body() {
   local repo="$1" num="$2" body="$3"
-  gh_with_retry gh issue edit "${num}" --repo "${repo}" --body "${body}" >/dev/null
+  local payload; payload="$(jq -nc --arg b "${body}" '{body:$b}')"
+  gh_with_retry gh api -X PATCH "repos/${repo}/issues/${num}" --input - <<<"${payload}" >/dev/null
+}
+
+# Label mutation helpers — REST equivalents of `gh issue edit --add-label /
+# --remove-label`. Use these instead of the gh CLI: the CLI mutates labels via
+# GraphQL, which has a separate (smaller) rate-limit pool that is easy to
+# exhaust during a daemon retry storm. REST issues/N/labels share the larger
+# core pool. (Per GitHub API: PR labels live on the same /issues/N/labels
+# endpoint — PRs are issues at the API layer.)
+_github_issue_add_label() {
+  local repo="$1" num="$2" label="$3"
+  local payload; payload="$(jq -nc --arg l "${label}" '{labels:[$l]}')"
+  gh_with_retry gh api -X POST "repos/${repo}/issues/${num}/labels" --input - <<<"${payload}" >/dev/null
+}
+
+_github_issue_remove_label() {
+  local repo="$1" num="$2" label="$3"
+  local enc; enc="$(jq -rn --arg l "${label}" '$l|@uri')"
+  # Idempotent removal: REST `DELETE /issues/{n}/labels/{name}` returns 404
+  # when the issue does not have that label. The post-condition ("label is
+  # not on the issue") already holds, so treat 404 as success. Without this,
+  # state transitions like add-new → remove-old break under retry whenever
+  # the old label was already absent (e.g., add succeeded on a previous run
+  # but remove failed transiently, or another process cleared the label).
+  local err rc
+  err="$(gh api -X DELETE "repos/${repo}/issues/${num}/labels/${enc}" 2>&1 >/dev/null)"
+  rc=$?
+  if [ "${rc}" -eq 0 ]; then
+    return 0
+  fi
+  case "${err}" in
+    *"HTTP 404"*) return 0 ;;
+  esac
+  # Other failure (network, 5xx, auth) — fall back to gh_with_retry so
+  # transient errors still recover.
+  gh_with_retry gh api -X DELETE "repos/${repo}/issues/${num}/labels/${enc}" >/dev/null 2>&1
 }
 
 _github_pr_get_body() {
@@ -83,7 +119,8 @@ _github_pr_get_body() {
 
 _github_pr_set_body() {
   local repo="$1" num="$2" body="$3"
-  gh_with_retry gh pr edit "${num}" --repo "${repo}" --body "${body}" >/dev/null
+  local payload; payload="$(jq -nc --arg b "${body}" '{body:$b}')"
+  gh_with_retry gh api -X PATCH "repos/${repo}/pulls/${num}" --input - <<<"${payload}" >/dev/null
 }
 
 # Replace the cp-state marker line in a PR body.
@@ -214,14 +251,10 @@ it_milestone_list_in_state() {
   }
   local marker
   marker="$(state_marker milestone "${state}")"
+  # Filter inside jq so multi-line descriptions stay intact.
   gh_with_retry gh api "repos/${repo}/milestones?state=open&sort=created_at&direction=asc" \
-    --jq '.[] | "\(.number)\t\(.description // "")"' \
-    | while IFS=$'\t' read -r n desc; do
-        [ -n "${n}" ] || continue
-        if printf '%s' "${desc}" | grep -Fq "${marker}"; then
-          printf '%s\n' "${n}"
-        fi
-      done
+    | jq -r --arg marker "${marker}" \
+        '.[] | select((.description // "") | contains($marker)) | .number'
 }
 
 # ============================================================================
@@ -245,17 +278,28 @@ it_issue_create() {
     log_error "it_issue_create: repo and --title are required"
     return 1
   }
-  local args=(--repo "${repo}" --title "${title}" --body "${body}")
-  if [ -n "${labels}" ]; then
-    args+=(--label "${labels}")
-  fi
-  if [ -n "${milestone}" ]; then
-    args+=(--milestone "${milestone}")
-  fi
-  local url num
-  url="$(gh_with_retry gh issue create "${args[@]}")" || return 1
-  num="$(printf '%s' "${url}" | sed -E 's@.*/issues/([0-9]+).*@\1@')"
-  [ -n "${num}" ] || { log_error "it_issue_create: failed to parse issue number from '${url}'"; return 1; }
+  # NOTE: We use the REST API rather than `gh issue create` because the CLI's
+  # `--milestone` flag resolves milestones by title and fails with
+  # "could not add to milestone 'N': 'N' not found" when given a numeric id.
+  # The REST API accepts the milestone *number* directly.
+  local payload
+  payload="$(jq -nc \
+    --arg title "${title}" \
+    --arg body  "${body}" \
+    --arg ms    "${milestone}" \
+    --arg lbls  "${labels}" \
+    '
+      {title: $title, body: $body}
+      + ( if ($ms | length) > 0 then {milestone: ($ms | tonumber)} else {} end )
+      + ( if ($lbls | length) > 0
+          then {labels: ($lbls | split(",") | map(select(length>0)))}
+          else {} end )
+    ')" || { log_error "it_issue_create: failed to build payload"; return 1; }
+  local response num
+  response="$(gh_with_retry gh api -X POST "repos/${repo}/issues" --input - <<<"${payload}")" \
+    || return 1
+  num="$(printf '%s' "${response}" | jq -r '.number // empty')"
+  [ -n "${num}" ] || { log_error "it_issue_create: response missing .number"; return 1; }
   printf '%s\n' "${num}"
 }
 
@@ -277,7 +321,7 @@ it_issue_set_state() {
     return 1
   }
   new_label="$(label_with_prefix "${TARGET_LABEL_PREFIX:-}" "${new_label}")"
-  gh_with_retry gh issue edit "${num}" --repo "${repo}" --add-label "${new_label}" >/dev/null \
+  _github_issue_add_label "${repo}" "${num}" "${new_label}" \
     || { log_error "it_issue_set_state: add ${new_label} failed on issue #${num}"; return 1; }
   if [ -n "${old_state}" ]; then
     state_is_valid task "${old_state}" || {
@@ -286,7 +330,7 @@ it_issue_set_state() {
     }
     old_label="$(task_state_to_label "${old_state}")" || return 1
     old_label="$(label_with_prefix "${TARGET_LABEL_PREFIX:-}" "${old_label}")"
-    gh_with_retry gh issue edit "${num}" --repo "${repo}" --remove-label "${old_label}" >/dev/null \
+    _github_issue_remove_label "${repo}" "${num}" "${old_label}" \
       || { log_error "it_issue_set_state: remove ${old_label} failed on issue #${num}"; return 1; }
   fi
 }
@@ -370,7 +414,7 @@ it_issue_add_label() {
     log_error "it_issue_add_label: repo, num, label are required"
     return 1
   }
-  gh_with_retry gh issue edit "${num}" --repo "${repo}" --add-label "${label}" >/dev/null
+  _github_issue_add_label "${repo}" "${num}" "${label}"
 }
 
 # it_issue_remove_label <repo> <num> <label>  (idempotent — absent label is OK)
@@ -380,7 +424,7 @@ it_issue_remove_label() {
     log_error "it_issue_remove_label: repo, num, label are required"
     return 1
   }
-  gh_with_retry gh issue edit "${num}" --repo "${repo}" --remove-label "${label}" >/dev/null 2>&1 || return 0
+  _github_issue_remove_label "${repo}" "${num}" "${label}" || return 0
 }
 
 # it_issue_clear_state_labels <repo> <num> [prefix]
@@ -394,8 +438,7 @@ it_issue_clear_state_labels() {
   local label prefixed
   for label in "${ALL_ISSUE_LABELS[@]}"; do
     prefixed="$(label_with_prefix "${prefix}" "${label}")"
-    gh_with_retry gh issue edit "${num}" --repo "${repo}" \
-      --remove-label "${prefixed}" >/dev/null 2>&1 || true
+    _github_issue_remove_label "${repo}" "${num}" "${prefixed}" || true
   done
 }
 
@@ -409,8 +452,14 @@ it_issue_list_in_state() {
   local label
   label="$(task_state_to_label "${state}")" || return 1
   label="$(label_with_prefix "${TARGET_LABEL_PREFIX:-}" "${label}")"
-  gh_with_retry gh issue list --repo "${repo}" --label "${label}" --state open \
-    --json number,createdAt --jq 'sort_by(.createdAt) | .[].number'
+  # REST list endpoint sorts oldest-first via direction=asc; PRs share the
+  # /issues collection so we filter them out with `select(.pull_request|not)`.
+  # Using REST instead of `gh issue list` keeps this off the GraphQL pool,
+  # which a daemon retry storm can otherwise exhaust.
+  local enc; enc="$(jq -rn --arg l "${label}" '$l|@uri')"
+  gh_with_retry gh api --paginate \
+    "repos/${repo}/issues?state=open&labels=${enc}&sort=created&direction=asc&per_page=100" \
+    --jq '.[] | select(.pull_request|not) | .number'
 }
 
 # it_issue_list_with_label <repo> <label> [--no-milestone]
@@ -424,13 +473,15 @@ it_issue_list_with_label() {
       *) log_error "it_issue_list_with_label: unknown flag '$1'"; return 1 ;;
     esac
   done
+  local enc; enc="$(jq -rn --arg l "${label}" '$l|@uri')"
   if [ "${no_ms}" -eq 1 ]; then
-    gh_with_retry gh issue list --repo "${repo}" --label "${label}" --state open \
-      --search "no:milestone" \
-      --json number,createdAt --jq 'sort_by(.createdAt) | .[].number'
+    gh_with_retry gh api --paginate \
+      "repos/${repo}/issues?state=open&labels=${enc}&sort=created&direction=asc&per_page=100" \
+      --jq '.[] | select(.pull_request|not) | select(.milestone == null) | .number'
   else
-    gh_with_retry gh issue list --repo "${repo}" --label "${label}" --state open \
-      --json number,createdAt --jq 'sort_by(.createdAt) | .[].number'
+    gh_with_retry gh api --paginate \
+      "repos/${repo}/issues?state=open&labels=${enc}&sort=created&direction=asc&per_page=100" \
+      --jq '.[] | select(.pull_request|not) | .number'
   fi
 }
 
@@ -462,12 +513,19 @@ it_pr_create() {
     log_error "it_pr_create: repo, --head, --base, --title are required"
     return 1
   }
-  local args=(--repo "${repo}" --head "${head}" --base "${base}" --title "${title}" --body "${body}")
-  [ "${draft}" -eq 1 ] && args+=(--draft)
-  local url num
-  url="$(gh_with_retry gh pr create "${args[@]}")" || return 1
-  num="$(printf '%s' "${url}" | sed -E 's@.*/pull/([0-9]+).*@\1@')"
-  [ -n "${num}" ] || { log_error "it_pr_create: failed to parse PR number from '${url}'"; return 1; }
+  # REST so PR creation does not consume the GraphQL pool.
+  local payload
+  payload="$(jq -nc \
+    --arg head "${head}" --arg base "${base}" \
+    --arg title "${title}" --arg body "${body}" \
+    --argjson draft "${draft}" \
+    '{title:$title, head:$head, base:$base, body:$body, draft:($draft==1)}')" \
+    || { log_error "it_pr_create: failed to build payload"; return 1; }
+  local response num
+  response="$(gh_with_retry gh api -X POST "repos/${repo}/pulls" --input - <<<"${payload}")" \
+    || return 1
+  num="$(printf '%s' "${response}" | jq -r '.number // empty')"
+  [ -n "${num}" ] || { log_error "it_pr_create: response missing .number"; return 1; }
   printf '%s\n' "${num}"
 }
 
@@ -500,13 +558,13 @@ it_pr_set_cp_state() {
   new_label="$(cp_state_to_label "${new_state}" 2>/dev/null || true)"
   if [ -n "${new_label}" ]; then
     new_label="$(label_with_prefix "${TARGET_LABEL_PREFIX:-}" "${new_label}")"
-    gh_with_retry gh pr edit "${num}" --repo "${repo}" --add-label "${new_label}" >/dev/null 2>&1 || true
+    _github_issue_add_label "${repo}" "${num}" "${new_label}" || true
   fi
   if [ -n "${old_state}" ]; then
     old_label="$(cp_state_to_label "${old_state}" 2>/dev/null || true)"
     if [ -n "${old_label}" ]; then
       old_label="$(label_with_prefix "${TARGET_LABEL_PREFIX:-}" "${old_label}")"
-      gh_with_retry gh pr edit "${num}" --repo "${repo}" --remove-label "${old_label}" >/dev/null 2>&1 || true
+      _github_issue_remove_label "${repo}" "${num}" "${old_label}" || true
     fi
   fi
 }
@@ -525,11 +583,17 @@ it_pr_get_cp_state() {
 # it_pr_merge <repo> <num> --squash|--merge|--rebase  → echo merge_sha
 it_pr_merge() {
   local repo="$1" num="$2" mode="$3"
+  local merge_method
   case "${mode}" in
-    --squash|--merge|--rebase) ;;
+    --squash) merge_method="squash" ;;
+    --merge)  merge_method="merge" ;;
+    --rebase) merge_method="rebase" ;;
     *) log_error "it_pr_merge: mode must be --squash, --merge, or --rebase"; return 1 ;;
   esac
-  gh_with_retry gh pr merge "${num}" --repo "${repo}" "${mode}" >/dev/null \
+  # REST PUT /pulls/{n}/merge instead of `gh pr merge` (GraphQL).
+  local payload
+  payload="$(jq -nc --arg m "${merge_method}" '{merge_method:$m}')"
+  gh_with_retry gh api -X PUT "repos/${repo}/pulls/${num}/merge" --input - <<<"${payload}" >/dev/null \
     || { log_error "it_pr_merge: merge failed for PR #${num}"; return 1; }
   gh_with_retry gh api "repos/${repo}/pulls/${num}" --jq '.merge_commit_sha // empty'
 }
@@ -736,5 +800,54 @@ it_revision_pin_get() {
       gh_with_retry gh api "repos/${repo}/milestones/${num}" --jq '.updated_at // empty'
       ;;
     *) log_error "it_revision_pin_get: invalid kind '${kind}'"; return 1 ;;
+  esac
+}
+
+# ============================================================================
+# Port API: Context snapshot
+# ============================================================================
+
+# it_object_get_snapshot <repo> <kind> <id>  → echo markdown block | empty
+# Read-only fetch of an object's live content for prompt injection. On any
+# fetch failure we return 0 with empty stdout — the caller treats that as
+# "snapshot unavailable" and falls back to the manifest-only context.
+it_object_get_snapshot() {
+  local repo="$1" kind="$2" id="$3"
+  [ -n "${repo}" ] && [ -n "${kind}" ] && [ -n "${id}" ] || {
+    log_error "it_object_get_snapshot: repo, kind, id are required"
+    return 1
+  }
+  case "${kind}" in
+    milestone)
+      local m
+      m="$(gh_with_retry gh api "repos/${repo}/milestones/${id}" 2>/dev/null)" || return 0
+      printf '### milestone:%s\n#### title\n%s\n\n#### description\n%s\n' \
+        "${id}" \
+        "$(printf '%s' "${m}" | jq -r '.title // ""')" \
+        "$(printf '%s' "${m}" | jq -r '.description // ""')"
+      ;;
+    issue|task|feature_request_issue)
+      local s labels
+      s="$(gh_with_retry gh api "repos/${repo}/issues/${id}" 2>/dev/null)" || return 0
+      labels="$(printf '%s' "${s}" | jq -r '[.labels[].name] | join(",")')"
+      printf '### issue:%s\n#### title\n%s\n\n#### labels\n%s\n\n#### body\n%s\n' \
+        "${id}" \
+        "$(printf '%s' "${s}" | jq -r '.title // ""')" \
+        "${labels}" \
+        "$(printf '%s' "${s}" | jq -r '.body // ""')"
+      ;;
+    pr)
+      local p
+      p="$(gh_with_retry gh api "repos/${repo}/pulls/${id}" 2>/dev/null)" || return 0
+      printf '### pr:%s\n#### title\n%s\n\n#### body\n%s\n' \
+        "${id}" \
+        "$(printf '%s' "${p}" | jq -r '.title // ""')" \
+        "$(printf '%s' "${p}" | jq -r '.body // ""')"
+      ;;
+    *)
+      # Unknown kind — no snapshot, but not an error (caller only injects
+      # when populated).
+      return 0
+      ;;
   esac
 }

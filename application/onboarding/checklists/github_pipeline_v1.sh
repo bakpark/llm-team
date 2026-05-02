@@ -223,11 +223,16 @@ _check_labels_bootstrap_done() {
     "${LABEL_PAUSED}"
     "${LABEL_FEATURE_REQUEST}"
   )
+  # Use REST to enumerate labels — `gh label list` goes through GraphQL whose
+  # rate-limit pool is small and easily exhausted by daemon retry storms,
+  # causing this gate to false-fail and block startup.
+  local repo_labels
+  repo_labels="$(gh api --paginate "repos/${repo}/labels" --jq '.[].name' 2>/dev/null)" \
+    || { printf 'gh api repos/%s/labels failed' "${repo}"; return 1; }
   local missing="" l name
   for l in "${probes[@]}"; do
     name="${prefix}${l}"
-    if ! gh label list --repo "${repo}" --search "${name}" --json name 2>/dev/null \
-        | grep -Fq "\"${name}\""; then
+    if ! printf '%s\n' "${repo_labels}" | grep -Fxq "${name}"; then
       missing="${missing} ${name}"
     fi
   done

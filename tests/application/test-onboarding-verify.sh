@@ -46,9 +46,30 @@ GH_BRANCH_HAS=1
 gh() {
   case "$1" in
     api)
-      case "$2" in
+      # Skip gh-flag args (--paginate, --jq <expr>, --silent, ...) so the
+      # endpoint is consistently $2 regardless of caller-side flag ordering.
+      shift
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --paginate|--silent) shift ;;
+          --jq|-X|-H|-f|-F) shift 2 ;;
+          *) break ;;
+        esac
+      done
+      local endpoint="${1:-}"
+      case "${endpoint}" in
         repos/*/branches/*)
           [ "${GH_BRANCH_HAS}" = "1" ] && return 0 || return 1
+          ;;
+        repos/*/labels)
+          if [ "${GH_LABELS_HAVE}" = "1" ]; then
+            # _check_labels_bootstrap_done extracts names via --jq '.[].name';
+            # emit one name per line — that matches the post-jq stdout shape.
+            printf 'task:ready\ncp:ready-for-review\nhuman-gate:po\npaused\nfeature-request\n'
+            return 0
+          fi
+          printf ''
+          return 0
           ;;
         repos/*)
           [ "${GH_REPO_OK}" = "1" ] && return 0 || return 1

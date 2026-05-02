@@ -55,6 +55,11 @@ fenced block 이 두 개 이상이면 invalid 로 거부된다.
 - manifest 외 객체 참조 — `input_revision_pins` 의 `object_id` 는 모두 manifest entries 에 존재해야 한다
 - 할당 범위 밖 파일 변경 — `artifacts` 의 파일 경로는 worktree 내부여야 한다
 
+artifacts 필수 키 (pm):
+- `artifacts.milestone_body_proposal`: 사람 검토용 milestone 본문 markdown.
+  scenario_spec / acceptance_criteria / out_of_scope / conflict_notes 를 사람이
+  읽기 쉬운 형태로 렌더링한 단일 문자열. **비어있으면 PM_GATE 전이가 거부된다.**
+
 artifacts 권장 키 (pm):
 - `artifacts.scenario_spec`: 시나리오 본문
 - `artifacts.acceptance_criteria[]`: 안정 `AC-ID` 가 포함된 검증 가능한 수용 기준 목록
@@ -76,6 +81,7 @@ artifacts 권장 키 (pm):
   "idempotency_key": "pm:42:r1",
   "summary": "Compose PM scenario spec with stable AC-IDs",
   "artifacts": {
+    "milestone_body_proposal": "## Scenario\n...\n\n## Acceptance Criteria\n- AC-1: ...\n\n## Out of Scope\n- ...\n\n## Conflict Notes\n- ...",
     "scenario_spec": "...",
     "acceptance_criteria": [{"ac_id": "AC-1", "statement": "..."}],
     "out_of_scope": [],
