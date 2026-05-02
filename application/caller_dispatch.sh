@@ -672,6 +672,18 @@ _caller_apply_integrator_pkg() {
       fi
       it_milestone_set_state "${repo}" "${ms_num}" VALIDATE_READY REFACTOR_IN_PROGRESS \
         || { log_error "_caller_apply_integrator_pkg/PASS: milestone transition failed"; return 1; }
+      # KAC-DECISION-LOG: integration PASS 자체가 1급 결정. append-only.
+      if declare -F knowledge_record_decision >/dev/null 2>&1; then
+        local decision_json
+        decision_json="$(jq -n \
+          --arg decision_id "integrator-pass-${ms_num}-${idem_key}" \
+          --arg decision "Integration PASS for milestone #${ms_num}" \
+          --arg rationale "$(jq -r '.summary // empty' "${env_path}")" \
+          --arg cp_path "${new_cp}" \
+          --arg ms_id "${ms_num}" \
+          '{decision_id: $decision_id, decision: $decision, rationale: $rationale, cp_path: $cp_path, affected_milestones: [$ms_id]}')"
+        knowledge_record_decision "${target}" "${decision_json}" || true
+      fi
       _caller_ledger_write "${target}" milestone "${ms_num}" REFACTOR_IN_PROGRESS VALIDATE_READY \
         "${operation}" "${idem_key}" "${manifest_id}" \
         ". + { outcome: \"PASS\", cp_kind: \"Integration\", cp_path: \"${new_cp}\" }"
@@ -751,6 +763,22 @@ _caller_apply_qa_pkg() {
         || { log_error "_caller_apply_qa_pkg/PASS: milestone VALIDATE_IN_PROGRESS→DONE failed"; return 1; }
       it_milestone_close "${repo}" "${ms_num}" \
         || log_warn "_caller_apply_qa_pkg/PASS: it_milestone_close failed"
+      # KAC-CONTEXT-SUMMARY / KAC-DECISION-LOG: milestone DONE 시 누적 산출.
+      if declare -F knowledge_snapshot_context_summary >/dev/null 2>&1; then
+        local _qa_summary _qa_decision
+        _qa_summary="$(jq -r '.artifacts.context_summary // .summary // empty' "${env_path}")"
+        if [ -n "${_qa_summary}" ]; then
+          knowledge_snapshot_context_summary "${target}" "${ms_num}" "${_qa_summary}" || true
+        fi
+        _qa_decision="$(jq -n \
+          --arg decision_id "qa-pass-${ms_num}-${idem_key}" \
+          --arg decision "Milestone #${ms_num} validated DONE" \
+          --arg rationale "$(jq -r '.summary // empty' "${env_path}")" \
+          --arg cp_path "${new_cp}" \
+          --arg ms_id "${ms_num}" \
+          '{decision_id: $decision_id, decision: $decision, rationale: $rationale, cp_path: $cp_path, affected_milestones: [$ms_id]}')"
+        knowledge_record_decision "${target}" "${_qa_decision}" || true
+      fi
       _caller_ledger_write "${target}" milestone "${ms_num}" VALIDATE_IN_PROGRESS DONE \
         "${operation}" "${idem_key}" "${manifest_id}" \
         ". + { outcome: \"PASS\", cp_kind: \"Milestone\", cp_path: \"${new_cp}\" }"
