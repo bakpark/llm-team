@@ -83,10 +83,36 @@ Lease 필수 속성:
 - `claimed_at`
 - `expires_at`
 - `input_revision_pins`
+- `lease_token`
 
 동일 객체에는 동시에 하나의 active lease만 존재할 수 있다. 다중 Caller 구현은 객체 단위 compare-and-set, lock, 또는 lease 원자성을 제공해야 한다.
 
 Worker slot은 역할별로 독립된다. Coder slot과 Reviewer slot은 서로 영향을 주지 않는다.
+
+### Lease Token (split-brain 감지)
+
+`lease_token`은 lease마다 고유하며 단조 증가하는 값이다. 같은 `object_id`로 발급된 새 lease는 직전 lease보다 큰 `lease_token`을 가진다.
+
+Caller는 lease 보유 중 수행하는 모든 operational write에 `lease_token`을 인용한다. 영속 저장소 또는 ledger는 동일 객체에 대해 더 작은 `lease_token`을 인용한 write가 도착하면 거부한다.
+
+이 규칙은 다음 상황에서 split-brain을 감지한다.
+
+- 클럭 스큐 또는 timeout 오인으로 만료되지 않은 lease가 회수되어 두 worker가 동시에 점유한 경우
+- worker 프로세스가 비정상 종료(예: trap 미실행) 후 새 worker가 같은 객체를 claim한 동안 이전 worker가 늦게 깨어나 write를 시도한 경우
+
+write 거부는 `RGC-LEDGER`에 `stale` 또는 `rolled_back`으로 기록한다.
+
+### Lease TTL 정책
+
+`expires_at`은 `claimed_at + ttl`로 산출한다. `ttl`은 역할별로 차등 가능하며 다음 우선순위를 따른다.
+
+1. worker별 환경에서 명시적으로 지정된 값
+2. target 단위 설정에서 역할별로 지정된 값
+3. 시스템 기본값
+
+Coder처럼 호출당 시간이 긴 역할은 PO/PM처럼 짧은 역할보다 큰 ttl을 허용한다.
+
+ttl의 *동적 갱신*(in-flight extend, heartbeat)은 본 contract의 scope 밖이다. ttl 만료 전에 작업이 완료되지 않으면 stale recovery가 진행된다(`#RGC-RECOVERY`).
 
 <a id="RGC-RECOVERY"></a>
 ## RGC-RECOVERY: Recovery
@@ -132,6 +158,17 @@ Recover 전이:
 자동 재시도는 유한하다. 한도 초과 시 ESCALATED로 전이한다.
 
 결정적 검증 실패는 LLM 해석 없이도 FAIL의 1급 증거다. 다만 책임 Task 식별이나 설명이 필요하면 Reviewer/QA를 호출할 수 있다.
+
+### Multi-step operational write의 부분 실패
+
+하나의 operation이 다단 operational write로 구성되는 경우(예: 여러 객체를 일괄 생성, 여러 라벨을 순차 변경) Caller는 다음을 따른다.
+
+- 단계 사이의 부분 실패는 실패로 간주한다. 일부 단계만 적용된 상태를 그대로 두지 않는다.
+- Caller는 이미 적용된 단계를 *원복* 한다. 원복은 직전 단계의 역연산으로 정의되며, 가능하지 않은 경우 객체를 ESCALATED로 전이한다.
+- 원복 결과는 `RGC-LEDGER`의 `result`로 분류한다. 부분 적용분이 모두 원복되면 `rolled_back`, 원복 자체가 실패하면 `escalated`로 기록한다.
+- 원복 단계 자체도 ledger에 기록한다.
+
+부분 실패의 흔적이 영속 저장소에 남으면 후속 cycle의 입력이 오염된다. 따라서 부분 적용 상태를 유지하는 것은 invariant 위반으로 본다.
 
 <a id="RGC-VERIFICATION"></a>
 ## RGC-VERIFICATION: Deterministic Verification
@@ -203,9 +240,37 @@ Gate별 기본 집행:
 | `output_hash` | Agent output 또는 산출물 hash |
 | `verification_run_id` | 관련 검증 실행, 없으면 null |
 | `idempotency_key` | 중복 방지 키 |
+| `lease_token` | 전이를 보호한 lease token, 없으면 null |
+| `result` | 전이 결과 분류 |
+| `result_detail` | 결과의 부가 분류, 없으면 null |
 | `timestamp` | 전이 시각 |
 
 Ledger는 감사, 재현, 장애 복구의 기준이다.
+
+### Result 분류
+
+`result`는 전이의 종착 분류를 표현한다. 모든 ledger 기록은 다음 중 하나를 가져야 한다.
+
+| 값 | 의미 |
+|---|---|
+| `success` | 전이가 의도대로 완료 |
+| `noop` | 전이 조건이 충족되지 않아 부작용 없이 종료 |
+| `claim_failed` | lease 점유 경쟁에서 패배 |
+| `duplicate` | 동일 idempotency key의 선행 기록을 발견하여 부작용 없이 수렴 |
+| `invalid` | Agent output 또는 입력 검증 실패 |
+| `stale` | 입력 revision pin 또는 lease token이 현재 상태와 불일치 |
+| `error` | 인프라 오류 |
+| `recovered` | sweeper가 만료 lease를 회수 |
+| `rolled_back` | multi-step 전이의 부분 적용을 원복 (`#RGC-FAILURE`) |
+| `escalated` | 자동 복구가 불가능하여 human gate로 진입 |
+
+### Result Detail
+
+`result_detail`은 `result`의 동일 분류 안에서 원인을 더 좁힌다. 자유 식별자이며 운영 분석과 retry 정책 결정에 사용된다.
+
+같은 `result`라도 `result_detail`이 다르면 별개의 사례로 본다. 예: `invalid` 안의 envelope 형식 위반과 권한 경계 위반은 서로 다른 retry 처리를 받을 수 있다.
+
+`result_detail`의 어휘는 본 contract가 고정 enum으로 정의하지 않는다. 운영 안정성을 위해 어휘 자체는 `RGC-LEDGER`에 기록되는 값들의 합으로만 정의되며, 각 어휘는 영속 저장소를 통해 사람이 검토 가능해야 한다.
 
 <a id="RGC-PAUSE"></a>
 ## RGC-PAUSE: System Pause
@@ -229,3 +294,29 @@ RUNNING | PAUSED
 ## RGC-FAIRNESS: Scheduler Fairness
 
 동일 우선순위의 ready 객체는 oldest-ready-first로 claim한다. 명시적 priority가 있는 경우에만 예외를 허용한다. priority 예외도 transition ledger에 기록해야 한다.
+
+<a id="RGC-DAEMON-STARTUP"></a>
+## RGC-DAEMON-STARTUP: Daemon Startup Atomicity
+
+다중 역할을 동시에 기동하는 Caller 군집은 *원자적* 으로 시작해야 한다. 부분 시작은 invariant 위반으로 본다.
+
+### 시작 전 조건
+
+Caller 군집은 새 worker를 띄우기 전에 다음을 모두 만족해야 한다.
+
+- 기존 worker와의 lock 충돌이 없음을 사전 검사한다. 충돌이 있으면 *어떤* 새 worker도 기동하지 않는다.
+- 운영 진입 게이트(예: 환경 점검, 필수 설정 검증)가 통과한 상태여야 한다. 게이트 실패 시 군집 전체 시작을 중단한다.
+
+### 부분 실패 처리
+
+군집 시작 중 특정 worker 기동이 실패한 경우 Caller는 다음을 수행한다.
+
+- 이미 기동된 sibling worker를 모두 정지시킨다.
+- 정지 결과는 `#RGC-LEDGER`에 `rolled_back`으로 기록한다.
+- 정지가 불가능한 sibling이 있으면 군집을 ESCALATED로 분류하고 사람에게 알린다.
+
+### 운영 의의
+
+부분적으로만 기동된 군집은 `#RGC-FAIRNESS`의 oldest-ready-first 가정을 깨고, 일부 역할의 큐가 무한히 적체된다. 따라서 모든 기동은 "전체 성공" 또는 "전체 미시작" 두 상태만 허용한다.
+
+stop/resume signal에 의한 정상 종료·재개는 본 절의 atomicity 와 무관하다. 본 절은 *시작 시점* 에만 적용된다.

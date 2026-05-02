@@ -42,6 +42,35 @@ Manifest는 누적 스펙의 인덱스다.
 
 PO/PM 호출에서 Manifest는 우선순위가 가장 높은 읽기 대상이다.
 
+<a id="KAC-MANIFEST-FROM-KNOWLEDGE"></a>
+## KAC-MANIFEST-FROM-KNOWLEDGE: Manifest Materialization
+
+다음 마일스톤의 PO/PM 호출에서 누적 스펙은 `AGC-CONTEXT-MANIFEST`의 entry로 변환되어 입력된다. 본 절은 그 변환 규약을 정의한다.
+
+### 변환 규칙
+
+Caller는 `KAC-MANIFEST` 의 항목을 manifest entry로 변환할 때 다음을 따른다.
+
+- `artifact_kind`는 manifest entry의 `object_kind`에 매핑한다. 변환 시 의미가 좁아지지 않도록 1:1 또는 그룹화로 매핑하며, 임의로 폐기하지 않는다.
+- `artifact_id`는 entry의 `object_id`로, `revision_pin`은 entry의 `revision_pin`으로 그대로 보존한다. 새로 발급하지 않는다.
+- `summary`는 entry의 `purpose` 또는 부속 메타로 사용한다. 본문은 self-fetch로 얻으며, 본 절이 본문을 manifest에 직접 임베드하지 않는다.
+- 동일 마일스톤에서 결정 우선순위가 다른 항목이 충돌하면 `KAC-CONFLICTS`의 우선순위에 따라 *상위* 항목만 entry로 포함한다. 폐기된 항목은 `KAC-DECISION-LOG`의 `supersedes` 추적으로 참조 가능하다.
+
+### 필수 entry
+
+PO/PM 호출의 manifest는 최소 다음을 포함한다.
+
+- 직전 마일스톤의 Context Summary
+- 현재 사람 승인 시그널이 인용한 스펙(있을 때)
+- 최신 병합된 PO/PM 산출물
+- 최근 Decision Log 중 현재 마일스톤 scope과 관련된 항목
+
+이 entry들은 `required: true`로 표시한다. 누락은 invalid manifest이며, Caller는 호출 전에 생성을 보장해야 한다.
+
+### 변환의 책임
+
+manifest 생성은 Caller 단독 책임이다. Agent는 manifest 외부 객체를 self-fetch하지 않는다(`AGC-CONTEXT-MANIFEST`). 따라서 누적 스펙이 다음 마일스톤에 *전달되지 않으면* 그 결정은 시스템적으로 보이지 않게 되며, 이는 헌법 Inv#10 위반이다.
+
 <a id="KAC-DECISION-LOG"></a>
 ## KAC-DECISION-LOG: Decision Log
 

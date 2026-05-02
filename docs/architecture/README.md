@@ -13,9 +13,12 @@
 
 ## 읽는 순서
 
-1. [`state-machine.md`](state-machine.md) — contract state를 GitHub label/marker로 매핑하는 방식.
-2. [`agent-output-format-mapping.md`](agent-output-format-mapping.md) — Agent output envelope와 GitHub markdown artifact 매핑.
-3. [`agents/`](agents/) — 7개 Agent 역할의 구현 관점 책임.
+1. [`pipeline-end-to-end.md`](pipeline-end-to-end.md) — Caller 단일 cycle 의 6 단계와 dispatch 분기 매트릭스.
+2. [`application-modules.md`](application-modules.md) — `application/` 12 개 use-case 모듈의 진입점·책임·의존.
+3. [`feature-request-intake.md`](feature-request-intake.md) — `feature-request` issue → milestone 입수 흐름.
+4. [`state-machine.md`](state-machine.md) — contract state를 GitHub label/marker로 매핑하는 방식.
+5. [`agent-output-format-mapping.md`](agent-output-format-mapping.md) — Agent output envelope와 GitHub markdown artifact 매핑.
+6. [`agents/`](agents/) — 7개 Agent 역할의 구현 관점 책임.
    - [`po.md`](agents/po.md)
    - [`pm.md`](agents/pm.md)
    - [`planner.md`](agents/planner.md)
@@ -23,8 +26,12 @@
    - [`reviewer.md`](agents/reviewer.md)
    - [`integrator.md`](agents/integrator.md)
    - [`qa.md`](agents/qa.md)
-4. [`daemons.md`](daemons.md) — Caller runner, worker slot, lease 운영 방식.
-5. [`tools.md`](tools.md) — `gh`/`git`/LLM CLI와 `lib/*.sh` helper 매핑.
+7. [`daemons.md`](daemons.md) — Caller runner, worker slot, lease 운영 방식.
+8. [`tools.md`](tools.md) — `gh`/`git`/LLM CLI와 `lib/*.sh` helper 매핑.
+
+## 진행 중인 방향
+
+- [`direction-2026-05.md`](direction-2026-05.md) — docs 고도화 5-phase 로드맵, contract anchor 추적 매트릭스, `.human/draft/` graduation 분류표(Phase 0 산출물). 모든 항목 흡수 완료 시 archive 이동.
 
 ## 구현 흐름 요약
 

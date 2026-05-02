@@ -67,7 +67,7 @@ Context Manifest는 Caller가 Agent 호출 전에 생성하는 읽기 대상 목
 |---|---|
 | `object_kind` | milestone, task, change_proposal, spec_doc, verification_log 등 |
 | `object_id` | 영속 저장소의 객체 식별자 |
-| `fetch_scope` | Agent가 읽을 수 있는 범위 |
+| `fetch_scope` | Agent가 읽을 수 있는 범위. 본 문서의 fetch scope enum 중 하나 |
 | `revision_pin` | revision/hash/HEAD/updated_at 등 가장 강한 버전 식별자 |
 | `required` | true면 fetch 실패 시 Agent는 실패 산출을 반환해야 한다 |
 | `purpose` | 이 객체를 읽는 이유 |
@@ -75,6 +75,40 @@ Context Manifest는 Caller가 Agent 호출 전에 생성하는 읽기 대상 목
 Agent는 Context Manifest에 없는 객체를 self-fetch하지 않는다. 필요한 컨텍스트가 누락되었으면 임의로 확장하지 않고 `NEED_CONTEXT` 실패 산출을 반환한다.
 
 Caller는 Agent 산출을 영속화하기 직전에 모든 required entry의 revision pin을 재검증한다. 변경이 감지되면 산출을 stale로 판정한다.
+
+### Fetch Scope Enum
+
+`fetch_scope`는 Agent가 entry에서 읽을 수 있는 정보의 깊이를 한정한다. 다음 셋 중 하나여야 한다.
+
+| 값 | 허용 범위 |
+|---|---|
+| `metadata` | 식별자, 상태, 라벨, 마커 등 본문을 제외한 메타데이터 |
+| `body` | metadata + 객체 본문 |
+| `body+comments` | body + 객체에 누적된 코멘트/이력 |
+
+좁은 scope에 충분한 정보가 있는데도 더 넓은 scope을 사용하면 manifest 크기가 불필요하게 커지고, 후속 호출의 입력 결정성이 떨어진다.
+
+### Role별 기본 Scope
+
+호출 prompt 가 별도로 명시하지 않으면 Caller는 다음 기본값을 사용한다.
+
+| 역할 | 기본 scope |
+|---|---|
+| PO | `body` |
+| PM | `body` |
+| Planner | `body` |
+| Coder | `body` |
+| Reviewer | `body+comments` |
+| Integrator | `body+comments` |
+| QA | `body+comments` |
+
+Reviewer/Integrator/QA가 `body+comments`를 기본으로 갖는 이유는 결정적 검증 결과와 사람의 추가 코멘트가 판단의 1급 입력이기 때문이다.
+
+### 절단(Truncation) 책임
+
+본 contract는 entry당 절대적인 길이 한도를 정의하지 않는다. Caller는 `fetch_scope`에 의해 정해진 의미적 범위 안에서, 어댑터별 한도(컨텍스트 윈도우, 인용 비용)에 맞춰 *수렴적* 절단을 적용할 수 있다.
+
+절단이 적용된 경우 entry는 그 사실을 보존해야 한다. Agent는 절단 표시를 본 채 임의로 외부 self-fetch를 시도하지 않는다.
 
 <a id="AGC-OUTPUT"></a>
 ## AGC-OUTPUT: Output Contract
@@ -97,6 +131,43 @@ Caller는 Agent 산출을 영속화하기 직전에 모든 required entry의 rev
 
 Agent output은 operational side effect를 포함하지 않는다. `merge`, `close_issue`, `set_label`, `notify`, `lease_expire` 같은 실행 지시는 허용되지 않는다. 필요하면 `recommended_outcome`으로 판단만 표현한다.
 
+<a id="AGC-OUTPUT-RUNTIME-ENRICH"></a>
+## AGC-OUTPUT-RUNTIME-ENRICH: Runtime Metadata Enrichment
+
+본 절은 Agent envelope 의 *콘텐츠 필드(Agent 가 산출)* 와 *runtime metadata 필드(Caller 가 영속 저장소 작업 후 후주입)* 의 권한 경계를 정정한다. `llm-team.md` Inv#3 (caller-only operational write) 의 직접 결과로, Agent 는 영속 저장소가 발급하거나 Caller 의 operational write 시점에 비로소 결정되는 식별자를 알 수 없으며 알아서도 안 된다.
+
+### 분리 원칙 (MUST)
+
+- Agent 는 AGC-OUTPUT 이 정의한 envelope 필수 필드와 *콘텐츠* 성격의 artifact 만 산출한다. 콘텐츠는 manifest 와 prompt 만 보고 결정 가능한 정보를 의미한다.
+- runtime metadata 는 영속 저장소 작업의 *결과* 로만 결정된다. Agent 가 산출하지 않으며, Caller 가 envelope 의 별도 영역에 후주입한다.
+- runtime metadata 누락은 envelope invalid 사유가 아니다. enrichment 자체가 실패하면 결과는 RGC-LEDGER 의 실패 분류에 따라 기록한다.
+
+### Producer / Enricher 매트릭스
+
+| 역할 | Agent 산출(콘텐츠) | Caller 후주입(runtime metadata) |
+|---|---|---|
+| PO | spec / research 본문, 요약 | Spec CP 식별자 |
+| PM | 시나리오, 수용 기준, AC-ID | Spec CP 식별자 |
+| Planner | task 본문(slug, 의존, AC 매핑), 통합 브랜치 명세 | task 객체 식별자, 통합 브랜치 HEAD |
+| Coder | patch, CP message | Code CP 식별자, source revision pin, review 대상 식별자 |
+| Reviewer | verdict, 근거 | review 대상 식별자, source revision pin(stale 비교 기준), Code CP 식별자 |
+| Integrator | verdict, Integration CP message(있을 때) | Integration CP 식별자(있을 때), 통합 브랜치 HEAD |
+| QA | verdict, 마일스톤 본문, Context Summary, AC 결과, 책임 task 식별 | Milestone CP 식별자, release 식별자(있을 때) |
+
+콘텐츠 필드의 구체 이름과 verdict enum 은 SOC-OPERATIONS 와 AGC-ROLE-OUTPUTS 가 정의한다. runtime metadata 의 구체 형태(번호 / 경로 / SHA 등)는 영속 저장소 어댑터가 결정한다. 본 매트릭스는 *역할별 책임 분리* 만 표현한다.
+
+### Caller Enrichment 규칙
+
+- Caller 는 envelope 파싱 직후 AGC-INVALID 검증 *이전* 에 enrichment 를 수행한다.
+- Enrichment 는 envelope 의 별도 영역에 키를 추가하는 동작이다. Agent 가 산출한 키를 덮어쓰지 않는다. 충돌이 감지되면 invalid 로 판정한다.
+- Enrichment 의 입력은 manifest 와 영속 저장소에 즉시 질의 가능한 lookup 으로 제한된다. 새로운 Agent 호출이나 사람의 결정에 의존하지 않는다.
+- Enrichment 이후 envelope 은 불변으로 취급한다. side-effect 와 ledger 기록 단계에서 재변형하지 않는다.
+
+### 위반 처리
+
+- Agent 가 runtime metadata 필드를 산출했더라도 Caller 는 자체 lookup 결과로 덮어쓴다. lookup 결과와 산출값이 충돌하면 invalid 로 판정한다.
+- Caller enrichment 자체가 실패한 경우 envelope 은 미완성으로 간주하고 side-effect 를 수행하지 않는다. 결과는 RGC-LEDGER 의 실패 분류에 따라 기록한 뒤 lease 를 해제한다.
+
 <a id="AGC-ROLE-OUTPUTS"></a>
 ## AGC-ROLE-OUTPUTS: Role-Specific Outputs
 
@@ -114,6 +185,30 @@ Agent output은 operational side effect를 포함하지 않는다. `merge`, `clo
 Agent는 영속 저장소에 직접 쓰지 않는다. 단, Caller가 할당한 격리 작업 공간 내부 파일은 임시 산출 매개체로 수정할 수 있다.
 
 작업 공간 변경은 Caller가 diff를 수집해 Change Proposal로 영속화한 시점에만 workflow에 진입한다. 작업 공간 생성, 정리, 폐기는 Caller 책임이다.
+
+<a id="AGC-ISSUE-BODY"></a>
+## AGC-ISSUE-BODY: Persisted Object Body Rendering
+
+Caller가 Agent artifact를 영속 저장소의 객체 본문(예: 마일스톤 본문, Task 본문)에 기록할 때 본문은 두 계층으로 분리된다.
+
+### 두 계층 구조
+
+| 계층 | 대상 독자 | 내용 |
+|---|---|---|
+| 사람 계층 | 사람 검토자 | Agent가 산출한 자연어 본문(요약, 시나리오, 결정 근거 등) |
+| 기계 계층 | Caller | 상태 마커, 식별자, idempotency key 등 Caller가 후속 cycle에서 다시 읽을 메타데이터 |
+
+기계 계층은 사람 본문의 가독성을 해치지 않도록 *접힌(collapsible) 영역* 또는 그에 상응하는 분리된 영역에 위치한다. 사람 계층은 마커 토큰이나 기계 메타데이터를 직접 포함하지 않는다.
+
+### 작성 규칙
+
+- Caller는 사람 계층을 항상 본문 상단에, 기계 계층을 그 뒤에 배치한다. 객체 외부 도구(브라우저, CLI 미리보기)에서 본문이 잘리는 경우 사람이 우선 보이도록 한다.
+- 기계 계층은 Caller가 후속 cycle에서 안정적으로 파싱할 수 있는 단일 영역에 모은다. 두 계층의 토큰이 섞이면 invalid 본문으로 간주한다.
+- 사람의 수동 편집은 사람 계층에 한정된다. 기계 계층은 Caller만 갱신한다. 사람이 기계 계층을 편집한 경우 Caller는 그 본문을 stale로 판정하고 사람의 governance signal을 요구한다.
+
+### Agent 책임의 한계
+
+Agent는 본문의 *사람 계층 콘텐츠* 만 산출한다. 기계 계층의 상태 마커나 식별자는 Agent가 산출하지 않으며, 이는 `#AGC-OUTPUT-RUNTIME-ENRICH`의 직접 결과다.
 
 <a id="AGC-INVALID"></a>
 ## AGC-INVALID: Invalid Output Handling

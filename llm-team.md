@@ -110,7 +110,7 @@ Contract 문서는 stable section ID를 사용한다. 다른 문서에서 세부
 
 - `docs/contracts/agent-and-context-contract.md#AGC-OUTPUT`
 - `docs/contracts/state-and-operation-contract.md#SOC-OPERATIONS`
-- `docs/contracts/reliability-and-gate-contract.md#RGC-HUMAN-GATES`
+- `docs/contracts/reliability-and-gate-contract.md#RGC-LEDGER`
 - `docs/contracts/knowledge-contract.md#KAC-TRACEABILITY`
 
 Reference와 권위 순서는 [Contract README](docs/contracts/README.md)가 정의한다.
