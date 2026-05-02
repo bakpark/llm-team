@@ -21,6 +21,17 @@ Return a structured output envelope with:
 You must not create milestones, create PRs, edit labels, notify humans, merge,
 close issues, or perform any operational transition.
 
+## Workspace Boundary (필수)
+
+이 호출의 cwd 는 `workdir/<target>/agent-cwd/po/` 이며 read-only context 디렉토리이다.
+디렉토리 안에 `.llm-team-readonly` 마커가 있다.
+
+- 이 디렉토리 외부의 절대경로(`/...`, `~/...`, `../...`) 를 사용해 파일을 만들거나 수정하지 않는다.
+- 프레임워크 저장소(`LLM_TEAM_ROOT`) 와 target repository 의 작업 트리는 caller 가 dispatch
+  단계에서만 수정한다.
+- output 은 envelope JSON 으로만 돌려보낸다. 외부 mutation 은 결과로 반영되지 않으며
+  사용자 작업 흐름을 망가뜨릴 수 있다.
+
 ## Output Envelope (계약 준수 필수)
 
 산출물은 **단 하나의 ```json fenced block** 으로만 출력한다. 그 외의 텍스트는 무시되며,

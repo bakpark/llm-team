@@ -14,7 +14,7 @@ Usage:
   llm-team target show <name>
   llm-team target add [name] --repo owner/repo|github-url [--branch main] [--clone-path path] [--label-prefix prefix] [--notifier none] [--webhook-ref KEY] [--disabled] [--force]
   llm-team target add [name] --url github-url [options]
-  llm-team target add [name] --from-current [--path checkout] [options]
+  llm-team target add [name] --from-current [--path checkout] [--separate-clone] [options]
   llm-team target init <name> [--dry-run] [--skip-labels]
   llm-team target enable <name>
   llm-team target disable <name>
@@ -102,9 +102,56 @@ git_default_branch_guess() {
   git -C "${path}" rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'main\n'
 }
 
+# Resolve absolute path (handles ~ and . segments) for clone_path comparison.
+_abs_path() {
+  local p="$1"
+  [ -n "${p}" ] || return 1
+  case "${p}" in
+    "~"|"~/"*)
+      p="${HOME}${p#\~}"
+      ;;
+  esac
+  if [ -d "${p}" ]; then
+    ( cd "${p}" 2>/dev/null && pwd -P ) || printf '%s' "${p}"
+  else
+    # Resolve parent dir, append basename — works for not-yet-existing paths.
+    local parent base
+    parent="$(dirname "${p}")"
+    base="$(basename "${p}")"
+    if [ -d "${parent}" ]; then
+      printf '%s/%s' "$( cd "${parent}" 2>/dev/null && pwd -P )" "${base}"
+    else
+      printf '%s' "${p}"
+    fi
+  fi
+}
+
+# H6: 동일 clone_path 를 가리키는 다른 target 이 이미 존재하면 그 이름을 출력.
+# 비어 있는 clone_path 는 검사하지 않음(기본 workdir/<target>/repo 자동 결정 — target 별 분리됨).
+_target_clone_path_collision() {
+  local skip_name="$1" candidate_abs="$2"
+  [ -n "${candidate_abs}" ] || return 1
+  local dir="${LLM_TEAM_ROOT}/targets" f existing other_abs
+  [ -d "${dir}" ] || return 1
+  for f in "${dir}"/*.yaml; do
+    [ -f "${f}" ] || continue
+    existing="$(yq -r '.name // ""' "${f}" 2>/dev/null)"
+    [ -n "${existing}" ] || existing="$(basename "${f}" .yaml)"
+    [ "${existing}" = "${skip_name}" ] && continue
+    other_abs="$(yq -r '.local.clone_path // ""' "${f}" 2>/dev/null)"
+    [ -n "${other_abs}" ] || continue
+    other_abs="$(_abs_path "${other_abs}")"
+    if [ "${other_abs}" = "${candidate_abs}" ]; then
+      printf '%s' "${existing}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 target_add() {
   local name="" repo="" branch="main" clone_path="" label_prefix="" notifier="none" webhook_ref="" enabled="true" force=0
-  local from_current=0 checkout_path="."
+  local from_current=0 checkout_path="." separate_clone=0
   if [ "${1:-}" != "" ] && [ "${1#-}" = "${1}" ]; then
     name="$1"
     shift || true
@@ -115,6 +162,7 @@ target_add() {
       --repo) repo="${2:-}"; shift 2 ;;
       --url|--github-url) repo="${2:-}"; shift 2 ;;
       --from-current) from_current=1; shift ;;
+      --separate-clone) separate_clone=1; shift ;;
       --path) checkout_path="${2:-}"; shift 2 ;;
       --branch) branch="${2:-}"; shift 2 ;;
       --clone-path) clone_path="${2:-}"; shift 2 ;;
@@ -132,8 +180,13 @@ target_add() {
     command -v git >/dev/null 2>&1 || cli_die "git is required for --from-current" 1
     repo="${repo:-$(git_remote_origin_url "${checkout_path}" || true)}"
     [ -n "${repo}" ] || cli_die "--from-current could not read origin remote from ${checkout_path}"
-    if [ -z "${clone_path}" ]; then
-      clone_path="$(git_checkout_root "${checkout_path}" || true)"
+    # H6: 기본 동작은 사용자 체크아웃 root 를 그대로 canonical clone 으로 쓰지
+    # 않는다 — fetch --prune origin 이 사용자 작업 흐름을 흔들고, 다른 target
+    # 과 clone_path 를 충돌시킬 위험이 있다. --separate-clone 또는 --clone-path
+    # 미지정 시 자동으로 workdir/<target>/repo 를 사용하도록 비워 둔다.
+    if [ -z "${clone_path}" ] && [ "${separate_clone}" -ne 1 ]; then
+      printf 'note: --from-current 은 origin URL 만 수집합니다. canonical clone 은 workdir/<target>/repo 에 별도로 만들어집니다.\n' >&2
+      printf '      사용자 체크아웃을 그대로 canonical 로 쓰려면 --clone-path %s 를 명시하세요.\n' "$(git_checkout_root "${checkout_path}" 2>/dev/null || echo "${checkout_path}")" >&2
     fi
     if [ "${branch}" = "main" ]; then
       branch="$(git_default_branch_guess "${checkout_path}")"
@@ -153,6 +206,22 @@ target_add() {
   file="$(cli_target_file "${name}")"
   if [ -f "${file}" ] && [ "${force}" -ne 1 ]; then
     cli_die "target already exists: ${name} (use --force to overwrite)" 1
+  fi
+
+  # H6: clone_path 충돌 검증 — 명시적으로 clone_path 가 지정된 경우만.
+  # 비어 있는 clone_path 는 ws_ensure_clone 이 workdir/<target>/repo 로
+  # 자동 분리하므로 충돌 위험 없음.
+  if [ -n "${clone_path}" ]; then
+    cli_require_cmd yq
+    local clone_path_abs
+    clone_path_abs="$(_abs_path "${clone_path}")"
+    local collided
+    if collided="$(_target_clone_path_collision "${name}" "${clone_path_abs}")"; then
+      if [ "${force}" -ne 1 ]; then
+        cli_die "clone_path 충돌: '${clone_path_abs}' 가 이미 target '${collided}' 에 사용 중입니다 (--force 로 강제 덮어쓰기 가능)" 1
+      fi
+      printf 'WARN: clone_path 가 target %s 와 충돌하지만 --force 로 진행합니다\n' "${collided}" >&2
+    fi
   fi
 
   mkdir -p "${LLM_TEAM_ROOT}/targets" "${LLM_TEAM_ROOT}/inputs/${name}"
