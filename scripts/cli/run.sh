@@ -6,12 +6,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=common.sh
 . "${SCRIPT_DIR}/common.sh"
+# shellcheck source=_onboarding_gate.sh
+. "${SCRIPT_DIR}/_onboarding_gate.sh"
 
 usage() {
   cat <<EOF
 Usage:
-  llm-team run <role> <target> [--dry-run]
-  llm-team run-once <target> [--roles po,pm,planner,coder,reviewer,integrator,qa|all] [--dry-run]
+  llm-team run <role> <target> [--dry-run] [--allow-incomplete-onboarding]
+  llm-team run-once <target> [--roles po,pm,planner,coder,reviewer,integrator,qa|all] [--dry-run] [--allow-incomplete-onboarding]
 EOF
 }
 
@@ -22,7 +24,18 @@ run_one() {
   cli_role_is_valid "${role}" || cli_die "invalid role: ${role}"
   cli_require_target_file "${target}"
   shift 2 || true
-  exec "${LLM_TEAM_ROOT}/scheduler/runner.sh" "${role}" "${target}" "$@"
+
+  onboarding_gate_detect_flags "$@"
+  local args=() arg
+  for arg in "$@"; do
+    case "${arg}" in
+      --allow-incomplete-onboarding) ;;
+      *) args+=("${arg}") ;;
+    esac
+  done
+
+  onboarding_gate_check "${target}" || exit $?
+  exec "${LLM_TEAM_ROOT}/scheduler/runner.sh" "${role}" "${target}" "${args[@]+"${args[@]}"}"
 }
 
 run_once() {
@@ -31,7 +44,17 @@ run_once() {
   shift || true
   cli_require_target_file "${target}"
 
+  onboarding_gate_detect_flags "$@"
+  local args=() arg
+  for arg in "$@"; do
+    case "${arg}" in
+      --allow-incomplete-onboarding) ;;
+      *) args+=("${arg}") ;;
+    esac
+  done
+
   local roles="all" dry_run=0
+  set -- "${args[@]+"${args[@]}"}"
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --roles) roles="${2:-}"; shift 2 ;;
@@ -41,11 +64,13 @@ run_once() {
     esac
   done
 
-  local role args=()
-  [ "${dry_run}" -eq 1 ] && args+=(--dry-run)
+  onboarding_gate_check "${target}" || exit $?
+
+  local role passthrough=()
+  [ "${dry_run}" -eq 1 ] && passthrough+=(--dry-run)
   while IFS= read -r role; do
     [ -n "${role}" ] || continue
-    "${LLM_TEAM_ROOT}/scheduler/runner.sh" "${role}" "${target}" "${args[@]}"
+    "${LLM_TEAM_ROOT}/scheduler/runner.sh" "${role}" "${target}" "${passthrough[@]+"${passthrough[@]}"}"
   done <<EOF
 $(cli_expand_roles "${roles}")
 EOF
