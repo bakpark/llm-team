@@ -134,10 +134,13 @@ ws_ensure() {
 
   mkdir -p "$(dirname "${wt_path}")" || return 1
 
-  # H5: fetch + worktree add 를 같은 락 아래에서 직렬화. .git/worktrees/ 동시
-  # 쓰기 race 와 ref-lock 충돌을 함께 막는다.
-  local got_lock=0
-  _workspace_fetchlock_acquire && got_lock=1
+  # H5/G2: fetch + worktree add 는 같은 락 아래에서 반드시 직렬화. .git/worktrees/
+  # 동시 쓰기 race 와 ref-lock 충돌을 막는다. lock 획득 실패 시 fail-fast —
+  # stale refs 로 진행하면 race 가 부활하므로 다음 cycle 에서 retry 한다.
+  if ! _workspace_fetchlock_acquire; then
+    log_error "ws_ensure: failed to acquire fetchlock for target '${TARGET_NAME}'; aborting"
+    return 1
+  fi
   (
     cd "${clone_path}" || exit 1
     git fetch origin "${branch}" >/dev/null 2>&1 || true
@@ -158,7 +161,7 @@ ws_ensure() {
       || { log_error "ws_ensure: worktree add new branch from default failed"; exit 1; }
   )
   local rc=$?
-  [ "${got_lock}" -eq 1 ] && _workspace_fetchlock_release
+  _workspace_fetchlock_release
   [ "${rc}" -eq 0 ] || return 1
 
   printf '%s\n' "${wt_path}"
@@ -177,8 +180,11 @@ ws_refresh() {
     log_error "ws_refresh: workspace not found for unit '${unit_id}'"
     return 1
   fi
-  local got_lock=0
-  _workspace_fetchlock_acquire && got_lock=1
+  # G2: lock 획득 실패 시 fail-fast — 동시 fetch/reset race 를 막는다.
+  if ! _workspace_fetchlock_acquire; then
+    log_error "ws_refresh: failed to acquire fetchlock for target '${TARGET_NAME}'; aborting"
+    return 1
+  fi
   (
     cd "${wt_path}" || exit 1
     git fetch origin "${branch}" >/dev/null 2>&1 || exit 0
@@ -187,7 +193,7 @@ ws_refresh() {
     fi
   )
   local rc=$?
-  [ "${got_lock}" -eq 1 ] && _workspace_fetchlock_release
+  _workspace_fetchlock_release
   [ "${rc}" -eq 0 ] || { log_error "ws_refresh: failed to refresh worktree for unit '${unit_id}'"; return 1; }
 }
 
@@ -206,6 +212,13 @@ ws_path_of() {
 # 적용 후 자동으로 `git add -A && git commit` 을 수행해 변경을 브랜치 tip 으로
 # 영속화한다. commit_message 가 비어 있으면 기본 메시지를 사용한다.
 # 변경이 없는 경우(빈 diff) 커밋은 생략하고 성공으로 취급(멱등).
+#
+# Invariant I2: 실패 시 워크스페이스를 호출 직전 상태(pre_head)로 reset --hard.
+# 안전장치:
+#   • git apply --check --3way 로 사전 검증; 실패 시 --check --reverse 로 이미
+#     적용된 멱등 호출인지 확인.
+#   • 적용 후 conflict marker (`<<<<<<<` 등) 가 working tree 에 남으면 abort.
+#   • commit 실패(gpgsign, hook, author config 오류 등) 시 reset --hard rollback.
 ws_apply_patch() {
   local unit_id="$1" patch_arg="$2" commit_message="${3:-}"
   local wt_path
@@ -219,21 +232,78 @@ ws_apply_patch() {
   fi
   local author_name="${LLM_TEAM_GIT_AUTHOR_NAME:-llm-team}"
   local author_email="${LLM_TEAM_GIT_AUTHOR_EMAIL:-llm-team@local}"
+
+  # Normalize patch_arg into a real file so `git apply` can be invoked
+  # multiple times (--check, --check --reverse, --3way).
+  local patch_file="" patch_tmp=""
+  if [ -f "${patch_arg}" ]; then
+    patch_file="${patch_arg}"
+  else
+    patch_tmp="$(mktemp "${TMPDIR:-/tmp}/llm-team-patch-XXXXXX")" || {
+      log_error "ws_apply_patch: failed to create temp patch file"
+      return 1
+    }
+    printf '%s\n' "${patch_arg}" >"${patch_tmp}"
+    patch_file="${patch_tmp}"
+  fi
+
   (
     cd "${wt_path}" || exit 1
-    if [ -f "${patch_arg}" ]; then
-      git apply --3way "${patch_arg}" || exit 1
-    else
-      printf '%s\n' "${patch_arg}" | git apply --3way - || exit 1
+    pre_head="$(git rev-parse HEAD 2>/dev/null)" || exit 1
+
+    rollback() {
+      git reset --hard "${pre_head}" >/dev/null 2>&1 || true
+      git clean -fdx >/dev/null 2>&1 || true
+    }
+
+    # B1 사전 검증.
+    if ! git apply --check --3way "${patch_file}" >/dev/null 2>&1; then
+      # 이미 적용된 patch (멱등 retry) 는 reverse-applicable 이어야 한다.
+      if git apply --check --reverse "${patch_file}" >/dev/null 2>&1; then
+        exit 0
+      fi
+      log_error "ws_apply_patch: patch precheck failed (malformed or non-applicable) for unit '${unit_id}'"
+      exit 1
     fi
-    git add -A || exit 1
+
+    # 실제 적용. --check 통과해도 race 등으로 실패 가능 → rollback.
+    if ! git apply --3way "${patch_file}" >/dev/null 2>&1; then
+      log_error "ws_apply_patch: git apply --3way failed for unit '${unit_id}'; rolling back"
+      rollback
+      exit 1
+    fi
+
+    # B1 사후 검증: --3way 가 conflict marker 를 남긴 채 0/1 으로 종료할 수 있다.
+    # working tree 에 marker 가 남으면 commit 으로 새어나가지 않도록 abort.
+    if git diff --check 2>&1 | grep -q 'conflict marker'; then
+      log_error "ws_apply_patch: 3way merge left conflict markers for unit '${unit_id}'; rolling back"
+      rollback
+      exit 1
+    fi
+
+    if ! git add -A >/dev/null 2>&1; then
+      log_error "ws_apply_patch: git add failed for unit '${unit_id}'; rolling back"
+      rollback
+      exit 1
+    fi
+
     if git diff --cached --quiet; then
       # 빈 diff — patch 가 이미 반영되어 있는 멱등 호출. 커밋 생략.
       exit 0
     fi
-    git -c "user.name=${author_name}" -c "user.email=${author_email}" \
-        commit --no-verify -m "${commit_message}" >/dev/null || exit 1
-  ) || { log_error "ws_apply_patch: git apply/commit failed for unit '${unit_id}'"; return 1; }
+
+    # G1: commit 실패(gpgsign, invalid author, hook 등) 시 working tree/index
+    # 가 partial 상태로 남지 않도록 pre_head 로 강제 복귀.
+    if ! git -c "user.name=${author_name}" -c "user.email=${author_email}" \
+            commit --no-verify -m "${commit_message}" >/dev/null 2>&1; then
+      log_error "ws_apply_patch: git commit failed for unit '${unit_id}'; rolling back"
+      rollback
+      exit 1
+    fi
+  )
+  local rc=$?
+  [ -n "${patch_tmp}" ] && rm -f "${patch_tmp}" 2>/dev/null
+  return "${rc}"
 }
 
 # ws_publish_branch <unit_id> [branch_name=llm-team/<unit_id>]

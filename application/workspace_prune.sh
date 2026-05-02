@@ -2,8 +2,9 @@
 # application/workspace_prune.sh
 #
 # Single entry point that turns "this unit's worktree is no longer useful"
-# into the side effects required to free disk + branches without leaving
-# stale state behind. Used by:
+# into the side effects required to free disk without leaving stale state
+# behind. NOTE: branch cleanup (local/remote `llm-team/<unit>`) is intentionally
+# NOT performed here — see follow-up issue. Used by:
 #   • Integrator dispatch end (PR merged → cleanup the unit's worktree).
 #   • recovery_scan (lease expired → drop the half-applied workspace before
 #     a future cycle reuses it via ws_ensure).
