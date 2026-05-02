@@ -58,7 +58,8 @@ status_target() {
     done
   fi
 
-  # Change-proposals: workdir/<target>/change-proposals/*.json with state != closed.
+  # Change-proposals: workdir/<target>/change-proposals/*.json.
+  # Terminal states (CP_CLOSED/CP_MERGED/CP_STALE) 는 open 에서 제외.
   local cp_open=0
   if [ -d "${workdir}/change-proposals" ] && command -v jq >/dev/null 2>&1; then
     local f st
@@ -66,7 +67,7 @@ status_target() {
       [ -f "${f}" ] || continue
       st="$(jq -r '.state // ""' "${f}" 2>/dev/null)"
       case "${st}" in
-        ''|closed|CLOSED) ;;
+        ''|CP_CLOSED|CP_MERGED|CP_STALE) ;;
         *) cp_open=$((cp_open + 1)) ;;
       esac
     done

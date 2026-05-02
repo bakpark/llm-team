@@ -45,6 +45,12 @@ out="$(run_capture target-show "${LLM_TEAM_ROOT}/bin/llm-team" target show myapp
 assert_contains "${out}" "owner: bakparkbj" "target show owner"
 assert_contains "${out}" "repo: myapp" "target show repo"
 
+# doctor 는 workdir scaffold + agent-cwd 를 요구하므로
+# clean checkout 에서도 동작하도록 target init 을 먼저 실행한다
+# (--dry-run 은 clone/labels 네트워크 호출을 건너뛰고 디렉토리만 생성).
+out="$(run_capture target-init "${LLM_TEAM_ROOT}/bin/llm-team" target init myapp --dry-run --skip-labels)"
+assert_contains "${out}" "target myapp ready" "target init"
+
 out="$(run_capture doctor "${LLM_TEAM_ROOT}/bin/llm-team" doctor myapp)"
 assert_contains "${out}" "Doctor: OK" "doctor"
 
