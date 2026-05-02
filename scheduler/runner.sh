@@ -53,6 +53,8 @@ export LLM_TEAM_ROOT
 . "${LLM_TEAM_ROOT}/application/recovery.sh"
 # shellcheck source=../application/workspace_prune.sh
 . "${LLM_TEAM_ROOT}/application/workspace_prune.sh"
+# shellcheck source=../application/knowledge.sh
+. "${LLM_TEAM_ROOT}/application/knowledge.sh"
 # shellcheck source=../application/agent_workspace.sh
 . "${LLM_TEAM_ROOT}/application/agent_workspace.sh"
 
