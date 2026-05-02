@@ -43,7 +43,7 @@ fenced block 이 두 개 이상이면 invalid 로 거부된다.
 - `output_kind`: `"spec_proposal"`
 - `agent_role`: `"PO"`
 - `operation`: `"Compose-PO"`
-- `target_id`: 대상 milestone (또는 feature-request) id
+- `object_id`: 대상 milestone (또는 feature-request) id
 - `manifest_id`: 입력 Context Manifest id
 - `input_revision_pins`: `[{"object_kind": "...", "object_id": "...", "revision_pin": "..."}, ...]`
 - `idempotency_key`: 입력 revision 기준 안정 키
@@ -68,7 +68,7 @@ artifacts 권장 키 (po):
   "output_kind": "spec_proposal",
   "agent_role": "PO",
   "operation": "Compose-PO",
-  "target_id": "milestone:42",
+  "object_id": "milestone:42",
   "manifest_id": "manifest:po:42:r1",
   "input_revision_pins": [
     {"object_kind": "issue", "object_id": "42", "revision_pin": "rev-..."}

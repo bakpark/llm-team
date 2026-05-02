@@ -26,7 +26,7 @@ agent_output_validate() {
       (.output_kind == $expected_kind or .output_kind == "failure") and
       (.agent_role == $expected_role) and
       (.operation == $expected_operation) and
-      (.target_id | type == "string" and length > 0) and
+      (.object_id | type == "string" and length > 0) and
       (.manifest_id == $expected_manifest_id) and
       (.input_revision_pins | type == "array") and
       (.idempotency_key | type == "string" and length > 0) and

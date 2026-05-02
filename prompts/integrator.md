@@ -28,7 +28,7 @@ fenced block 이 두 개 이상이면 invalid 로 거부된다.
 - `output_kind`: `"milestone_package"`
 - `agent_role`: `"Integrator"`
 - `operation`: `"Refactor"`
-- `target_id`: 대상 milestone id
+- `object_id`: 대상 milestone id
 - `manifest_id`: 입력 Context Manifest id
 - `input_revision_pins`: `[{"object_kind": "...", "object_id": "...", "revision_pin": "..."}, ...]`
 - `idempotency_key`: 입력 revision 기준 안정 키
@@ -54,7 +54,7 @@ artifacts 권장 키 (integrator):
   "output_kind": "milestone_package",
   "agent_role": "Integrator",
   "operation": "Refactor",
-  "target_id": "milestone:42",
+  "object_id": "milestone:42",
   "manifest_id": "manifest:integrator:42:r1",
   "input_revision_pins": [
     {"object_kind": "milestone", "object_id": "42", "revision_pin": "rev-..."}

@@ -32,7 +32,7 @@ fenced block 이 두 개 이상이면 invalid 로 거부된다.
 - `output_kind`: `"patch"`
 - `agent_role`: `"Coder"`
 - `operation`: `"Implement"`
-- `target_id`: 대상 task id (또는 task slug)
+- `object_id`: 대상 task id (또는 task slug)
 - `manifest_id`: 입력 Context Manifest id
 - `input_revision_pins`: `[{"object_kind": "...", "object_id": "...", "revision_pin": "..."}, ...]`
 - `idempotency_key`: 입력 revision 기준 안정 키
@@ -59,7 +59,7 @@ artifacts 권장 키 (coder):
   "output_kind": "patch",
   "agent_role": "Coder",
   "operation": "Implement",
-  "target_id": "task:auth-login",
+  "object_id": "task:auth-login",
   "manifest_id": "manifest:coder:auth-login:r1",
   "input_revision_pins": [
     {"object_kind": "task", "object_id": "auth-login", "revision_pin": "rev-..."}

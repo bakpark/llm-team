@@ -103,7 +103,7 @@ cat >"${TEST_FAKE_FIX_DIR}/po-Compose-PO.json" <<EOF
   "output_kind": "spec_proposal",
   "agent_role": "PO",
   "operation": "Compose-PO",
-  "target_id": "${ms}",
+  "object_id": "${ms}",
   "manifest_id": "__MANIFEST_ID__",
   "input_revision_pins": [
     { "object_kind": "milestone", "object_id": "${ms}", "revision_pin": "${pin}" }

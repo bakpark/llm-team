@@ -30,7 +30,7 @@ fenced block 이 두 개 이상이면 invalid 로 거부된다.
 - `output_kind`: `"verdict"`
 - `agent_role`: `"Reviewer"`
 - `operation`: `"Review"`
-- `target_id`: 대상 Code Change Proposal id (또는 task id)
+- `object_id`: 대상 Code Change Proposal id (또는 task id)
 - `manifest_id`: 입력 Context Manifest id
 - `input_revision_pins`: `[{"object_kind": "...", "object_id": "...", "revision_pin": "..."}, ...]`
 - `idempotency_key`: 입력 revision 기준 안정 키
@@ -56,7 +56,7 @@ artifacts 권장 키 (reviewer):
   "output_kind": "verdict",
   "agent_role": "Reviewer",
   "operation": "Review",
-  "target_id": "cp:code:auth-login:r3",
+  "object_id": "cp:code:auth-login:r3",
   "manifest_id": "manifest:reviewer:auth-login:r3",
   "input_revision_pins": [
     {"object_kind": "change_proposal", "object_id": "cp:code:auth-login:r3", "revision_pin": "rev-..."}

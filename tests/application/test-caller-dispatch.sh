@@ -86,7 +86,7 @@ mf_po="$(make_manifest Compose-PO milestone "${ms_po}")"
 mid_po="$(context_manifest_id "${mf_po}")"
 env_po="$(write_envelope "{
   output_kind: \"spec_proposal\", agent_role: \"PO\", operation: \"Compose-PO\",
-  target_id: \"${ms_po}\", manifest_id: \"${mid_po}\",
+  object_id: \"${ms_po}\", manifest_id: \"${mid_po}\",
   input_revision_pins: [], idempotency_key: \"po:${ms_po}:r1\",
   summary: \"PO spec\",
   artifacts: { milestone_body: \"# Auth (proposed body)\", cp_artifact_ref: \"po-${ms_po}\" }
@@ -109,7 +109,7 @@ mf_pm="$(make_manifest Compose-PM milestone "${ms_pm}")"
 mid_pm="$(context_manifest_id "${mf_pm}")"
 env_pm="$(write_envelope "{
   output_kind: \"spec_proposal\", agent_role: \"PM\", operation: \"Compose-PM\",
-  target_id: \"${ms_pm}\", manifest_id: \"${mid_pm}\",
+  object_id: \"${ms_pm}\", manifest_id: \"${mid_pm}\",
   input_revision_pins: [], idempotency_key: \"pm:${ms_pm}:r1\",
   summary: \"PM spec\",
   artifacts: { milestone_body_proposal: \"# Logging spec\\n\\nbody\" }
@@ -129,7 +129,7 @@ mf_pm_empty="$(make_manifest Compose-PM milestone "${ms_pm_empty}")"
 mid_pm_empty="$(context_manifest_id "${mf_pm_empty}")"
 env_pm_empty="$(write_envelope "{
   output_kind: \"spec_proposal\", agent_role: \"PM\", operation: \"Compose-PM\",
-  target_id: \"${ms_pm_empty}\", manifest_id: \"${mid_pm_empty}\",
+  object_id: \"${ms_pm_empty}\", manifest_id: \"${mid_pm_empty}\",
   input_revision_pins: [], idempotency_key: \"pm:${ms_pm_empty}:r1\",
   summary: \"PM spec\", artifacts: {}
 }")"
@@ -154,7 +154,7 @@ mf_plan="$(make_manifest Decompose milestone "${ms_plan}")"
 mid_plan="$(context_manifest_id "${mf_plan}")"
 env_plan="$(write_envelope "{
   output_kind: \"task_plan\", agent_role: \"Planner\", operation: \"Decompose\",
-  target_id: \"${ms_plan}\", manifest_id: \"${mid_plan}\",
+  object_id: \"${ms_plan}\", manifest_id: \"${mid_plan}\",
   input_revision_pins: [], idempotency_key: \"plan:${ms_plan}:r1\",
   summary: \"plan\",
   artifacts: {
@@ -184,7 +184,7 @@ mf_cycle="$(make_manifest Decompose milestone "${ms_cycle}")"
 mid_cycle="$(context_manifest_id "${mf_cycle}")"
 env_cycle="$(write_envelope "{
   output_kind: \"task_plan\", agent_role: \"Planner\", operation: \"Decompose\",
-  target_id: \"${ms_cycle}\", manifest_id: \"${mid_cycle}\",
+  object_id: \"${ms_cycle}\", manifest_id: \"${mid_cycle}\",
   input_revision_pins: [], idempotency_key: \"plan:${ms_cycle}:r1\",
   summary: \"cycle\",
   artifacts: {
@@ -214,7 +214,7 @@ mf_coder="$(make_manifest Implement task "${task_issue}")"
 mid_coder="$(context_manifest_id "${mf_coder}")"
 env_coder="$(write_envelope "{
   output_kind: \"patch\", agent_role: \"Coder\", operation: \"Implement\",
-  target_id: \"${task_issue}\", manifest_id: \"${mid_coder}\",
+  object_id: \"${task_issue}\", manifest_id: \"${mid_coder}\",
   input_revision_pins: [], idempotency_key: \"coder:${task_issue}:r1\",
   summary: \"impl\",
   artifacts: {
@@ -253,7 +253,7 @@ mf_rev="$(make_manifest Review task "${task_issue}")"
 mid_rev="$(context_manifest_id "${mf_rev}")"
 env_approve="$(write_envelope "{
   output_kind: \"verdict\", agent_role: \"Reviewer\", operation: \"Review\",
-  target_id: \"${task_issue}\", manifest_id: \"${mid_rev}\",
+  object_id: \"${task_issue}\", manifest_id: \"${mid_rev}\",
   input_revision_pins: [], idempotency_key: \"review:${task_issue}:approve\",
   summary: \"approve\",
   artifacts: {
@@ -284,7 +284,7 @@ mf_rej="$(make_manifest Review task "${task_issue2}")"
 mid_rej="$(context_manifest_id "${mf_rej}")"
 env_reject="$(write_envelope "{
   output_kind: \"verdict\", agent_role: \"Reviewer\", operation: \"Review\",
-  target_id: \"${task_issue2}\", manifest_id: \"${mid_rej}\",
+  object_id: \"${task_issue2}\", manifest_id: \"${mid_rej}\",
   input_revision_pins: [], idempotency_key: \"review:${task_issue2}:reject\",
   summary: \"reject\",
   artifacts: {
@@ -319,7 +319,7 @@ mf_stale="$(make_manifest Review task "${task_stale}")"
 mid_stale="$(context_manifest_id "${mf_stale}")"
 env_stale="$(write_envelope "{
   output_kind: \"verdict\", agent_role: \"Reviewer\", operation: \"Review\",
-  target_id: \"${task_stale}\", manifest_id: \"${mid_stale}\",
+  object_id: \"${task_stale}\", manifest_id: \"${mid_stale}\",
   input_revision_pins: [], idempotency_key: \"review:${task_stale}:stale\",
   summary: \"stale approve\",
   artifacts: { verdict: \"approve\", pr_number: \"${pr_stale}\", cp_path: \"${cp_stale}\" }
@@ -345,7 +345,7 @@ mf_int_noop="$(make_manifest Refactor milestone "${ms_int_noop}")"
 mid_int_noop="$(context_manifest_id "${mf_int_noop}")"
 env_int_noop="$(write_envelope "{
   output_kind: \"milestone_package\", agent_role: \"Integrator\", operation: \"Refactor\",
-  target_id: \"${ms_int_noop}\", manifest_id: \"${mid_int_noop}\",
+  object_id: \"${ms_int_noop}\", manifest_id: \"${mid_int_noop}\",
   input_revision_pins: [], idempotency_key: \"int:${ms_int_noop}:noop\",
   summary: \"noop\",
   artifacts: { outcome: \"NO-OP\", cp_kind: \"Integration\" }
@@ -365,7 +365,7 @@ mf_int_pass="$(make_manifest Refactor milestone "${ms_int_pass}")"
 mid_int_pass="$(context_manifest_id "${mf_int_pass}")"
 env_int_pass="$(write_envelope "{
   output_kind: \"milestone_package\", agent_role: \"Integrator\", operation: \"Refactor\",
-  target_id: \"${ms_int_pass}\", manifest_id: \"${mid_int_pass}\",
+  object_id: \"${ms_int_pass}\", manifest_id: \"${mid_int_pass}\",
   input_revision_pins: [], idempotency_key: \"int:${ms_int_pass}:pass\",
   summary: \"pass\",
   artifacts: { outcome: \"PASS\", cp_kind: \"Integration\", cp_artifact_ref: \"int-${ms_int_pass}\", pr_number: \"${pr_int}\" }
@@ -393,7 +393,7 @@ mf_int_fail="$(make_manifest Refactor milestone "${ms_int_fail}")"
 mid_int_fail="$(context_manifest_id "${mf_int_fail}")"
 env_int_fail="$(write_envelope "{
   output_kind: \"milestone_package\", agent_role: \"Integrator\", operation: \"Refactor\",
-  target_id: \"${ms_int_fail}\", manifest_id: \"${mid_int_fail}\",
+  object_id: \"${ms_int_fail}\", manifest_id: \"${mid_int_fail}\",
   input_revision_pins: [], idempotency_key: \"int:${ms_int_fail}:fail1\",
   summary: \"fail\",
   artifacts: { outcome: \"FAIL\", cp_kind: \"Integration\", cp_path: \"${cp_int_fail}\", pr_number: \"${pr_int_fail}\", integrator_attempt: 1 }
@@ -414,7 +414,7 @@ mf_int_esc="$(make_manifest Refactor milestone "${ms_int_esc}")"
 mid_int_esc="$(context_manifest_id "${mf_int_esc}")"
 env_int_esc="$(write_envelope "{
   output_kind: \"milestone_package\", agent_role: \"Integrator\", operation: \"Refactor\",
-  target_id: \"${ms_int_esc}\", manifest_id: \"${mid_int_esc}\",
+  object_id: \"${ms_int_esc}\", manifest_id: \"${mid_int_esc}\",
   input_revision_pins: [], idempotency_key: \"int:${ms_int_esc}:fail-final\",
   summary: \"esc\",
   artifacts: { outcome: \"FAIL\", cp_kind: \"Integration\", integrator_attempt: 99 }
@@ -436,7 +436,7 @@ mf_int_stale="$(make_manifest Refactor milestone "${ms_int_stale}")"
 mid_int_stale="$(context_manifest_id "${mf_int_stale}")"
 env_int_stale="$(write_envelope "{
   output_kind: \"milestone_package\", agent_role: \"Integrator\", operation: \"Refactor\",
-  target_id: \"${ms_int_stale}\", manifest_id: \"${mid_int_stale}\",
+  object_id: \"${ms_int_stale}\", manifest_id: \"${mid_int_stale}\",
   input_revision_pins: [], idempotency_key: \"int:${ms_int_stale}:stale\",
   summary: \"stale\",
   artifacts: { outcome: \"STALE\", cp_kind: \"Integration\", cp_path: \"${cp_int_stale}\" }
@@ -460,7 +460,7 @@ mf_qa_pass="$(make_manifest Validate milestone "${ms_qa_pass}")"
 mid_qa_pass="$(context_manifest_id "${mf_qa_pass}")"
 env_qa_pass="$(write_envelope "{
   output_kind: \"milestone_package\", agent_role: \"QA\", operation: \"Validate\",
-  target_id: \"${ms_qa_pass}\", manifest_id: \"${mid_qa_pass}\",
+  object_id: \"${ms_qa_pass}\", manifest_id: \"${mid_qa_pass}\",
   input_revision_pins: [], idempotency_key: \"qa:${ms_qa_pass}:pass\",
   summary: \"qa pass\",
   artifacts: { outcome: \"PASS\", cp_kind: \"Milestone\", cp_artifact_ref: \"qa-${ms_qa_pass}\", pr_number: \"${pr_qa}\" }
@@ -492,7 +492,7 @@ mf_qa_fail="$(make_manifest Validate milestone "${ms_qa_fail}")"
 mid_qa_fail="$(context_manifest_id "${mf_qa_fail}")"
 env_qa_fail="$(write_envelope "{
   output_kind: \"milestone_package\", agent_role: \"QA\", operation: \"Validate\",
-  target_id: \"${ms_qa_fail}\", manifest_id: \"${mid_qa_fail}\",
+  object_id: \"${ms_qa_fail}\", manifest_id: \"${mid_qa_fail}\",
   input_revision_pins: [], idempotency_key: \"qa:${ms_qa_fail}:fail\",
   summary: \"qa fail\",
   artifacts: { outcome: \"FAIL\", cp_kind: \"Milestone\", cp_path: \"${cp_qa_fail}\", pr_number: \"${pr_qa_fail}\",
@@ -518,7 +518,7 @@ mf_qa_stale="$(make_manifest Validate milestone "${ms_qa_stale}")"
 mid_qa_stale="$(context_manifest_id "${mf_qa_stale}")"
 env_qa_stale="$(write_envelope "{
   output_kind: \"milestone_package\", agent_role: \"QA\", operation: \"Validate\",
-  target_id: \"${ms_qa_stale}\", manifest_id: \"${mid_qa_stale}\",
+  object_id: \"${ms_qa_stale}\", manifest_id: \"${mid_qa_stale}\",
   input_revision_pins: [], idempotency_key: \"qa:${ms_qa_stale}:stale\",
   summary: \"qa stale\",
   artifacts: { outcome: \"STALE\", cp_kind: \"Milestone\", cp_path: \"${cp_qa_stale}\" }
@@ -539,7 +539,7 @@ mf_dup="$(make_manifest Refactor milestone "${ms_dup}")"
 mid_dup="$(context_manifest_id "${mf_dup}")"
 env_dup="$(write_envelope "{
   output_kind: \"milestone_package\", agent_role: \"Integrator\", operation: \"Refactor\",
-  target_id: \"${ms_dup}\", manifest_id: \"${mid_dup}\",
+  object_id: \"${ms_dup}\", manifest_id: \"${mid_dup}\",
   input_revision_pins: [], idempotency_key: \"dup:${ms_dup}:noop\",
   summary: \"dup test\",
   artifacts: { outcome: \"NO-OP\", cp_kind: \"Integration\" }

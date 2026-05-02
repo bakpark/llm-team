@@ -30,13 +30,13 @@
 #     artifacts.commit_message           — git commit 메시지 (옵션, 기본 "task #<n>: apply patch")
 #     artifacts.cp_artifact_ref          — 워크스페이스/branch 참조 (옵션)
 #     artifacts.task_branch              — 발행 브랜치 (옵션, 기본 llm-team/task-<id>)
-#     envelope.target_id                 — issue num (task)
+#     envelope.object_id                 — issue num (task)
 #   verdict (Reviewer)
 #     artifacts.verdict                  — "approve" | "request-changes"
 #     artifacts.pr_number                — 검토 대상 PR 번호
 #     artifacts.cp_path                  — Code CP artifact 경로
 #     artifacts.reason                   — request-changes 시 코멘트 본문
-#     envelope.target_id                 — issue num (task)
+#     envelope.object_id                 — issue num (task)
 #   milestone_package (Integrator/QA)
 #     artifacts.outcome                  — "PASS"|"NO-OP"|"FAIL"|"STALE"
 #     artifacts.cp_kind                  — "Integration" | "Milestone"
@@ -45,7 +45,7 @@
 #     artifacts.pr_number                — 통합/마일스톤 PR 번호 (옵션)
 #     artifacts.failing_tasks[]          — QA FAIL 시 책임 task issue num 배열
 #     artifacts.integrator_attempt       — 재시도 카운트 (Integrator FAIL 시)
-#     envelope.target_id                 — milestone num
+#     envelope.object_id                 — milestone num
 #
 # RGC-LEDGER:
 #   • 모든 분기 끝에서 _caller_ledger_write 가 13개 표준 필드를 채워 한 줄 기록.
@@ -244,23 +244,23 @@ caller_apply_output() {
     log_error "caller_apply_output: TARGET_NAME (or LLM_TEAM_TARGET) not set"
     return 1
   fi
-  local output_kind idempotency_key target_id manifest_id operation
+  local output_kind idempotency_key object_id manifest_id operation
   output_kind="$(jq -r '.output_kind // empty' "${envelope_path}")"
   idempotency_key="$(jq -r '.idempotency_key // empty' "${envelope_path}")"
-  target_id="$(jq -r '.target_id // empty' "${envelope_path}")"
+  object_id="$(jq -r '.object_id // empty' "${envelope_path}")"
   manifest_id="$(jq -r '.manifest_id // empty' "${envelope_path}")"
   operation="$(jq -r '.operation // empty' "${envelope_path}")"
-  if [ -z "${output_kind}" ] || [ -z "${idempotency_key}" ] || [ -z "${target_id}" ]; then
-    log_error "caller_apply_output: envelope missing output_kind/idempotency_key/target_id"
+  if [ -z "${output_kind}" ] || [ -z "${idempotency_key}" ] || [ -z "${object_id}" ]; then
+    log_error "caller_apply_output: envelope missing output_kind/idempotency_key/object_id"
     return 1
   fi
-  target_id="$(_caller_target_id_strip_kind "${target_id}")"
+  object_id="$(_caller_target_id_strip_kind "${object_id}")"
 
   # SOC-IDEMPOTENCY: short-circuit duplicate.
   if _caller_ledger_has_key "${target}" "${idempotency_key}"; then
     log_info "caller_apply_output: duplicate idempotency_key='${idempotency_key}' — recording duplicate marker"
     _caller_ledger_write_duplicate "${target}" "${idempotency_key}" "${operation}" \
-      "$(_caller_object_kind_for_role "${role}" "${output_kind}")" "${target_id}" "${manifest_id}"
+      "$(_caller_object_kind_for_role "${role}" "${output_kind}")" "${object_id}" "${manifest_id}"
     return 0
   fi
 
@@ -268,31 +268,31 @@ caller_apply_output() {
     spec_proposal)
       case "$(_caller_role_norm "${role}")" in
         po) _caller_apply_spec_proposal "${repo}" "${target}" PO "${envelope_path}" \
-              "${target_id}" "${manifest_id}" "${idempotency_key}" "${operation}" ;;
+              "${object_id}" "${manifest_id}" "${idempotency_key}" "${operation}" ;;
         pm) _caller_apply_spec_proposal "${repo}" "${target}" PM "${envelope_path}" \
-              "${target_id}" "${manifest_id}" "${idempotency_key}" "${operation}" ;;
+              "${object_id}" "${manifest_id}" "${idempotency_key}" "${operation}" ;;
         *)  log_error "caller_apply_output: spec_proposal must come from PO or PM (got '${role}')"; return 1 ;;
       esac
       ;;
     task_plan)
       _caller_apply_task_plan "${repo}" "${target}" "${envelope_path}" \
-        "${target_id}" "${manifest_id}" "${idempotency_key}" "${operation}"
+        "${object_id}" "${manifest_id}" "${idempotency_key}" "${operation}"
       ;;
     patch)
       _caller_apply_patch "${repo}" "${target}" "${envelope_path}" \
-        "${target_id}" "${manifest_id}" "${idempotency_key}" "${operation}"
+        "${object_id}" "${manifest_id}" "${idempotency_key}" "${operation}"
       ;;
     verdict)
       _caller_apply_verdict "${repo}" "${target}" "${envelope_path}" \
-        "${target_id}" "${manifest_id}" "${idempotency_key}" "${operation}"
+        "${object_id}" "${manifest_id}" "${idempotency_key}" "${operation}"
       ;;
     milestone_package)
       _caller_apply_milestone_package "${repo}" "${target}" "${role}" "${envelope_path}" \
-        "${target_id}" "${manifest_id}" "${idempotency_key}" "${operation}"
+        "${object_id}" "${manifest_id}" "${idempotency_key}" "${operation}"
       ;;
     failure)
       log_warn "caller_apply_output: envelope reports output_kind=failure; recording ledger only"
-      _caller_ledger_write "${target}" "envelope" "${target_id}" "(failure)" "(failure)" \
+      _caller_ledger_write "${target}" "envelope" "${object_id}" "(failure)" "(failure)" \
         "${operation}" "${idempotency_key}" "${manifest_id}"
       ;;
     *)
@@ -324,14 +324,14 @@ _caller_object_kind_for_role() {
   esac
 }
 
-# Normalize envelope.target_id by stripping a leading "<kind>:" segment for
+# Normalize envelope.object_id by stripping a leading "<kind>:" segment for
 # adapter-level numeric ids (milestone, task, issue). Hierarchical CP ids
 # ("cp:code:...") are preserved.
 #
-# Per prompts/*.md the LLM emits target_id like "milestone:42" / "task:7", but
+# Per prompts/*.md the LLM emits object_id like "milestone:42" / "task:7", but
 # legacy test fixtures and the GitHub adapters expect bare numeric ids. The
-# contract documents (AGC-OUTPUT) do not mandate a specific format, so the
-# adapter layer absorbs both forms here.
+# contract (AGC-OUTPUT) defines the field name as `object_id` and does not
+# mandate a specific value format, so the adapter layer absorbs both forms here.
 _caller_target_id_strip_kind() {
   local raw="${1:-}"
   case "${raw}" in

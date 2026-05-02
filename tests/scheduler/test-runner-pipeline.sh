@@ -144,7 +144,7 @@ write_po_fixture() {
        output_kind: "spec_proposal",
        agent_role: "PO",
        operation: "Compose-PO",
-       target_id: $ms,
+       object_id: $ms,
        manifest_id: "__MANIFEST_ID__",
        input_revision_pins: [
          { object_kind: "milestone", object_id: $ms, revision_pin: $pin }

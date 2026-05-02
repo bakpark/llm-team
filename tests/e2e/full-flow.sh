@@ -152,14 +152,14 @@ inject_signal() {
 # step). agent_role uses canonical form (PO/PM/...). manifest_id placeholder
 # is substituted at lr_invoke time by fake adapter.
 write_fixture() {
-  local role="$1" op="$2" target_id="$3" idem_key="$4" pins_json="$5"
+  local role="$1" op="$2" object_id="$3" idem_key="$4" pins_json="$5"
   local artifacts_json="${6:-}"
   [ -n "${artifacts_json}" ] || artifacts_json='{}'
   local f="${TEST_FAKE_FIX_DIR}/${role}-${op}.json"
   jq -n \
     --arg role "${role}" \
     --arg op "${op}" \
-    --arg target_id "${target_id}" \
+    --arg object_id "${object_id}" \
     --arg idem "${idem_key}" \
     --arg kind "$(role_output_kind "${role}")" \
     --argjson pins "${pins_json}" \
@@ -168,7 +168,7 @@ write_fixture() {
        output_kind: $kind,
        agent_role: $role,
        operation: $op,
-       target_id: $target_id,
+       object_id: $object_id,
        manifest_id: "__MANIFEST_ID__",
        input_revision_pins: $pins,
        idempotency_key: $idem,

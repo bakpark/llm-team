@@ -136,7 +136,7 @@ _qa_fail_inner() {
       output_kind: "milestone_package",
       agent_role: "QA",
       operation: "Validate",
-      target_id: $ms,
+      object_id: $ms,
       manifest_id: $mid,
       input_revision_pins: [
         { object_kind: "milestone", object_id: $ms, revision_pin: $pin }

@@ -33,7 +33,7 @@ _agent_io_envelope_schema_section() {
   • agent_role           (PO/PM/Planner/Coder/Reviewer/Integrator/QA)
   • operation            (Compose-PO / Compose-PM / Decompose / Implement /
                           Review / Refactor / Validate)
-  • target_id
+  • object_id
   • manifest_id          (입력 Context Manifest id)
   • input_revision_pins  ([{object_kind, object_id, revision_pin}, ...] —
                           모든 object_id 는 manifest entries 안에 있어야 한다)

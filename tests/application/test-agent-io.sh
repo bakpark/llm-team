@@ -166,7 +166,7 @@ make_coder_envelope() {
       output_kind: "patch",
       agent_role: "Coder",
       operation: "Implement",
-      target_id: "T-1",
+      object_id: "T-1",
       manifest_id: $mid,
       input_revision_pins: $pins,
       idempotency_key: "T-1:rev-1",
@@ -254,7 +254,7 @@ po_envelope=$(jq -n --arg mid "${manifest_id}" '
     output_kind: "spec_proposal",
     agent_role: "PO",
     operation: "Compose-PO",
-    target_id: "M-1",
+    object_id: "M-1",
     manifest_id: $mid,
     input_revision_pins: [],
     idempotency_key: "po:M-1",
@@ -283,7 +283,7 @@ env_for_pin=$(jq -n \
     output_kind: "patch",
     agent_role: "Coder",
     operation: "Implement",
-    target_id: "T-1",
+    object_id: "T-1",
     manifest_id: $mid,
     input_revision_pins: [{object_kind: "issue", object_id: $id, revision_pin: $pin}],
     idempotency_key: "x",
@@ -307,7 +307,7 @@ fi
 env_no_pin_arr=$(jq -n --arg mid "${manifest_id}" '
   {
     output_kind: "patch", agent_role: "Coder", operation: "Implement",
-    target_id: "T-1", manifest_id: $mid, input_revision_pins: [],
+    object_id: "T-1", manifest_id: $mid, input_revision_pins: [],
     idempotency_key: "x", summary: "y", artifacts: {}
   }
 ')
