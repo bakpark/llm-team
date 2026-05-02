@@ -37,8 +37,39 @@ LOCK_SCOPE="${LLM_TEAM_DAEMON_TARGET:-all}"
 LOCK_SCOPE_SAFE="$(printf '%s' "${LOCK_SCOPE}" | tr '/ :' '___')"
 LOCKDIR="${LOCK_PARENT}/daemon-${ROLE}-${LOCK_SCOPE_SAFE}.lockd"
 mkdir -p "${LOCK_PARENT}"
-if ! mkdir "${LOCKDIR}" 2>/dev/null; then
-  log_error "daemon: ${ROLE} runner already has an active daemon lock"
+
+# L3: mkdir 기반 락은 SIGKILL/패닉 시 stale 디렉토리가 남는다. 락이 이미
+# 존재하면 (a) 안에 있는 PID 가 아직 살아 있는지 확인하고, (b) 죽은 PID 면
+# stale 로 판단해 강제 회수 후 다시 mkdir 한다. 하나의 활성 데몬만 허용한다는
+# 의미는 그대로 유지한다.
+_acquire_daemon_lock() {
+  local i=0
+  while [ "${i}" -lt 2 ]; do
+    if mkdir "${LOCKDIR}" 2>/dev/null; then
+      printf '%s' "$$" >"${LOCKDIR}/pid"
+      return 0
+    fi
+    if [ -f "${LOCKDIR}/pid" ]; then
+      local stale_pid
+      stale_pid="$(cat "${LOCKDIR}/pid" 2>/dev/null || true)"
+      if [ -n "${stale_pid}" ] && kill -0 "${stale_pid}" 2>/dev/null; then
+        log_error "daemon: ${ROLE} runner already has an active daemon lock (pid=${stale_pid})"
+        return 1
+      fi
+      log_warn "daemon: stale lock detected (pid=${stale_pid:-unknown}); reclaiming"
+      rm -rf "${LOCKDIR}" 2>/dev/null || true
+    else
+      # pid 파일조차 없는 lockd — 이전 mkdir 후 즉시 죽은 케이스. 회수.
+      log_warn "daemon: lockd without pid file; reclaiming"
+      rm -rf "${LOCKDIR}" 2>/dev/null || true
+    fi
+    i=$((i + 1))
+  done
+  log_error "daemon: failed to acquire daemon lock at ${LOCKDIR}"
+  return 1
+}
+
+if ! _acquire_daemon_lock; then
   exit 1
 fi
 trap 'rm -rf "${LOCKDIR}" 2>/dev/null || true' EXIT
