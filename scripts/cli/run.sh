@@ -26,13 +26,11 @@ run_one() {
   shift 2 || true
 
   onboarding_gate_detect_flags "$@"
-  local args=() arg
-  for arg in "$@"; do
-    case "${arg}" in
-      --allow-incomplete-onboarding) ;;
-      *) args+=("${arg}") ;;
-    esac
-  done
+  local args=() arg _tmp
+  _tmp="$(mktemp "${TMPDIR:-/tmp}/onb-args-XXXXXX")"
+  onboarding_gate_filter_args "$@" >"${_tmp}"
+  while IFS= read -r arg; do args+=("${arg}"); done <"${_tmp}"
+  rm -f "${_tmp}"
 
   onboarding_gate_check "${target}" || exit $?
   exec "${LLM_TEAM_ROOT}/scheduler/runner.sh" "${role}" "${target}" "${args[@]+"${args[@]}"}"
@@ -45,13 +43,11 @@ run_once() {
   cli_require_target_file "${target}"
 
   onboarding_gate_detect_flags "$@"
-  local args=() arg
-  for arg in "$@"; do
-    case "${arg}" in
-      --allow-incomplete-onboarding) ;;
-      *) args+=("${arg}") ;;
-    esac
-  done
+  local args=() arg _tmp
+  _tmp="$(mktemp "${TMPDIR:-/tmp}/onb-args-XXXXXX")"
+  onboarding_gate_filter_args "$@" >"${_tmp}"
+  while IFS= read -r arg; do args+=("${arg}"); done <"${_tmp}"
+  rm -f "${_tmp}"
 
   local roles="all" dry_run=0
   set -- "${args[@]+"${args[@]}"}"

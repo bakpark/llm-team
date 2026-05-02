@@ -27,13 +27,11 @@ parse_scope_and_options() {
   DAEMON_LINES="80"
   # 게이트 flag (start 만 의미; 다른 서브커맨드에는 무시됨).
   onboarding_gate_detect_flags "$@"
-  local filtered=() arg
-  for arg in "$@"; do
-    case "${arg}" in
-      --allow-incomplete-onboarding) ;;
-      *) filtered+=("${arg}") ;;
-    esac
-  done
+  local filtered=() arg _tmp
+  _tmp="$(mktemp "${TMPDIR:-/tmp}/onb-args-XXXXXX")"
+  onboarding_gate_filter_args "$@" >"${_tmp}"
+  while IFS= read -r arg; do filtered+=("${arg}"); done <"${_tmp}"
+  rm -f "${_tmp}"
   set -- "${filtered[@]+"${filtered[@]}"}"
 
   while [ "$#" -gt 0 ]; do

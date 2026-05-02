@@ -201,6 +201,21 @@ printf '%s\n' "${out}" | grep -q "onboarding gate FAILED" \
 pass "post-fix: run --dry-run no gate FAILED"
 
 # ---------------------------------------------------------------------------
+# (8) onboarding_gate_filter_args public API: 단일 출처 검증.
+# ---------------------------------------------------------------------------
+set +e
+filter_out="$(bash -c '
+  set -e
+  . "'"${SOURCE_ROOT}"'/scripts/cli/_onboarding_gate.sh"
+  onboarding_gate_filter_args foo --allow-incomplete-onboarding bar --dry-run baz
+')"
+set -e
+expected=$'foo\nbar\n--dry-run\nbaz'
+[ "${filter_out}" = "${expected}" ] \
+  || fail "filter helper output mismatch: expected $'${expected}', got $'${filter_out}'"
+pass "onboarding_gate_filter_args strips --allow-incomplete-onboarding only"
+
+# ---------------------------------------------------------------------------
 if [ "${failures}" -gt 0 ]; then
   echo "FAILURES: ${failures}" >&2
   exit 1
