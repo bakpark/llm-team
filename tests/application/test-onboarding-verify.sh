@@ -278,6 +278,33 @@ s="$(status_of "integration_branch_present")"
 pass "case 5b: auto FAIL + ack 없음 → FAIL"
 
 # ---------------------------------------------------------------------------
+# (6) inputs_dir_seeded: .gitkeep / 빈 파일만으로는 PASS 가 아니어야 함.
+# ---------------------------------------------------------------------------
+# auto/ack 회복 (case 5b 잔존 상태 정리).
+GH_BRANCH_HAS=1
+yq -i '.onboarding.acks.use_default_branch_as_integration = {"value": true}' "${TARGET_YAML}"
+
+# inputs 디렉토리를 placeholder 만 있는 상태로 재구성.
+rm -rf "${SANDBOX}/inputs/${TARGET}"
+mkdir -p "${SANDBOX}/inputs/${TARGET}"
+: >"${SANDBOX}/inputs/${TARGET}/.gitkeep"
+: >"${SANDBOX}/inputs/${TARGET}/empty.txt"
+
+run_verify out rc
+s="$(status_of "inputs_dir_seeded")"
+[ "${s}" = "WARN" ] \
+  || fail "case 6a: inputs_dir_seeded expected WARN with only placeholders, got '${s}'"
+pass "case 6a: .gitkeep + 빈 파일만 있으면 WARN (placeholder 무시)"
+
+# 실 콘텐츠 파일 추가 시 PASS 회복.
+echo "real content" >"${SANDBOX}/inputs/${TARGET}/auth.md"
+run_verify out rc
+s="$(status_of "inputs_dir_seeded")"
+[ "${s}" = "PASS" ] \
+  || fail "case 6b: inputs_dir_seeded expected PASS after content file, got '${s}'"
+pass "case 6b: 콘텐츠 파일 추가 후 PASS 회복"
+
+# ---------------------------------------------------------------------------
 if [ "${failures}" -gt 0 ]; then
   echo "FAILURES: ${failures}" >&2
   exit 1

@@ -252,11 +252,16 @@ _check_notifier_channel() {
 
 _check_inputs_dir_seeded() {
   local dir="${LLM_TEAM_ROOT}/${TARGET_INPUTS_DIR:-inputs/${TARGET_NAME}}"
-  if [ -d "${dir}" ] && [ -n "$(ls -A "${dir}" 2>/dev/null || true)" ]; then
-    printf '%s non-empty' "${dir}"
+  [ -d "${dir}" ] || { printf '%s missing' "${dir}"; return 1; }
+  local found
+  found="$(find "${dir}" -type f \
+    ! -name '.gitkeep' ! -name '.keep' \
+    ! -empty 2>/dev/null | head -n 1)"
+  if [ -n "${found}" ]; then
+    printf '%s has content' "${dir}"
     return 0
   fi
-  printf '%s empty' "${dir}"
+  printf '%s contains only placeholders/empty files' "${dir}"
   return 1
 }
 
