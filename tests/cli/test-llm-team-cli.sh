@@ -40,10 +40,16 @@ run_capture() {
 }
 
 tmp_target="cli-url-$$"
+collide_target_a="cli-collide-a-$$"
+collide_target_b="cli-collide-b-$$"
+collide_clone_dir="$(mktemp -d "${TMPDIR:-/tmp}/llm-team-cli-collide-XXXXXX")"
 cleanup_all() {
   ephemeral_target_cleanup "${TARGET}"
   rm -f "${LLM_TEAM_ROOT}/targets/${tmp_target}.yaml" "${LLM_TEAM_ROOT}/targets/cli-inferred.yaml"
   rm -rf "${LLM_TEAM_ROOT}/inputs/${tmp_target}" "${LLM_TEAM_ROOT}/inputs/cli-inferred"
+  rm -f "${LLM_TEAM_ROOT}/targets/${collide_target_a}.yaml" "${LLM_TEAM_ROOT}/targets/${collide_target_b}.yaml"
+  rm -rf "${LLM_TEAM_ROOT}/inputs/${collide_target_a}" "${LLM_TEAM_ROOT}/inputs/${collide_target_b}"
+  rm -rf "${collide_clone_dir}" 2>/dev/null || true
 }
 trap cleanup_all EXIT
 
@@ -96,5 +102,34 @@ assert_contains "${out}" "Created target cli-inferred" "target add inferred"
 out="$(run_capture target-show-inferred "${LLM_TEAM_ROOT}/bin/llm-team" target show cli-inferred)"
 assert_contains "${out}" "owner: example" "target add inferred owner"
 assert_contains "${out}" "repo: cli-inferred" "target add inferred repo"
+
+
+# H6: 동일 clone_path 를 가리키는 두 번째 target add 는 거부되어야 한다.
+out="$(run_capture h6-collide-first "${LLM_TEAM_ROOT}/bin/llm-team" \
+        target add "${collide_target_a}" \
+        --repo example/${collide_target_a} \
+        --clone-path "${collide_clone_dir}" \
+        --disabled --force)"
+assert_contains "${out}" "Created target ${collide_target_a}" "h6 first target add"
+
+# Second target with same clone_path must fail (no --force).
+collide_out="/tmp/llm-team-cli-h6-collide-second.out"
+if "${LLM_TEAM_ROOT}/bin/llm-team" target add "${collide_target_b}" \
+        --repo example/${collide_target_b} \
+        --clone-path "${collide_clone_dir}" \
+        --disabled >"${collide_out}" 2>&1; then
+  echo "FAIL: H6 — duplicate clone_path was accepted without --force" >&2
+  cat "${collide_out}" >&2
+  exit 1
+fi
+assert_contains "${collide_out}" "clone_path 충돌" "h6 collision message"
+
+# With --force, the duplicate is allowed but warned.
+out="$(run_capture h6-collide-force "${LLM_TEAM_ROOT}/bin/llm-team" \
+        target add "${collide_target_b}" \
+        --repo example/${collide_target_b} \
+        --clone-path "${collide_clone_dir}" \
+        --disabled --force)"
+assert_contains "${out}" "Created target ${collide_target_b}" "h6 forced override"
 
 echo "PASS: llm-team CLI smoke"
