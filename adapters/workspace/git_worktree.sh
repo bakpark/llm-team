@@ -31,6 +31,49 @@ _workspace_unit_path() {
   printf '%s/workdir/%s/wt/%s' "${LLM_TEAM_ROOT}" "${TARGET_NAME}" "${unit_id}"
 }
 
+# Internal: target 의 canonical clone fetch lock 디렉토리 경로.
+_workspace_fetchlock_path() {
+  printf '%s/workdir/%s/repo.fetchlock' "${LLM_TEAM_ROOT}" "${TARGET_NAME}"
+}
+
+# Internal: mkdir 기반 atomic lock — 같은 canonical clone 에 대한 fetch /
+# worktree add 호출을 직렬화한다. flock 은 macOS 기본에 없어 사용하지 않는다.
+# acquire: 최대 ~3초 대기(50ms × 60 회), 실패 시 1 반환.
+# 호출 측이 항상 trap 또는 명시적 _workspace_fetchlock_release 로 해제할 것.
+_workspace_fetchlock_acquire() {
+  local lock_dir
+  lock_dir="$(_workspace_fetchlock_path)"
+  mkdir -p "$(dirname "${lock_dir}")" 2>/dev/null || true
+  local i=0
+  while [ "${i}" -lt 60 ]; do
+    if mkdir "${lock_dir}" 2>/dev/null; then
+      return 0
+    fi
+    # Stale lock heuristic: 60s 이상 된 디렉토리면 강제 해제 후 재시도.
+    if [ -d "${lock_dir}" ]; then
+      local age_sec=0
+      if age_sec="$(( $(date +%s) - $(stat -f %m "${lock_dir}" 2>/dev/null \
+                                       || stat -c %Y "${lock_dir}" 2>/dev/null \
+                                       || echo 0) ))"; then
+        if [ "${age_sec}" -gt 60 ]; then
+          rm -rf "${lock_dir}" 2>/dev/null || true
+          continue
+        fi
+      fi
+    fi
+    sleep 0.05 2>/dev/null || sleep 1
+    i=$((i + 1))
+  done
+  log_warn "_workspace_fetchlock_acquire: timeout waiting for ${lock_dir}"
+  return 1
+}
+
+_workspace_fetchlock_release() {
+  local lock_dir
+  lock_dir="$(_workspace_fetchlock_path)"
+  rm -rf "${lock_dir}" 2>/dev/null || true
+}
+
 # ws_ensure_clone <target>
 # canonical clone 이 있으면 fetch, 없으면 clone.
 ws_ensure_clone() {
@@ -47,8 +90,15 @@ ws_ensure_clone() {
   clone_path="$(_workspace_clone_path)"
   mkdir -p "$(dirname "${clone_path}")" || return 1
   if [ -d "${clone_path}/.git" ]; then
-    ( cd "${clone_path}" && git fetch --prune origin >/dev/null 2>&1 ) \
-      || log_warn "ws_ensure_clone: fetch failed for ${clone_path}"
+    # H5: 같은 target 에 대해 여러 role 데몬이 동시 fetch 하면 .git/refs lock
+    # 충돌이 발생할 수 있다 — target 별 fetchlock 으로 직렬화한다.
+    if _workspace_fetchlock_acquire; then
+      ( cd "${clone_path}" && git fetch --prune origin >/dev/null 2>&1 ) \
+        || log_warn "ws_ensure_clone: fetch failed for ${clone_path}"
+      _workspace_fetchlock_release
+    else
+      log_warn "ws_ensure_clone: fetchlock timeout; skipping fetch (continuing with stale refs)"
+    fi
   else
     log_info "ws_ensure_clone: cloning ${TARGET_GH_OWNER}/${TARGET_GH_REPO} → ${clone_path}"
     git clone "https://github.com/${TARGET_GH_OWNER}/${TARGET_GH_REPO}.git" "${clone_path}" \
@@ -84,6 +134,10 @@ ws_ensure() {
 
   mkdir -p "$(dirname "${wt_path}")" || return 1
 
+  # H5: fetch + worktree add 를 같은 락 아래에서 직렬화. .git/worktrees/ 동시
+  # 쓰기 race 와 ref-lock 충돌을 함께 막는다.
+  local got_lock=0
+  _workspace_fetchlock_acquire && got_lock=1
   (
     cd "${clone_path}" || exit 1
     git fetch origin "${branch}" >/dev/null 2>&1 || true
@@ -102,7 +156,10 @@ ws_ensure() {
     git fetch origin "${TARGET_DEFAULT_BRANCH:-main}" >/dev/null 2>&1 || true
     git worktree add -b "${branch}" "${wt_path}" "origin/${TARGET_DEFAULT_BRANCH:-main}" >/dev/null 2>&1 \
       || { log_error "ws_ensure: worktree add new branch from default failed"; exit 1; }
-  ) || return 1
+  )
+  local rc=$?
+  [ "${got_lock}" -eq 1 ] && _workspace_fetchlock_release
+  [ "${rc}" -eq 0 ] || return 1
 
   printf '%s\n' "${wt_path}"
 }
@@ -120,13 +177,18 @@ ws_refresh() {
     log_error "ws_refresh: workspace not found for unit '${unit_id}'"
     return 1
   fi
+  local got_lock=0
+  _workspace_fetchlock_acquire && got_lock=1
   (
     cd "${wt_path}" || exit 1
     git fetch origin "${branch}" >/dev/null 2>&1 || exit 0
     if git rev-parse --verify --quiet "origin/${branch}" >/dev/null 2>&1; then
       git reset --hard "origin/${branch}" >/dev/null 2>&1 || exit 1
     fi
-  ) || { log_error "ws_refresh: failed to refresh worktree for unit '${unit_id}'"; return 1; }
+  )
+  local rc=$?
+  [ "${got_lock}" -eq 1 ] && _workspace_fetchlock_release
+  [ "${rc}" -eq 0 ] || { log_error "ws_refresh: failed to refresh worktree for unit '${unit_id}'"; return 1; }
 }
 
 # ws_path_of <unit_id>  → echo path or empty

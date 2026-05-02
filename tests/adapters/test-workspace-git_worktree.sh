@@ -210,6 +210,38 @@ if [ ! -f "${WS_PATH}/external.txt" ]; then
 fi
 
 # ----------------------------------------------------------------------------
+# Test 5: H3 — ws_destroy removes worktree dir and is idempotent
+# ----------------------------------------------------------------------------
+
+ws_destroy "${UNIT_ID}" >/dev/null 2>&1 || fail "ws_destroy failed"
+if [ -d "${WS_PATH}" ]; then
+  fail "H3 regression: ws_destroy did not remove worktree dir ${WS_PATH}"
+fi
+# Idempotent: re-destroy must succeed without error.
+ws_destroy "${UNIT_ID}" >/dev/null 2>&1 || fail "ws_destroy second call must succeed (idempotent)"
+
+# ----------------------------------------------------------------------------
+# Test 6: H5 — fetchlock acquire/release is reentrant within sequence and
+#               never blocks indefinitely on stale lock.
+# ----------------------------------------------------------------------------
+
+# Stale lock removal: pre-create a >60s-old lock dir and ensure acquire reclaims.
+LOCK_DIR="${LLM_TEAM_ROOT}/workdir/${TEST_TARGET}/repo.fetchlock"
+mkdir -p "$(dirname "${LOCK_DIR}")"
+mkdir "${LOCK_DIR}" 2>/dev/null
+# Set lock dir mtime 120s ago.
+touch -A -000200 "${LOCK_DIR}" 2>/dev/null \
+  || touch -d "@$(( $(date +%s) - 120 ))" "${LOCK_DIR}" 2>/dev/null \
+  || true
+if ! _workspace_fetchlock_acquire; then
+  fail "H5 regression: fetchlock did not reclaim stale lock"
+fi
+_workspace_fetchlock_release
+if [ -d "${LOCK_DIR}" ]; then
+  fail "H5 regression: fetchlock_release left lock dir behind"
+fi
+
+# ----------------------------------------------------------------------------
 # Done
 # ----------------------------------------------------------------------------
 

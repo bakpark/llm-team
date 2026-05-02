@@ -592,6 +592,11 @@ _caller_apply_verdict() {
   it_issue_set_state "${repo}" "${issue_num}" TASK_INTEGRATED TASK_REVIEW_IN_PROGRESS \
     || { log_error "_caller_apply_verdict: issue TASK_REVIEW_IN_PROGRESS→TASK_INTEGRATED failed"; return 1; }
 
+  # H3: PR merged → unit worktree 와 task 브랜치 정리(idempotent).
+  if declare -F workspace_prune_unit >/dev/null 2>&1; then
+    workspace_prune_unit "${target}" "task-${issue_num}" || true
+  fi
+
   # Sweep milestone if all children integrated.
   local ms_num
   ms_num="$(it_issue_get_milestone "${repo}" "${issue_num}" 2>/dev/null)"
