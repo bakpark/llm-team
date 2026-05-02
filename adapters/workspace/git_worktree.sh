@@ -107,6 +107,28 @@ ws_ensure() {
   printf '%s\n' "${wt_path}"
 }
 
+# ws_refresh <unit_id>
+# worktree 를 origin/<branch> tip 으로 강제 동기화. cycle 사이 다른 워커가
+# 동일 브랜치를 진척시켰거나 다른 호스트에서 push 한 경우에 대비. unit 의
+# branch ref 가 origin 에 없으면(아직 publish 전) no-op.
+ws_refresh() {
+  local unit_id="$1"
+  local wt_path branch
+  wt_path="$(_workspace_unit_path "${unit_id}")"
+  branch="llm-team/${unit_id}"
+  if [ ! -d "${wt_path}/.git" ] && [ ! -f "${wt_path}/.git" ]; then
+    log_error "ws_refresh: workspace not found for unit '${unit_id}'"
+    return 1
+  fi
+  (
+    cd "${wt_path}" || exit 1
+    git fetch origin "${branch}" >/dev/null 2>&1 || exit 0
+    if git rev-parse --verify --quiet "origin/${branch}" >/dev/null 2>&1; then
+      git reset --hard "origin/${branch}" >/dev/null 2>&1 || exit 1
+    fi
+  ) || { log_error "ws_refresh: failed to refresh worktree for unit '${unit_id}'"; return 1; }
+}
+
 # ws_path_of <unit_id>  → echo path or empty
 ws_path_of() {
   local unit_id="$1"
@@ -117,24 +139,39 @@ ws_path_of() {
   fi
 }
 
-# ws_apply_patch <unit_id> <patch_text_or_file>
+# ws_apply_patch <unit_id> <patch_text_or_file> [commit_message]
 # 두 번째 인자가 일반 파일이면 그대로 적용, 그렇지 않으면 stdin patch 로 간주.
+# 적용 후 자동으로 `git add -A && git commit` 을 수행해 변경을 브랜치 tip 으로
+# 영속화한다. commit_message 가 비어 있으면 기본 메시지를 사용한다.
+# 변경이 없는 경우(빈 diff) 커밋은 생략하고 성공으로 취급(멱등).
 ws_apply_patch() {
-  local unit_id="$1" patch_arg="$2"
+  local unit_id="$1" patch_arg="$2" commit_message="${3:-}"
   local wt_path
   wt_path="$(_workspace_unit_path "${unit_id}")"
   if [ ! -d "${wt_path}/.git" ] && [ ! -f "${wt_path}/.git" ]; then
     log_error "ws_apply_patch: workspace not found for unit '${unit_id}'"
     return 1
   fi
+  if [ -z "${commit_message}" ]; then
+    commit_message="llm-team: apply patch for ${unit_id}"
+  fi
+  local author_name="${LLM_TEAM_GIT_AUTHOR_NAME:-llm-team}"
+  local author_email="${LLM_TEAM_GIT_AUTHOR_EMAIL:-llm-team@local}"
   (
     cd "${wt_path}" || exit 1
     if [ -f "${patch_arg}" ]; then
-      git apply --3way "${patch_arg}"
+      git apply --3way "${patch_arg}" || exit 1
     else
-      printf '%s\n' "${patch_arg}" | git apply --3way -
+      printf '%s\n' "${patch_arg}" | git apply --3way - || exit 1
     fi
-  ) || { log_error "ws_apply_patch: git apply failed for unit '${unit_id}'"; return 1; }
+    git add -A || exit 1
+    if git diff --cached --quiet; then
+      # 빈 diff — patch 가 이미 반영되어 있는 멱등 호출. 커밋 생략.
+      exit 0
+    fi
+    git -c "user.name=${author_name}" -c "user.email=${author_email}" \
+        commit --no-verify -m "${commit_message}" >/dev/null || exit 1
+  ) || { log_error "ws_apply_patch: git apply/commit failed for unit '${unit_id}'"; return 1; }
 }
 
 # ws_publish_branch <unit_id> [branch_name=llm-team/<unit_id>]

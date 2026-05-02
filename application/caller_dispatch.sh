@@ -27,6 +27,7 @@
 #     artifacts.integration_branch.name  — 통합 브랜치 명 (옵션, 기본 integration)
 #   patch (Coder)
 #     artifacts.patch_diff               — unified diff (string)
+#     artifacts.commit_message           — git commit 메시지 (옵션, 기본 "task #<n>: apply patch")
 #     artifacts.cp_artifact_ref          — 워크스페이스/branch 참조 (옵션)
 #     artifacts.task_branch              — 발행 브랜치 (옵션, 기본 llm-team/task-<id>)
 #     envelope.target_id                 — issue num (task)
@@ -472,7 +473,10 @@ _caller_apply_patch() {
     return 1
   fi
   if declare -F ws_apply_patch >/dev/null 2>&1; then
-    ws_apply_patch "${unit_id}" "${patch_text}" \
+    local commit_message
+    commit_message="$(jq -r '.artifacts.commit_message // empty' "${env_path}")"
+    [ -n "${commit_message}" ] || commit_message="task #${issue_num}: apply patch"
+    ws_apply_patch "${unit_id}" "${patch_text}" "${commit_message}" \
       || { log_error "_caller_apply_patch: ws_apply_patch failed"; return 1; }
     if declare -F ws_publish_branch >/dev/null 2>&1; then
       ws_publish_branch "${unit_id}" "${branch}" \

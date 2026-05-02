@@ -196,6 +196,28 @@ ws_ensure() {
   printf '%s\n' "${wt_dir}"
 }
 
+# ws_refresh <unit_id>
+# in_memory 어댑터에서는 head sha 가 worktree contents 로부터 계산되므로
+# 별도 sync 단계가 없다 — no-op. unit 이 존재하지 않으면 에러.
+ws_refresh() {
+  local unit_id="$1"
+  if [ -z "${unit_id}" ]; then
+    log_error "ws_refresh: unit_id is required"
+    return 1
+  fi
+  if [ -z "${TARGET_NAME:-}" ]; then
+    log_error "ws_refresh: TARGET_NAME must be set"
+    return 1
+  fi
+  local wt_dir
+  wt_dir="$(_in_memory_ws_unit_dir "${unit_id}")" || return 1
+  if [ ! -f "${wt_dir}/.inmem-meta.json" ]; then
+    log_error "ws_refresh: workspace not found for unit '${unit_id}'"
+    return 1
+  fi
+  return 0
+}
+
 # ws_path_of <unit_id>  → echo path | empty
 ws_path_of() {
   local unit_id="$1"
@@ -209,12 +231,15 @@ ws_path_of() {
   fi
 }
 
-# ws_apply_patch <unit_id> <patch_text_or_file>
+# ws_apply_patch <unit_id> <patch_text_or_file> [commit_message]
 # in_memory 한정 형식: JSON 배열 [{"path","content"}, ...].
 # 멱등: 동일 entry 두 번 적용 → 같은 결과 (overwrite).
 # 실패 시 워크스페이스를 변경하지 않음 (entry 적용 전 검증, staging 후 mv).
+# commit_message 는 in_memory 어댑터에서는 무시(head sha 가 contents 로부터
+# 계산되므로 별도 commit 단계가 없음). 시그니처 호환을 위해 받기만 한다.
 ws_apply_patch() {
   local unit_id="$1" patch_arg="$2"
+  # 3rd arg (commit_message) is intentionally unused; see comment above.
   if [ -z "${unit_id}" ] || [ -z "${patch_arg}" ]; then
     log_error "ws_apply_patch: unit_id and patch are required"
     return 1
