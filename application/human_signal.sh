@@ -42,6 +42,59 @@ _human_signal_body_to_tmp() {
   printf '%s' "${tmp}"
 }
 
+_human_signal_uuid() { printf 'tx-%s-%s' "$(date -u +%Y%m%dT%H%M%SZ)" "$$-${RANDOM}-${RANDOM}"; }
+_human_signal_caller_id() { printf '%s' "${LLM_TEAM_CALLER_ID:-human_signal}"; }
+
+# _human_signal_ledger_write target object_kind object_id from to operation idem [extra]
+# Append one applied transition entry to workdir/<target>/ledger/transitions.jsonl.
+# Mirrors _caller_ledger_write but lives in human_signal.sh per the
+# per-area writer pattern (caller_dispatch / recovery / runner / human_signal).
+_human_signal_ledger_write() {
+  local target="$1" object_kind="$2" object_id="$3" from_state="$4" to_state="$5"
+  local operation="$6" idempotency_key="$7" extra="${8:-.}"
+  local tmp
+  tmp="$(mktemp -t human-signal-ledger.XXXXXX)" || {
+    log_error "_human_signal_ledger_write: mktemp failed"
+    return 1
+  }
+  jq -n \
+    --arg transition_id "$(_human_signal_uuid)" \
+    --arg target_id "${target}" \
+    --arg object_kind "${object_kind}" \
+    --arg object_id "${object_id}" \
+    --arg from_state "${from_state}" \
+    --arg to_state "${to_state}" \
+    --arg operation "${operation}" \
+    --arg caller_id "$(_human_signal_caller_id)" \
+    --arg idempotency_key "${idempotency_key}" \
+    --arg manifest_id "" \
+    --arg timestamp "$(_human_signal_now)" \
+    "{
+       transition_id: \$transition_id,
+       target_id: \$target_id,
+       object_kind: \$object_kind,
+       object_id: \$object_id,
+       from_state: \$from_state,
+       to_state: \$to_state,
+       operation: \$operation,
+       caller_id: \$caller_id,
+       idempotency_key: \$idempotency_key,
+       manifest_id: \$manifest_id,
+       timestamp: \$timestamp,
+       result: \"applied\",
+       duplicate: false
+     } | ${extra}" >"${tmp}" || {
+       rm -f "${tmp}"
+       log_error "_human_signal_ledger_write: jq build failed"
+       return 1
+     }
+  if ! transition_ledger_write "${target}" "${tmp}"; then
+    rm -f "${tmp}"
+    return 1
+  fi
+  rm -f "${tmp}"
+}
+
 # Record a signal-processing outcome (applied/rejected/failed/stale/duplicate).
 _human_signal_record() {
   local signal_id="$1" comment_id="$2" status="$3" reason="${4:-}"
@@ -258,6 +311,11 @@ _human_signal_apply_approve() {
           return 1
           ;;
       esac
+      # Per RGC-SIGNAL-MATRIX (#RGC-HUMAN-GATES, lines 215-217): approve must
+      # also merge the related Spec CP. CP_READY_FOR_HUMAN_GATE → CP_HUMAN_APPROVED → CP_MERGED.
+      # P0-2 fix: previously the impl advanced milestone state but left the Spec CP
+      # stuck at CP_READY_FOR_HUMAN_GATE — closing the contract gap here.
+      _human_signal_apply_spec_cp_merge "${id}" || return 1
       it_milestone_set_state "${repo}" "${id}" "${next}" "${cur}"
       ;;
     *)
@@ -265,6 +323,44 @@ _human_signal_apply_approve() {
       return 1
       ;;
   esac
+}
+
+# Locate the Spec CP for a milestone and walk
+# CP_READY_FOR_HUMAN_GATE → CP_HUMAN_APPROVED → CP_MERGED, writing two
+# ledger entries. Returns 0 if no CP is present (legacy/in-flight signals
+# raised before a Spec CP existed) — milestone advancement still proceeds.
+_human_signal_apply_spec_cp_merge() {
+  local milestone_id="$1"
+  local target="${TARGET_NAME:-default}"
+  local cp_path
+  cp_path="$(change_proposal_find "${target}" Spec "${milestone_id}" CP_READY_FOR_HUMAN_GATE 2>/dev/null)" || {
+    log_warn "approve: no Spec CP found in CP_READY_FOR_HUMAN_GATE for milestone #${milestone_id} (target=${target}); skipping CP merge"
+    return 0
+  }
+
+  local cp_id operation
+  cp_id="$(jq -r '.change_proposal_id // ""' "${cp_path}")"
+  operation="$(jq -r '.operation // ""' "${cp_path}")"
+  if [ -z "${cp_id}" ] || [ -z "${operation}" ]; then
+    log_error "approve: Spec CP at ${cp_path} missing change_proposal_id or operation"
+    return 1
+  fi
+
+  change_proposal_set_state "${cp_path}" CP_HUMAN_APPROVED CP_READY_FOR_HUMAN_GATE \
+    || { log_error "approve: CP CP_READY_FOR_HUMAN_GATE → CP_HUMAN_APPROVED failed (${cp_path})"; return 1; }
+  _human_signal_ledger_write "${target}" change_proposal "${cp_id}" \
+    CP_READY_FOR_HUMAN_GATE CP_HUMAN_APPROVED \
+    "${operation}" "${cp_id}:CP_HUMAN_APPROVED" \
+    ". + { cp_path: \"${cp_path}\" }" \
+    || return 1
+
+  change_proposal_set_state "${cp_path}" CP_MERGED CP_HUMAN_APPROVED \
+    || { log_error "approve: CP CP_HUMAN_APPROVED → CP_MERGED failed (${cp_path})"; return 1; }
+  _human_signal_ledger_write "${target}" change_proposal "${cp_id}" \
+    CP_HUMAN_APPROVED CP_MERGED \
+    "${operation}" "${cp_id}:CP_MERGED" \
+    ". + { cp_path: \"${cp_path}\" }" \
+    || return 1
 }
 
 _human_signal_apply_reject() {

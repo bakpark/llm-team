@@ -134,6 +134,44 @@ change_proposal_set_state() {
   fi
 }
 
+# change_proposal_find <target> <cp_kind> <target_id> [<state>]
+# Locate a CP file under workdir/<target>/change-proposals/ matching the
+# (cp_kind, target_id) pair. If <state> is provided, narrow further by
+# current `.state` field. On match: prints the path, returns 0.
+# When multiple matches exist, prints the most recently created one
+# (filename includes a UTC timestamp + PID, lex-sorted ASC).
+# Returns non-zero with no stdout if no match.
+change_proposal_find() {
+  local target="$1" cp_kind="$2" target_id="$3" state="${4:-}"
+  if [ -z "${target}" ] || [ -z "${cp_kind}" ] || [ -z "${target_id}" ]; then
+    log_error "change_proposal_find: target, cp_kind, target_id are required"
+    return 1
+  fi
+  local dir
+  dir="$(change_proposal_dir "${target}")"
+  [ -d "${dir}" ] || return 1
+  local match=""
+  local f
+  # Iterate newest-last; keep the last match so caller gets the most recent CP.
+  for f in "${dir}"/*.json; do
+    [ -f "${f}" ] || continue
+    local kind tid st
+    kind="$(jq -r '.cp_kind // ""' "${f}" 2>/dev/null)"
+    tid="$( jq -r '.target_id // ""' "${f}" 2>/dev/null)"
+    st="$(  jq -r '.state // ""' "${f}" 2>/dev/null)"
+    [ "${kind}" = "${cp_kind}" ] || continue
+    [ "${tid}" = "${target_id}" ] || continue
+    if [ -n "${state}" ] && [ "${st}" != "${state}" ]; then
+      continue
+    fi
+    match="${f}"
+  done
+  if [ -z "${match}" ]; then
+    return 1
+  fi
+  printf '%s\n' "${match}"
+}
+
 # change_proposal_set_pr_link <path> <pr_num>
 # Sets .pr_number on the CP artifact. Atomic write. Idempotent.
 change_proposal_set_pr_link() {

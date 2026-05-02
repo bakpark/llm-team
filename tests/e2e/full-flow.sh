@@ -245,6 +245,11 @@ state="$(ms_state "${ms_num}")"
 [ "${state}" = "PM_DRAFT" ] || { fail "step2: state expected PM_DRAFT got '${state}'"; exit 1; }
 ok "milestone state = PM_DRAFT after approve signal"
 
+# P0-2: PO approve must also merge the Spec PO CP (CP_READY_FOR_HUMAN_GATE → CP_HUMAN_APPROVED → CP_MERGED).
+po_cp_path="$(change_proposal_find "${TARGET_NAME}" Spec "${ms_num}" CP_MERGED)" \
+  || { fail "step2: PO Spec CP not in CP_MERGED after approve"; exit 1; }
+ok "PO Spec CP merged: $(basename "${po_cp_path}")"
+
 # ============================================================================
 # Step 3: PM runner → milestone PM_GATE
 # ============================================================================
@@ -273,6 +278,12 @@ state="$(ms_state "${ms_num}")"
 [ "${state}" = "DECOMPOSE_READY" ] \
   || { fail "step4: state expected DECOMPOSE_READY got '${state}'"; exit 1; }
 ok "milestone state = DECOMPOSE_READY"
+
+# P0-2: PM approve must also merge the PM Spec CP. There are now two Spec CPs;
+# change_proposal_find returns the most recent matching the (kind, id, state) tuple.
+pm_cp_path="$(change_proposal_find "${TARGET_NAME}" Spec "${ms_num}" CP_MERGED)" \
+  || { fail "step4: PM Spec CP not in CP_MERGED after approve"; exit 1; }
+ok "PM Spec CP merged: $(basename "${pm_cp_path}")"
 
 # ============================================================================
 # Step 5: Planner runner → IMPLEMENTING with 1 task
