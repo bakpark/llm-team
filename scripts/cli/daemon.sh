@@ -6,6 +6,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=common.sh
 . "${SCRIPT_DIR}/common.sh"
+# shellcheck source=_onboarding_gate.sh
+. "${SCRIPT_DIR}/_onboarding_gate.sh"
 
 usage() {
   cat <<EOF
@@ -23,6 +25,14 @@ parse_scope_and_options() {
   DAEMON_ROLE_SPEC="all"
   DAEMON_INTERVAL="120"
   DAEMON_LINES="80"
+  # 게이트 flag (start 만 의미; 다른 서브커맨드에는 무시됨).
+  onboarding_gate_detect_flags "$@"
+  local filtered=() arg _tmp
+  _tmp="$(mktemp "${TMPDIR:-/tmp}/onb-args-XXXXXX")"
+  onboarding_gate_filter_args "$@" >"${_tmp}"
+  while IFS= read -r arg; do filtered+=("${arg}"); done <"${_tmp}"
+  rm -f "${_tmp}"
+  set -- "${filtered[@]+"${filtered[@]}"}"
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -172,6 +182,16 @@ case "${cmd}" in
     ;;
   start)
     parse_scope_and_options "$@"
+    # 시작 전 게이트: scope=all 이면 enabled target 전부, 특정 target 이면 그 하나.
+    if [ "${DAEMON_SCOPE}" = "all" ]; then
+      cli_source_runtime
+      while IFS= read -r _t; do
+        [ -n "${_t}" ] || continue
+        onboarding_gate_check "${_t}" || exit $?
+      done < <(list_active_targets)
+    else
+      onboarding_gate_check "${DAEMON_SCOPE}" || exit $?
+    fi
     run_for_roles daemon_start_role "${DAEMON_SCOPE}"
     ;;
   stop)

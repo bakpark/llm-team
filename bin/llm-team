@@ -13,7 +13,11 @@ while [ -L "${SOURCE}" ]; do
   esac
 done
 SCRIPT_DIR="$(cd -P "$(dirname "${SOURCE}")" && pwd)"
-LLM_TEAM_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# 외부에서 LLM_TEAM_ROOT 가 설정되어 있으면 (예: 테스트 sandbox) 존중하고,
+# 없으면 스크립트 위치 기준으로 자동 결정.
+if [ -z "${LLM_TEAM_ROOT:-}" ]; then
+  LLM_TEAM_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
 export LLM_TEAM_ROOT
 
 usage() {
@@ -23,6 +27,7 @@ Usage: llm-team <command> [args]
 Commands:
   doctor [target]                  Check local prerequisites and target config
   target <list|show|add|init|enable|disable>
+  onboarding <status|ack|list-schemas|wizard>
   labels bootstrap <target> [--dry-run]
   run <role> <target> [--dry-run]
   run-once <target> [--roles list] [--dry-run]
@@ -48,6 +53,10 @@ case "${cmd}" in
   target)
     shift
     exec "${LLM_TEAM_ROOT}/scripts/cli/target.sh" "$@"
+    ;;
+  onboarding)
+    shift
+    exec "${LLM_TEAM_ROOT}/scripts/cli/onboarding.sh" "$@"
     ;;
   labels)
     shift

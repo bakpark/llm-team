@@ -140,6 +140,48 @@ llm-team doctor <target>
 
 현재 runner는 contract 기반 골격을 먼저 보장한다. 역할과 operation을 매핑하고, Context Manifest를 만들고, prompt 위치와 기본 invariant를 검증한다. 실제 GitHub ready-object adapter는 이 골격 위에 붙여야 한다.
 
+## Onboarding Gate
+
+`run` / `run-once` / `daemon start` 진입점은 target 의 onboarding 체크리스트
+(`github-pipeline/v1` preset) 를 hard gate 로 평가한다. block severity 항목이
+하나라도 FAIL 이면 exit 2 로 차단한다.
+
+```bash
+llm-team onboarding status myapp        # PASS/FAIL/WARN/SKIP TSV
+llm-team onboarding status myapp --json # JSON 형식
+llm-team onboarding ack myapp branch_protection_policy_decided --note "도입 결정 완료"
+llm-team onboarding wizard myapp        # TTY 대화형
+llm-team onboarding list-schemas
+```
+
+게이트 우회 (각각 의도가 다르다):
+
+- `--dry-run`: 실제 실행 없이 흐름만 확인. 게이트 자체를 건너뜀.
+- `--allow-incomplete-onboarding`: 운영 권한자가 1 회 강제로 진행. warn 메시지 출력.
+- `LLM_TEAM_SKIP_ONBOARDING_GATE=1`: 자동화/CI 환경에서 환경변수 우회. warn 메시지 출력.
+
+### Existing targets migration
+
+본 PR 이전에 만든 target.yaml 은 `onboarding:` 섹션이 없다. 게이트는 기본값
+(`schema=github-pipeline/v1`, `self_hosting=false`, `acks={}`) 을 가정해 평가
+하므로, `run` / `daemon start` 가 갑자기 차단될 수 있다. 기존 target 은 다음
+순서로 보강한다.
+
+1. `llm-team onboarding status <target>` 로 현재 FAIL 항목 확인.
+2. 자동 검증 가능한 항목은 환경/파일 시스템 측에서 직접 해결 (예: workdir
+   scaffold 누락이면 `llm-team target init <target>`).
+3. 정책 결정 항목은 `llm-team onboarding ack <target> <key> --note "..."` 로
+   ack. 키 목록은 `llm-team onboarding list-schemas` 의 출력 6 번째 칼럼.
+4. 임시 우회가 필요한 자동화 흐름이 있다면 `LLM_TEAM_SKIP_ONBOARDING_GATE=1`
+   또는 `--allow-incomplete-onboarding` 사용.
+
+### Override `LLM_TEAM_ROOT`
+
+`bin/llm-team` 은 외부에서 `LLM_TEAM_ROOT` 가 export 되어 있으면 그 값을
+존중한다 (테스트 sandbox, symlink 배포, 외부 체크아웃 시 사용). 잘못된 root
+가 export 되어 있으면 silent 하게 따라가므로, `doctor` 출력이 의외라면
+환경변수를 먼저 점검한다.
+
 ## Implementation Notes
 
 이 모델을 특정 저장소와 도구 위에 구현하려면 보통 다음 요소가 필요하다.

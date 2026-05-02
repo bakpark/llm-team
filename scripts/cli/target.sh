@@ -12,7 +12,7 @@ usage() {
 Usage:
   llm-team target list
   llm-team target show <name>
-  llm-team target add [name] --repo owner/repo|github-url [--branch main] [--clone-path path] [--label-prefix prefix] [--notifier none] [--webhook-ref KEY] [--disabled] [--force]
+  llm-team target add [name] --repo owner/repo|github-url [--branch main] [--clone-path path] [--label-prefix prefix] [--notifier none] [--webhook-ref KEY] [--self-hosting] [--disabled] [--force]
   llm-team target add [name] --url github-url [options]
   llm-team target add [name] --from-current [--path checkout] [--separate-clone] [options]
   llm-team target init <name> [--dry-run] [--skip-labels]
@@ -151,7 +151,7 @@ _target_clone_path_collision() {
 
 target_add() {
   local name="" repo="" branch="main" clone_path="" label_prefix="" notifier="none" webhook_ref="" enabled="true" force=0
-  local from_current=0 checkout_path="." separate_clone=0
+  local from_current=0 checkout_path="." separate_clone=0 self_hosting="false"
   if [ "${1:-}" != "" ] && [ "${1#-}" = "${1}" ]; then
     name="$1"
     shift || true
@@ -169,6 +169,7 @@ target_add() {
       --label-prefix) label_prefix="${2:-}"; shift 2 ;;
       --notifier) notifier="${2:-}"; shift 2 ;;
       --webhook-ref) webhook_ref="${2:-}"; shift 2 ;;
+      --self-hosting) self_hosting="true"; shift ;;
       --disabled) enabled="false"; shift ;;
       --force) force=1; shift ;;
       -h|--help) usage; exit 0 ;;
@@ -242,8 +243,14 @@ notifier:
 dev_concurrency: 3
 stale_threshold_minutes: 60
 enabled: ${enabled}
+onboarding:
+  schema: github-pipeline/v1
+  self_hosting: ${self_hosting}
+  acks: {}
 EOF
   printf 'Created target %s at %s\n' "${name}" "${file}"
+  printf 'Next: llm-team target init %s && llm-team onboarding status %s\n' \
+    "${name}" "${name}"
 }
 
 target_init() {
@@ -315,6 +322,33 @@ target_init() {
   for role in Coder Reviewer Integrator QA; do
     printf '  %-10s %s/wt/task-<unit_id>\n' "${role}" "${workdir}"
   done
+
+  # 6. onboarding 상태 요약 (warn-only — init 자체는 성공 처리).
+  if [ "${dry_run}" -eq 1 ]; then
+    printf '[init] (dry-run) skipping onboarding summary\n'
+  else
+    # shellcheck source=../../application/onboarding/verify.sh
+    . "${LLM_TEAM_ROOT}/application/onboarding/verify.sh"
+    local _pass=0 _fail=0 _warn=0 _skip=0 _tmp _status
+    _tmp="$(mktemp "${TMPDIR:-/tmp}/onb-init-XXXXXX")"
+    onboarding_verify "${target}" >"${_tmp}" 2>/dev/null || true
+    while IFS=$'\t' read -r _status _; do
+      case "${_status}" in
+        PASS) _pass=$((_pass + 1)) ;;
+        FAIL) _fail=$((_fail + 1)) ;;
+        WARN) _warn=$((_warn + 1)) ;;
+        SKIP) _skip=$((_skip + 1)) ;;
+      esac
+    done <"${_tmp}"
+    rm -f "${_tmp}"
+    printf '[init] onboarding: %d pass, %d fail (block), %d warn, %d skip\n' \
+      "${_pass}" "${_fail}" "${_warn}" "${_skip}"
+    if [ "${_fail}" -gt 0 ]; then
+      printf '[init] WARN: daemon/run will be blocked until onboarding fail items are resolved.\n' >&2
+      printf '[init]       Run: llm-team onboarding status %s   (or: wizard %s)\n' \
+        "${target}" "${target}" >&2
+    fi
+  fi
 
   printf '[init] target %s ready\n' "${target}"
 }
