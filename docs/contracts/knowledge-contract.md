@@ -24,6 +24,8 @@ Agent 호출의 Context Manifest는 `docs/contracts/agent-and-context-contract.m
 
 병합된 스펙은 후속 마일스톤이 명시적으로 갱신하지 않는 한 변경하지 않는다. 변경 시 사유를 Decision Log에 기록한다.
 
+거부되거나 회수된 Spec CP 는 병합된 스펙으로 누적하지 않는다. 다만 거부 사유, 회수 사유, 반복 금지해야 할 대안은 `KAC-DECISION-LOG` 의 `alternatives` 와 `rationale` 로 누적한다. 다음 PO/PM manifest 는 현재 scope 와 관련된 최근 거부 사유를 decision entry 로 포함해야 하며, 이를 생략하면 후속 마일스톤이 같은 거부 사유를 반복할 수 있으므로 invalid manifest 로 본다.
+
 <a id="KAC-MANIFEST"></a>
 ## KAC-MANIFEST: Spec Manifest
 
@@ -63,7 +65,7 @@ PO/PM 호출의 manifest는 최소 다음을 포함한다.
 - 직전 마일스톤의 Context Summary
 - 현재 사람 승인 시그널이 인용한 스펙(있을 때)
 - 최신 병합된 PO/PM 산출물
-- 최근 Decision Log 중 현재 마일스톤 scope과 관련된 항목
+- 최근 Decision Log 중 현재 마일스톤 scope과 관련된 항목. 여기에는 거부되거나 회수된 Spec CP 의 사유가 포함된다
 
 이 entry들은 `required: true`로 표시한다. 누락은 invalid manifest이며, Caller는 호출 전에 생성을 보장해야 한다.
 

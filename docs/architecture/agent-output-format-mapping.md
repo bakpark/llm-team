@@ -25,7 +25,7 @@ artifacts:
     body: |
       <artifact body>
 verdict:
-  result: <approve|request-changes|PASS|FAIL|NEED_CONTEXT|null>
+  result: <approve|request-changes|PASS|FAIL|STALE|NEED_CONTEXT|null>
   rationale: <reason>
 failure:
   type: <invalid_output|tool_failure|need_context|none>
@@ -35,6 +35,8 @@ runtime_metadata:        # Caller enrichment 영역 (AGC-OUTPUT-RUNTIME-ENRICH)
 ```
 
 Caller may serialize this envelope as JSON, YAML, markdown front matter, or another structured representation. Markdown headings below are artifact body conventions only and must not be used as the primary validation contract.
+
+Role 별 `output_kind` 와 `verdict.result` 의 authoritative matrix 는 [`AGC-ROLE-OUTPUTS`](../contracts/agent-and-context-contract.md#AGC-ROLE-OUTPUTS) 가 정의한다. 아래 role별 절은 markdown artifact 예시이며 enum 검증 권위가 아니다.
 
 ## PO Spec Artifact
 
@@ -196,11 +198,11 @@ Output kind: `milestone_package`
 ```markdown
 ## Refactor Verdict
 
-Result: PASS|FAIL
+Result: PASS|FAIL|STALE
 
 ## Integration Change
 
-<summary or no-op rationale>
+<summary or no-op rationale. no-op은 PASS + Integration CP message 부재로 표현>
 
 ## Verification Evidence
 

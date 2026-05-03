@@ -70,7 +70,7 @@ Caller 는 LLM 어댑터(현 구현: `claude_code`, `fake`) 를 통해 호출하
 2. **Envelope validation** (`AGC-OUTPUT`, `AGC-INVALID`): 필수 필드, manifest 포함 여부, 비밀 grep, 작업 공간 외 파일 변경 검사.
 3. **Pin recheck**: 모든 `required` manifest entry 의 revision pin 이 호출 직전과 동일한지 재검증. 변경 시 `stale`.
 
-이 단계의 결과는 다음 중 하나로 ledger result 에 매핑된다: `success` 후속 단계 진행 / `invalid` / `stale` / `error` / `claim_failed` / `duplicate`.
+이 단계의 결과는 다음 중 하나로 ledger result 에 매핑된다: `applied` 후속 단계 진행 / `invalid` / `stale` / `error` / `claim_failed` / `duplicate`.
 
 ### 5. Dispatch (per role × output_kind)
 
@@ -86,7 +86,7 @@ Caller 는 LLM 어댑터(현 구현: `claude_code`, `fake`) 를 통해 호출하
 | Reviewer | `verdict=request-changes` | CP close, PR close | task `TASK_READY`, CP `CLOSED` |
 | Integrator | `verdict=PASS` | Integration CP 있으면 merge, 없으면 ledger 기록만 | milestone `VALIDATE_READY` |
 | Integrator | `verdict=FAIL` | CP close, attempt count 증가 | milestone `REFACTOR_READY` 또는 `ESCALATED` |
-| Integrator | `verdict=NO-OP` | ledger only | milestone `VALIDATE_READY` |
+| Integrator | `verdict=PASS` (NO-OP) | ledger only | milestone `VALIDATE_READY` |
 | Integrator | `verdict=STALE` | CP `STALE` | milestone `REFACTOR_READY` |
 | QA | `verdict=PASS` | Milestone CP merge, release publish, child task 종료, decision-log/context-summary 영속화 | milestone `DONE` |
 | QA | `verdict=FAIL` | 책임 task 만 `TASK_READY` 회수 | milestone `IMPLEMENTING` |
