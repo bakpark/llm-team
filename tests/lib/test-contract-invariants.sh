@@ -54,6 +54,23 @@ context_manifest_add_entry "${manifest_file}" "task" "T-1" "body" "rev-1" true "
 context_manifest_validate "${manifest_file}" || fail "context manifest should validate"
 manifest_id="$(context_manifest_id "${manifest_file}")"
 
+# P2-3: truncated/truncation_reason optional fields surface on the entry and
+# survive validation. AGC-CONTEXT-MANIFEST mandates preservation of truncation
+# metadata.
+trunc_manifest="$(context_manifest_create "contract-test-trunc" "Implement" "task" "T-2")"
+context_manifest_add_entry "${trunc_manifest}" "task" "T-2" "body" "rev-2" \
+  true "fetched body trimmed" true "exceeded body+comments size cap"
+context_manifest_validate "${trunc_manifest}" \
+  || fail "manifest with truncated entry should validate"
+jq -e '.entries[0].truncated == true and (.entries[0].truncation_reason | length > 0)' \
+  "${trunc_manifest}" >/dev/null \
+  || fail "truncated/truncation_reason fields must be persisted on the entry"
+# fetch_scope enum must still reject invalid values (P1-2 lock).
+if context_manifest_add_entry "${trunc_manifest}" "task" "T-3" "anywhere" "rev-3" \
+     true "bad scope" 2>/dev/null; then
+  fail "context_manifest_add_entry should reject fetch_scope outside enum"
+fi
+
 valid_output="${LLM_TEAM_ROOT}/workdir/contract-test/valid-output.json"
 mkdir -p "$(dirname "${valid_output}")"
 jq -n \

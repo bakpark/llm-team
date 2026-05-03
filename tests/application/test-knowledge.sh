@@ -72,6 +72,69 @@ knowledge_snapshot_context_summary "${TEST_TARGET}" "43" "" \
   || fail "empty summary should not create a file"
 
 # ----------------------------------------------------------------------------
+# Test 3: knowledge_snapshot_spec round-trip + last-write-wins
+# ----------------------------------------------------------------------------
+SPEC_DIR="${KNOWLEDGE_ROOT}/spec-snapshots"
+knowledge_snapshot_spec "${TEST_TARGET}" "42" "spec body v1" \
+  || fail "spec snapshot v1 write failed"
+SPEC_PATH="${SPEC_DIR}/42.json"
+[ -f "${SPEC_PATH}" ] || fail "spec-snapshot file not created"
+[ "$(jq -r '.body' "${SPEC_PATH}")" = "spec body v1" ] \
+  || fail "spec body mismatch"
+[ "$(jq -r '.milestone_id' "${SPEC_PATH}")" = "42" ] \
+  || fail "spec milestone_id mismatch"
+[ -n "$(jq -r '.saved_at' "${SPEC_PATH}")" ] \
+  || fail "spec saved_at not populated"
+
+# Re-write must overwrite (spec evolves during PO/PM gate iteration).
+knowledge_snapshot_spec "${TEST_TARGET}" "42" "spec body v2" \
+  || fail "spec snapshot v2 write failed"
+[ "$(jq -r '.body' "${SPEC_PATH}")" = "spec body v2" ] \
+  || fail "spec body did not update on re-write"
+
+# Empty body is no-op.
+knowledge_snapshot_spec "${TEST_TARGET}" "44" "" \
+  || fail "empty spec body call should return 0"
+[ ! -f "${SPEC_DIR}/44.json" ] \
+  || fail "empty spec body should not create a file"
+
+# ----------------------------------------------------------------------------
+# Test 4: knowledge_latest_prior_summary picks newest, supports exclusion
+# ----------------------------------------------------------------------------
+# Existing summary for milestone 42 is "first summary". Add another for 50.
+knowledge_snapshot_context_summary "${TEST_TARGET}" "50" "summary for 50" \
+  || fail "second context_summary write failed"
+# Force mtime ordering: 50 newer than 42.
+touch "${KNOWLEDGE_ROOT}/context-summaries/50.json"
+
+row="$(knowledge_latest_prior_summary "${TEST_TARGET}")" \
+  || fail "knowledge_latest_prior_summary should find a summary"
+got_id="$(printf '%s' "${row}" | awk -F'\t' '{print $1}')"
+got_path="$(printf '%s' "${row}" | awk -F'\t' '{print $2}')"
+got_pin="$(printf '%s' "${row}" | awk -F'\t' '{print $3}')"
+[ "${got_id}" = "50" ] \
+  || fail "latest_prior_summary expected id=50, got '${got_id}'"
+[ -f "${got_path}" ] \
+  || fail "latest_prior_summary path '${got_path}' is not a file"
+case "${got_pin}" in
+  summary-*) ;;
+  *) fail "latest_prior_summary pin must start with 'summary-' (got '${got_pin}')" ;;
+esac
+
+# Exclusion: when current milestone is 50, latest_prior must fall back to 42.
+row2="$(knowledge_latest_prior_summary "${TEST_TARGET}" "50")" \
+  || fail "latest_prior_summary with exclude should still find 42"
+got_id2="$(printf '%s' "${row2}" | awk -F'\t' '{print $1}')"
+[ "${got_id2}" = "42" ] \
+  || fail "with exclude=50, expected id=42, got '${got_id2}'"
+
+# Empty target → return 1 (no false positives).
+TMP_TARGET="empty-knowledge-$$"
+if knowledge_latest_prior_summary "${TMP_TARGET}" 2>/dev/null; then
+  fail "latest_prior_summary on empty target should return non-zero"
+fi
+
+# ----------------------------------------------------------------------------
 if [ "${failures}" -gt 0 ]; then
   echo "${failures} failure(s)" >&2
   exit 1

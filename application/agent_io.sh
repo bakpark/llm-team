@@ -306,7 +306,70 @@ agent_output_validate_extended() {
     fi
   fi
 
+  # ----- (g) KAC-TRACEABILITY (P1-6): AC-ID 추적 게이트 -----
+  # Planner Decompose: ac_id_to_task 가 있어야 하고 매핑된 task slug 가 모두
+  # artifacts.tasks[].slug 에 존재해야 한다(Decompose FAIL).
+  # QA Validate(PASS|FAIL): ac_results 가 비어있지 않아야 하고 각 항목이
+  # {ac_id, verdict ∈ {PASS,FAIL}, responsible_task_ids[]} 구조여야 한다(Validate FAIL).
+  if ! _agent_io_check_ac_traceability "${envelope_file}" "${normalized_role}" "${actual_kind}"; then
+    _agent_io_cleanup_envelope_file
+    return 1
+  fi
+
   _agent_io_cleanup_envelope_file
+  return 0
+}
+
+# Helper: enforce KAC-TRACEABILITY for Planner output and QA milestone_package.
+# Returns 0 if check passes (or N/A for this role/kind), 1 with stderr on FAIL.
+_agent_io_check_ac_traceability() {
+  local envelope_file="$1" role="$2" kind="$3"
+  case "${role}-${kind}" in
+    Planner-task_plan)
+      # ac_id_to_task: object {AC-* : [task_slug, ...]}; tasks[]: [{slug, ...}].
+      jq -e '
+        (.artifacts.ac_id_to_task // null) as $map
+        | (.artifacts.tasks // []) as $tasks
+        | ($tasks | map(.slug // "") | map(select(length > 0))) as $slugs
+        | ($map != null) and ($map | type == "object") and ($map | length > 0)
+          and (
+            [ $map | to_entries[] | .value | type == "array" and length > 0 ]
+            | all
+          )
+          and (
+            [ $map | to_entries[] | .value[] | . as $s | $slugs | index($s) != null ]
+            | all
+          )
+      ' "${envelope_file}" >/dev/null 2>&1 || {
+        log_error "agent_output_validate_extended: KAC-TRACEABILITY (P1-6) Planner ac_id_to_task missing or maps unknown task slugs"
+        return 1
+      }
+      ;;
+    QA-milestone_package)
+      # ac_results required only for terminal verdicts (PASS/FAIL); STALE/NO-OP
+      # outcomes can occur before full validation completes.
+      local outcome
+      outcome="$(jq -r '.artifacts.outcome // empty' "${envelope_file}")"
+      case "${outcome}" in
+        PASS|FAIL)
+          jq -e '
+            (.artifacts.ac_results // []) as $r
+            | ($r | type == "array" and length > 0)
+              and (
+                [ $r[]
+                  | (.ac_id | type == "string" and length > 0)
+                    and (.verdict | IN("PASS","FAIL"))
+                    and (.responsible_task_ids | type == "array")
+                ] | all
+              )
+          ' "${envelope_file}" >/dev/null 2>&1 || {
+            log_error "agent_output_validate_extended: KAC-TRACEABILITY (P1-6) QA ac_results missing or malformed"
+            return 1
+          }
+          ;;
+      esac
+      ;;
+  esac
   return 0
 }
 

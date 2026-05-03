@@ -337,6 +337,28 @@ MANIFEST_FILE="$(context_manifest_create "${TARGET}" "${OPERATION}" "${TARGET_OB
 context_manifest_add_entry "${MANIFEST_FILE}" \
   "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" "metadata" \
   "${TARGET_REVISION_PIN}" true "runner pickup"
+
+# KAC-CONTEXT-SUMMARY auto-inject (P1-7): for PO/PM manifest builds, attach the
+# most recent prior milestone's QA-stamped summary so spec composition can
+# reference completed-milestone outcomes without re-fetching them. Skipped if
+# no prior summary exists (first milestone of a target). Excludes the current
+# milestone id so PM Compose-PM does not self-reference.
+case "${ROLE}" in
+  PO|PM)
+    if declare -F knowledge_latest_prior_summary >/dev/null 2>&1; then
+      _prior_row="$(knowledge_latest_prior_summary "${TARGET}" "${TARGET_OBJECT_ID}" 2>/dev/null || true)"
+      if [ -n "${_prior_row}" ]; then
+        _prior_id="$(printf '%s' "${_prior_row}" | awk -F'\t' '{print $1}')"
+        _prior_pin="$(printf '%s' "${_prior_row}" | awk -F'\t' '{print $3}')"
+        context_manifest_add_entry "${MANIFEST_FILE}" \
+          "knowledge_summary" "${_prior_id}" "body" \
+          "${_prior_pin}" false "prior milestone context summary (KAC-CONTEXT-SUMMARY auto-inject)" \
+          || log_warn "runner: failed to inject prior summary for milestone ${_prior_id}"
+      fi
+    fi
+    ;;
+esac
+
 context_manifest_validate "${MANIFEST_FILE}" || {
   log_error "runner: manifest validate failed"
   _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true

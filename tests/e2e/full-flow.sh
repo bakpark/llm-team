@@ -296,6 +296,7 @@ artifacts="$(jq -nc \
        { slug: "t1", title: "implement login", body: "Implement login endpoint" }
      ],
      dependency_graph: { t1: [] },
+     ac_id_to_task: { "AC-1": ["t1"] },
      integration_branch: { name: "integration" }
    }')"
 write_fixture Planner Decompose "${ms_num}" "planner-${ms_num}-step5" "${pins_json}" "${artifacts}"
@@ -386,6 +387,9 @@ artifacts="$(jq -nc \
   '{ outcome: "PASS",
      cp_kind: "Milestone",
      cp_artifact_ref: "milestone/v0.1.0",
+     ac_results: [
+       { ac_id: "AC-1", verdict: "PASS", responsible_task_ids: ["t1"] }
+     ],
      release_tag: "0.1.0",
      release_target: "main",
      release_notes_md: "# Release v0.1.0\n* login feature"

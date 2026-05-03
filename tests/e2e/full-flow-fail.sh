@@ -148,7 +148,10 @@ _qa_fail_inner() {
         cp_kind: "Milestone",
         cp_path: $cp,
         pr_number: ($pr | tonumber),
-        failing_tasks: [($task | tonumber)]
+        failing_tasks: [($task | tonumber)],
+        ac_results: [
+          { ac_id: "AC-1", verdict: "FAIL", responsible_task_ids: [($task | tonumber | tostring)] }
+        ]
       }
     }' >"${env_path}"
 

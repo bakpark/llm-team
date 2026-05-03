@@ -385,6 +385,13 @@ _caller_apply_spec_proposal() {
   it_milestone_update "${repo}" "${target_id}" --body "${body}" \
     || { log_error "_caller_apply_spec_proposal: milestone_update body failed"; return 1; }
 
+  # KAC-MANIFEST-FROM-KNOWLEDGE: freeze the spec body so subsequent manifest
+  # builds (Decompose, Implement, ...) can fetch a canonical snapshot instead
+  # of refetching milestone body every time. Best-effort.
+  if declare -F knowledge_snapshot_spec >/dev/null 2>&1; then
+    knowledge_snapshot_spec "${target}" "${target_id}" "${body}" || true
+  fi
+
   it_milestone_set_state "${repo}" "${target_id}" "${to_state}" "${from_state}" \
     || { log_error "_caller_apply_spec_proposal: milestone ${from_state}→${to_state} failed"; return 1; }
 

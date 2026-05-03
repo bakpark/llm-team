@@ -7,11 +7,8 @@
 #
 # Layout:
 #   workdir/<target>/knowledge/context-summaries/<milestone_id>.json
+#   workdir/<target>/knowledge/spec-snapshots/<milestone_id>.json
 #   workdir/<target>/knowledge/decision-log.jsonl   (append-only)
-#
-# spec-snapshots namespace 는 KAC-MANIFEST 에서 정의되었으나 milestone body
-# 접근용 port 가 아직 없어 이번 PR 에서는 writer 만 두지 않는다 — 후속 PR 에
-# port 가 추가되면 함께 wire 한다.
 #
 # Caller boundary (AGC-CALL-BOUNDARY): pure file IO under workdir/<target>.
 # Public functions are best-effort — they never fail the dispatch pipeline.
@@ -73,4 +70,61 @@ knowledge_snapshot_context_summary() {
     >"${path}" 2>/dev/null \
     || log_warn "knowledge_snapshot_context_summary: write failed for ${path}"
   return 0
+}
+
+# knowledge_snapshot_spec <target> <milestone_id> <body_text>
+# PO/PM Compose 시 spec body 를 milestone 단위로 freeze 한다(KAC-MANIFEST-FROM-
+# KNOWLEDGE). 후속 호출에서 manifest 빌드가 이 snapshot 을 참조해 spec drift 를
+# 막는다. append-only: 같은 milestone_id 에 대한 재호출은 가장 최근 본문을
+# 다음 manifest 빌드가 보도록 덮어쓴다(spec 은 PO_GATE/PM_GATE 인간 승인 사이클
+# 에서 다듬어질 수 있음).
+knowledge_snapshot_spec() {
+  local target="$1" ms_id="$2" body="$3"
+  if [ -z "${target}" ] || [ -z "${ms_id}" ] || [ -z "${body}" ]; then
+    return 0
+  fi
+  local root path tmp
+  root="$(_knowledge_root "${target}")/spec-snapshots"
+  mkdir -p "${root}" || return 0
+  path="${root}/${ms_id}.json"
+  tmp="${path}.tmp.$$"
+  jq -n \
+    --arg milestone_id "${ms_id}" \
+    --arg body "${body}" \
+    --arg saved_at "$(_knowledge_now)" \
+    '{milestone_id: $milestone_id, body: $body, saved_at: $saved_at}' \
+    >"${tmp}" 2>/dev/null \
+    && mv "${tmp}" "${path}" 2>/dev/null \
+    || { rm -f "${tmp}" 2>/dev/null; log_warn "knowledge_snapshot_spec: write failed for ${path}"; }
+  return 0
+}
+
+# knowledge_latest_prior_summary <target> [exclude_milestone_id]
+# 가장 최근 saved context-summary 1건의 (milestone_id\tpath\tsha256_pin) 를
+# 출력한다. 매치 없으면 빈 출력 + return 1. exclude_milestone_id 가 주어지면
+# 해당 id 의 summary 는 후보에서 제외한다(현재 작업 milestone 자기 참조 회피).
+# revision_pin 은 파일 콘텐츠의 sha256 8자리(결정적). 후속 fetch 시 revalidate
+# 가 비교용으로 사용한다.
+knowledge_latest_prior_summary() {
+  local target="$1" exclude="${2:-}"
+  local root
+  root="$(_knowledge_root "${target}")/context-summaries"
+  [ -d "${root}" ] || return 1
+  local newest=""
+  local f mtime
+  while IFS= read -r f; do
+    [ -f "${f}" ] || continue
+    local base="${f##*/}"
+    local id="${base%.json}"
+    [ -n "${exclude}" ] && [ "${id}" = "${exclude}" ] && continue
+    if [ -z "${newest}" ] || [ "${f}" -nt "${newest}" ]; then
+      newest="${f}"
+    fi
+  done < <(find "${root}" -maxdepth 1 -type f -name '*.json' 2>/dev/null)
+  [ -n "${newest}" ] || return 1
+  local id pin
+  id="$(basename "${newest}" .json)"
+  pin="$(shasum -a 256 "${newest}" 2>/dev/null | awk '{print substr($1,1,8)}')"
+  [ -n "${pin}" ] || pin="local"
+  printf '%s\t%s\t%s\n' "${id}" "${newest}" "summary-${pin}"
 }

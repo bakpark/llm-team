@@ -269,6 +269,100 @@ if agent_output_validate_extended "${po_envelope}" coder 2>/dev/null; then
 fi
 
 # ----------------------------------------------------------------------------
+# (3.x) KAC-TRACEABILITY (P1-6): Planner ac_id_to_task + QA ac_results gate
+# ----------------------------------------------------------------------------
+make_planner_envelope() {
+  local artifacts="$1"
+  jq -nc --arg mid "${manifest_id}" --argjson art "${artifacts}" '
+    {
+      output_kind: "task_plan",
+      agent_role: "Planner",
+      operation: "Decompose",
+      object_id: "M-1",
+      manifest_id: $mid,
+      input_revision_pins: [],
+      idempotency_key: "planner:M-1",
+      summary: "decompose",
+      artifacts: $art
+    }'
+}
+
+# Valid: ac_id_to_task references existing task slugs.
+env_planner_ok="$(make_planner_envelope '{
+  "tasks": [{"slug":"t1","title":"a","body":"x"},{"slug":"t2","title":"b","body":"y"}],
+  "ac_id_to_task": {"AC-1":["t1"], "AC-2":["t1","t2"]}
+}')"
+agent_output_validate_extended "${env_planner_ok}" planner \
+  || fail "Planner with valid ac_id_to_task must pass"
+
+# Missing ac_id_to_task → reject.
+env_planner_no_ac="$(make_planner_envelope '{
+  "tasks": [{"slug":"t1","title":"a","body":"x"}]
+}')"
+if agent_output_validate_extended "${env_planner_no_ac}" planner 2>/dev/null; then
+  fail "Planner without ac_id_to_task must fail (P1-6)"
+fi
+
+# ac_id_to_task references unknown slug → reject.
+env_planner_bad_slug="$(make_planner_envelope '{
+  "tasks": [{"slug":"t1","title":"a","body":"x"}],
+  "ac_id_to_task": {"AC-1":["t1","t-ghost"]}
+}')"
+if agent_output_validate_extended "${env_planner_bad_slug}" planner 2>/dev/null; then
+  fail "Planner with ac_id mapping to unknown task slug must fail (P1-6)"
+fi
+
+# Empty ac_id_to_task → reject.
+env_planner_empty_ac="$(make_planner_envelope '{
+  "tasks": [{"slug":"t1","title":"a","body":"x"}],
+  "ac_id_to_task": {}
+}')"
+if agent_output_validate_extended "${env_planner_empty_ac}" planner 2>/dev/null; then
+  fail "Planner with empty ac_id_to_task must fail (P1-6)"
+fi
+
+make_qa_envelope() {
+  local artifacts="$1"
+  jq -nc --arg mid "${manifest_id}" --argjson art "${artifacts}" '
+    {
+      output_kind: "milestone_package",
+      agent_role: "QA",
+      operation: "Validate",
+      object_id: "M-1",
+      manifest_id: $mid,
+      input_revision_pins: [],
+      idempotency_key: "qa:M-1",
+      summary: "validate",
+      artifacts: $art
+    }'
+}
+
+env_qa_ok="$(make_qa_envelope '{
+  "outcome":"PASS",
+  "ac_results":[{"ac_id":"AC-1","verdict":"PASS","responsible_task_ids":["1","2"]}]
+}')"
+agent_output_validate_extended "${env_qa_ok}" qa \
+  || fail "QA PASS with valid ac_results must pass"
+
+env_qa_no_ac="$(make_qa_envelope '{"outcome":"PASS"}')"
+if agent_output_validate_extended "${env_qa_no_ac}" qa 2>/dev/null; then
+  fail "QA PASS without ac_results must fail (P1-6)"
+fi
+
+env_qa_bad_verdict="$(make_qa_envelope '{
+  "outcome":"PASS",
+  "ac_results":[{"ac_id":"AC-1","verdict":"MAYBE","responsible_task_ids":[]}]
+}')"
+if agent_output_validate_extended "${env_qa_bad_verdict}" qa 2>/dev/null; then
+  fail "QA ac_results.verdict not in {PASS,FAIL} must fail (P1-6)"
+fi
+
+# QA with non-terminal outcome (NO-OP / STALE) is allowed without ac_results.
+env_qa_noop="$(make_qa_envelope '{"outcome":"NO-OP"}')"
+agent_output_validate_extended "${env_qa_noop}" qa \
+  || fail "QA NO-OP without ac_results must still pass (gate is verdict-scoped)"
+
+# ----------------------------------------------------------------------------
 # (4) revision_pin_revalidate (uses in_memory issue_tracker)
 # ----------------------------------------------------------------------------
 repo="acme/widgets"
