@@ -147,6 +147,12 @@ if [ -n "${RO_PATH}" ] && [ -d "${RO_PATH}" ]; then
         /*) fail "repo symlink is absolute (${LINK_TARGET}), expected relative" ;;
         *) pass "repo symlink is relative: ${LINK_TARGET}" ;;
       esac
+      RESOLVED="$(cd "${AGENT_CWD}" && realpath repo 2>/dev/null || true)"
+      if [ -z "${RESOLVED}" ] || [ ! -d "${RESOLVED}" ]; then
+        fail "repo symlink does not resolve to a directory (target=${LINK_TARGET})"
+      else
+        pass "repo symlink resolves"
+      fi
     else
       # RO tree 가 설정되었지만 symlink 생성이 실패한 경우 warn 만 남김
       echo "WARN: repo symlink not found at ${AGENT_CWD}/repo"

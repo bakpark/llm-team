@@ -9,6 +9,7 @@
 #   2. 누락 보충 (workdir scaffold, inputs seed, ack 추가) 후 exit 0 가능.
 #   3. severity=warn 항목의 FAIL 은 WARN 으로 down-grade 되어 block 카운터에서 제외.
 #   4. auto_or_ack 항목은 ack 만으로도 PASS.
+#   5. ci_workflow_loop_guard 는 위험 workflow trigger 에 ack 를 요구한다.
 
 set -o pipefail
 
@@ -235,6 +236,11 @@ s="$(status_of "inputs_dir_seeded")"
 [ "${s}" = "PASS" ] || fail "case 2: inputs_dir_seeded expected PASS after seed, got '${s}'"
 
 pass "case 2: scaffold+ack 후 rc=0"
+
+# ci_workflow_loop_guard 는 workflow 디렉토리가 없으면 universal auto PASS.
+s="$(status_of "ci_workflow_loop_guard")"
+[ "${s}" = "PASS" ] || fail "case 2: ci_workflow_loop_guard expected PASS with no workflows, got '${s}'"
+
 # ---------------------------------------------------------------------------
 # (3) gh stub 변경 — token 스코프 부족 시 FAIL.
 # ---------------------------------------------------------------------------
@@ -261,14 +267,14 @@ pass "case 4: auto_or_ack — auto PASS 만으로 충분"
 GH_BRANCH_HAS=0
 run_verify out rc
 s="$(status_of "integration_branch_present")"
-[ "${s}" = "FAIL" ] || fail "case 5b: integration_branch_present expected FAIL when neither auto nor ack, got '${s}'"
-[ "${rc}" = "2" ] || fail "case 5b: expected rc=2, got rc=${rc}"
-pass "case 5b: auto FAIL + ack 없음 → FAIL"
+[ "${s}" = "FAIL" ] || fail "case 5: integration_branch_present expected FAIL when neither auto nor ack, got '${s}'"
+[ "${rc}" = "2" ] || fail "case 5: expected rc=2, got rc=${rc}"
+pass "case 5: auto FAIL + ack 없음 → FAIL"
 
 # ---------------------------------------------------------------------------
-# (5) inputs_dir_seeded: .gitkeep / 빈 파일만으로는 PASS 가 아니어야 함.
+# (6) inputs_dir_seeded: .gitkeep / 빈 파일만으로는 PASS 가 아니어야 함.
 # ---------------------------------------------------------------------------
-# auto/ack 회복 (case 5b 잔존 상태 정리).
+# auto/ack 회복 (case 5 잔존 상태 정리).
 GH_BRANCH_HAS=1
 yq -i '.onboarding.acks.use_default_branch_as_integration = {"value": true}' "${TARGET_YAML}"
 
@@ -281,16 +287,75 @@ mkdir -p "${SANDBOX}/inputs/${TARGET}"
 run_verify out rc
 s="$(status_of "inputs_dir_seeded")"
 [ "${s}" = "WARN" ] \
-  || fail "case 5a: inputs_dir_seeded expected WARN with only placeholders, got '${s}'"
-pass "case 5a: .gitkeep + 빈 파일만 있으면 WARN (placeholder 무시)"
+  || fail "case 6a: inputs_dir_seeded expected WARN with only placeholders, got '${s}'"
+pass "case 6a: .gitkeep + 빈 파일만 있으면 WARN (placeholder 무시)"
 
 # 실 콘텐츠 파일 추가 시 PASS 회복.
 echo "real content" >"${SANDBOX}/inputs/${TARGET}/auth.md"
 run_verify out rc
 s="$(status_of "inputs_dir_seeded")"
 [ "${s}" = "PASS" ] \
-  || fail "case 5b: inputs_dir_seeded expected PASS after content file, got '${s}'"
-pass "case 5b: 콘텐츠 파일 추가 후 PASS 회복"
+  || fail "case 6b: inputs_dir_seeded expected PASS after content file, got '${s}'"
+pass "case 6b: 콘텐츠 파일 추가 후 PASS 회복"
+
+# ---------------------------------------------------------------------------
+# (7) ci_workflow_loop_guard: 안전한 트리거만 있으면 자동 PASS,
+#     pull_request_target 가 있으면 ack 요구.
+# ---------------------------------------------------------------------------
+mkdir -p "${WD}/repo/.github/workflows"
+cat >"${WD}/repo/.github/workflows/ci.yml" <<'YAML'
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+YAML
+
+run_verify out rc
+s="$(status_of "ci_workflow_loop_guard")"
+[ "${s}" = "PASS" ] \
+  || fail "case 7a: ci_workflow_loop_guard expected PASS with safe triggers, got '${s}'"
+pass "case 7a: 안전한 트리거(push/pull_request) → 자동 PASS"
+
+cat >"${WD}/repo/.github/workflows/danger.yml" <<'YAML'
+name: danger
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  echo:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo unsafe
+YAML
+
+run_verify out rc
+s="$(status_of "ci_workflow_loop_guard")"
+[ "${s}" = "FAIL" ] \
+  || fail "case 7b: ci_workflow_loop_guard expected FAIL with pull_request_target, got '${s}'"
+pass "case 7b: pull_request_target 발견 시 ack 요구"
+
+yq -i '.onboarding.acks.ci_workflow_loop_guard_decided = {"value": true}' "${TARGET_YAML}"
+run_verify out rc
+s="$(status_of "ci_workflow_loop_guard")"
+[ "${s}" = "PASS" ] \
+  || fail "case 7c: ci_workflow_loop_guard expected PASS via ack, got '${s}'"
+pass "case 7c: ack 후 PASS 회복"
+
+rm -f "${WD}/repo/.github/workflows/danger.yml"
+yq -i 'del(.onboarding.acks.ci_workflow_loop_guard_decided)' "${TARGET_YAML}"
+run_verify out rc
+s="$(status_of "ci_workflow_loop_guard")"
+[ "${s}" = "PASS" ] \
+  || fail "case 7d: ci_workflow_loop_guard expected PASS after removing risky workflow, got '${s}'"
+pass "case 7d: 위험 트리거 제거 시 ack 없이도 PASS"
+
 # ---------------------------------------------------------------------------
 if [ "${failures}" -gt 0 ]; then
   echo "FAILURES: ${failures}" >&2

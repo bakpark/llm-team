@@ -106,7 +106,8 @@ cat >"${TEST_FAKE_FIX_DIR}/po-Compose-PO.json" <<EOF
   "object_id": "${ms}",
   "manifest_id": "__MANIFEST_ID__",
   "input_revision_pins": [
-    { "object_kind": "milestone", "object_id": "${ms}", "revision_pin": "${pin}" }
+    { "object_kind": "milestone", "object_id": "${ms}", "revision_pin": "${pin}" },
+    { "object_kind": "code_tree", "object_id": "${REPO}", "revision_pin": "__PIN_${REPO}__" }
   ],
   "idempotency_key": "po-cwd-${ms}",
   "summary": "PO compose result",

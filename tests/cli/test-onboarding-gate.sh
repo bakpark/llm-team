@@ -173,7 +173,21 @@ cat >"${SANDBOX}/stub-bin/gh" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in
   auth) [ "$2" = "status" ] && { printf "scopes: 'repo'\n"; exit 0; }; exit 0 ;;
-  api) exit 0 ;;
+  api)
+    shift
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --paginate|--silent) shift ;;
+        --jq|-X|-H|-f|-F) shift 2 ;;
+        *) break ;;
+      esac
+    done
+    case "${1:-}" in
+      repos/*/labels)
+        printf 'task:ready\ncp:ready-for-review\nhuman-gate:po\npaused\nfeature-request\n'
+        exit 0 ;;
+    esac
+    exit 0 ;;
   label)
     name=""; for ((i=1;i<=$#;i++)); do
       if [ "${!i}" = "--search" ]; then j=$((i+1)); name="${!j}"; break; fi

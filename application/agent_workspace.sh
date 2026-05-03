@@ -76,24 +76,16 @@ MARKER
           log_error "agent_workspace_for: RO tree missing: ${ro_tree}"
           return 1
         fi
-        # 상대경로 계산: path(agent-cwd/<role>) 에서 ro_tree(workdir/<target>/repo-ro) 로.
-        # macOS realpath 는 --relative-to 미지원이므로 python3/os.path.relpath 사용.
         local rel_target
-        if command -v python3 >/dev/null 2>&1; then
-          rel_target="$(python3 -c "import os.path; print(os.path.relpath('${ro_tree}', '$(dirname "${path}")'))" 2>/dev/null)" ||             rel_target="${ro_tree}"
-        elif command -v perl >/dev/null 2>&1; then
-          rel_target="$(perl -MFile::Spec -e "print File::Spec->rel2dir('${ro_tree}', '$(dirname "${path}")')" 2>/dev/null)" ||             rel_target="${ro_tree}"
+        if [ -z "${TARGET_RO_TREE_PATH:-}" ]; then
+          # path = workdir/<target>/agent-cwd/<role>, ro_tree = workdir/<target>/repo-ro.
+          # ln -s resolves relative targets from the symlink directory (${path}).
+          rel_target="../../repo-ro"
+        elif command -v python3 >/dev/null 2>&1; then
+          rel_target="$(python3 -c 'import os.path, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' \
+            "${ro_tree}" "${path}" 2>/dev/null)" || rel_target="${ro_tree}"
         else
-          # fallback: path 와 ro_tree 가 같은 workdir/<target> 하위라면 ../repo-ro 사용.
-          local agent_cwd_dir
-          agent_cwd_dir="$(dirname "${path}")"
-          local expected_parent
-          expected_parent="${LLM_TEAM_ROOT}/workdir/${TARGET_NAME}"
-          if [ "$(dirname "${agent_cwd_dir}")" = "${expected_parent}" ]; then
-            rel_target="../repo-ro"
-          else
-            rel_target="${ro_tree}"  # custom path 이면 절대경로 허용
-          fi
+          rel_target="${ro_tree}"
         fi
         if [ -L "${path}/repo" ]; then
           local current

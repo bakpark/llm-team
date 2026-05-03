@@ -47,6 +47,7 @@ fenced block 이 두 개 이상이면 invalid 로 거부된다.
 - `object_id`: 대상 milestone (또는 feature-request) id
 - `manifest_id`: 입력 Context Manifest id
 - `input_revision_pins`: `[{"object_kind": "...", "object_id": "...", "revision_pin": "..."}, ...]`
+  - manifest 의 `required: true` entry 는 모두 같은 `object_kind`, `object_id`, `revision_pin` 으로 그대로 echo 한다. `code_tree` entry 가 있으면 반드시 포함한다.
 - `idempotency_key`: 입력 revision 기준 안정 키
 - `summary`: 한 줄 요약
 - `artifacts`: 역할별 자유 영역 (아래 권장 키 참조)
@@ -75,7 +76,8 @@ artifacts 권장 키 (po):
   "object_id": "milestone:42",
   "manifest_id": "manifest:po:42:r1",
   "input_revision_pins": [
-    {"object_kind": "issue", "object_id": "42", "revision_pin": "rev-..."}
+    {"object_kind": "issue", "object_id": "42", "revision_pin": "rev-..."},
+    {"object_kind": "code_tree", "object_id": "owner/repo", "revision_pin": "sha-..."}
   ],
   "idempotency_key": "po:42:r1",
   "summary": "Compose PO spec for milestone 42",

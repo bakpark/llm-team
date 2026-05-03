@@ -35,6 +35,8 @@ trap cleanup EXIT
 
 # shellcheck source=../../lib/common.sh
 . "${LLM_TEAM_ROOT}/lib/common.sh"
+# shellcheck source=../../application/agent_workspace.sh
+. "${LLM_TEAM_ROOT}/application/agent_workspace.sh"
 
 # Force git_worktree adapter (default), but rebind explicitly to be safe.
 adapter_load workspace git_worktree >/dev/null 2>&1 || true
@@ -450,6 +452,12 @@ UNIT_LOCKED="task-locked"
 if ws_ensure "${UNIT_LOCKED}" >/dev/null 2>&1; then
   fail "G2 regression: ws_ensure proceeded despite fetchlock being held"
 fi
+if ! rmdir "${LOCK_HOLD}" 2>/dev/null; then
+  rm -rf "${LOCK_HOLD}" 2>/dev/null || true
+fi
+if [ -d "${LOCK_HOLD}" ]; then
+  fail "fixture: could not release held lock before RO-tree tests"
+fi
 
 # ----------------------------------------------------------------------------
 # Test 12: ws_ensure_ro_tree — RO tree 생성 및 idempotence
@@ -460,10 +468,9 @@ RO_PATH="$(ws_ensure_ro_tree "${TEST_TARGET}" 2>/dev/null)" || \
 if [ ! -d "${RO_PATH}" ]; then
   fail "R1: RO tree directory not found at ${RO_PATH}"
 fi
-# detached HEAD 확인
-DETACHED="$(cd "${RO_PATH}" && git symbolic-ref --short HEAD 2>&1 || true)"
-if [ "${DETACHED}" != "HEAD" ] && ! printf '%s' "${DETACHED}" | grep -q 'detached'; then
-  fail "R1: RO tree is not detached (got: ${DETACHED})"
+# detached HEAD 확인: symbolic-ref succeeds only on a branch.
+if DETACHED_BRANCH="$(cd "${RO_PATH}" && git symbolic-ref --quiet --short HEAD 2>/dev/null)"; then
+  fail "R1: RO tree is not detached (branch=${DETACHED_BRANCH})"
 fi
 
 # idempotence: 두 번째 호출 시 동일한 경로 반환, SHA 불변
@@ -514,10 +521,6 @@ RESOLVED="$(cd "${AGENT_PATH}" && realpath repo 2>/dev/null)"
 if [ ! -d "${RESOLVED}" ]; then
   fail "S1: repo symlink does not resolve to a directory"
 fi
-
-# ----------------------------------------------------------------------------
-# Released the lock.
-rmdir "${LOCK_HOLD}" 2>/dev/null || rm -rf "${LOCK_HOLD}" 2>/dev/null
 
 # ----------------------------------------------------------------------------
 # Done

@@ -501,7 +501,17 @@ revision_pin_revalidate() {
     # refreshed mid-cycle and agent output may not be grounded in the
     # snapshot it actually saw.
     if [ "${kind}" = "code_tree" ]; then
-      if ! actual="$(ws_ro_tree_revision_pin "${repo}" 2>/dev/null)"; then
+      if [ "${id}" != "${repo}" ]; then
+        log_error "revision_pin_revalidate: code_tree object_id '${id}' does not match repo '${repo}'"
+        stale=1
+        continue
+      fi
+      if [ -z "${TARGET_NAME:-}" ]; then
+        log_error "revision_pin_revalidate: TARGET_NAME required for code_tree pin lookup"
+        stale=1
+        continue
+      fi
+      if ! actual="$(ws_ro_tree_revision_pin "${TARGET_NAME}" 2>/dev/null)"; then
         log_error "revision_pin_revalidate: code_tree ${id} RO tree pin lookup failed"
         stale=1
         continue

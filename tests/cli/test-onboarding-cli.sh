@@ -176,10 +176,12 @@ json="$("${CLI}" onboarding status "${TARGET}" --json 2>&1)"
 set -e
 echo "${json}" | jq -e '.exit_code == 2' >/dev/null \
   || fail "status --json: exit_code != 2"
-echo "${json}" | jq -e '.items | length >= 16' >/dev/null \
-  || fail "status --json: items length < 16"
+echo "${json}" | jq -e '.items | length >= 15' >/dev/null \
+  || fail "status --json: items length < 15"
 echo "${json}" | jq -e '.items[] | select(.id == "branch_protection_policy_decided")' >/dev/null \
   || fail "status --json: missing branch_protection_policy_decided item"
+echo "${json}" | jq -e '.items[] | select(.id == "ci_workflow_loop_guard")' >/dev/null \
+  || fail "status --json: missing ci_workflow_loop_guard item"
 pass "status --json"
 
 # ---------------------------------------------------------------------------
@@ -196,6 +198,8 @@ pass "status --quiet"
 # ---------------------------------------------------------------------------
 # (7) target add 에 onboarding 섹션이 자동 생성되는지.
 # ---------------------------------------------------------------------------
+"${CLI}" target add cli-onb-add --repo example/cli-onb-add --disabled --force >/dev/null \
+  || fail "target add failed"
 # P1-8: target add now writes the contract-named field `onboarding.preset`
 # (legacy `onboarding.schema` was renamed to match TCC-ONBOARDING).
 [ "$(yq -r '.onboarding.preset' "${SANDBOX}/targets/cli-onb-add.yaml")" = "github-pipeline/v1" ] \

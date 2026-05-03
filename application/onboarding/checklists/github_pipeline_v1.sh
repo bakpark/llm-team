@@ -35,6 +35,7 @@ branch_protection_policy_decided	ack	block	-	branch_protection_policy_decided	pu
 notifier_channel_decided	auto_or_ack	block	_check_notifier_channel	intentionally_silent	notifier.channel set or silent ack
 inputs_dir_seeded	auto_or_ack	warn	_check_inputs_dir_seeded	use_github_issues_only	inputs/<target>/ has at least one file or ack
 dev_concurrency_reviewed	ack	warn	-	dev_concurrency_reviewed	dev_concurrency value reviewed
+ci_workflow_loop_guard	auto_or_ack	block	_check_ci_workflow_loop_guard	ci_workflow_loop_guard_decided	CI workflow loop guard
 EOF
 }
 
@@ -85,6 +86,10 @@ preset_remediation() {
       ;;
     dev_concurrency_reviewed)
       printf 'llm-team onboarding ack %s dev_concurrency_reviewed' "${TARGET_NAME}"
+      ;;
+    ci_workflow_loop_guard)
+      printf '.github/workflows/ trigger 정책 결정 후 llm-team onboarding ack %s ci_workflow_loop_guard_decided' \
+        "${TARGET_NAME}"
       ;;
   esac
 }
@@ -272,4 +277,25 @@ _check_inputs_dir_seeded() {
   fi
   printf '%s contains only placeholders/empty files' "${dir}"
   return 1
+}
+
+_check_ci_workflow_loop_guard() {
+  local clone="${TARGET_CLONE_PATH}"
+  [ -n "${clone}" ] || clone="${LLM_TEAM_ROOT}/workdir/${TARGET_NAME}/repo"
+  local wf="${clone}/.github/workflows"
+  if [ ! -d "${wf}" ]; then
+    printf 'no .github/workflows present'
+    return 0
+  fi
+  if [ -z "$(ls -A "${wf}" 2>/dev/null || true)" ]; then
+    printf '.github/workflows is empty'
+    return 0
+  fi
+  if grep -REq '^[[:space:]]*(pull_request_target|workflow_run|repository_dispatch)[[:space:]]*:' \
+       "${wf}" 2>/dev/null; then
+    printf 'workflows contain risky triggers; loop guard ack required'
+    return 1
+  fi
+  printf 'workflows have only safe triggers'
+  return 0
 }
