@@ -14,7 +14,14 @@
 #   TARGET_NAME, TARGET_GH_OWNER, TARGET_GH_REPO, TARGET_DEFAULT_BRANCH,
 #   TARGET_CLONE_PATH, TARGET_INPUTS_DIR, TARGET_LABEL_PREFIX,
 #   TARGET_NOTIFIER_CHANNEL, TARGET_NOTIFIER_REF,
-#   TARGET_DEV_CONCURRENCY, TARGET_STALE_THRESHOLD_MIN, TARGET_ENABLED.
+#   TARGET_DEV_CONCURRENCY, TARGET_STALE_THRESHOLD_MIN, TARGET_ENABLED,
+#   TARGET_VERIFICATION_COMMANDS_JSON,
+#   # TCC-IDENTITY (P1-10):
+#   TARGET_ID, TARGET_PERSISTENT_STORE_REF,
+#   # TCC-LEASE-CONFIG (P1-9):
+#   TARGET_LEASE_TTL_DEFAULT, TARGET_LEASE_TTL_BY_ROLE_JSON,
+#   # TCC-AGENT-RUNNER-MAP (P1-9):
+#   TARGET_AGENT_RUNNER_DEFAULT, TARGET_AGENT_RUNNER_BY_ROLE_JSON.
 load_target() {
   local name="$1"
   if [ -z "${name}" ]; then
@@ -59,10 +66,90 @@ load_target() {
   TARGET_VERIFICATION_COMMANDS_JSON="$(yq -o=json '.verification.commands // ["true"]' "${yaml_file}" \
                                           | jq -c '.')"
 
+  # TCC-IDENTITY (P1-10): target_id 는 시스템 식별자(라벨/큐/ledger 분기 기준).
+  # persistent_store_ref 는 영속 저장소 바인딩(github 어댑터에서는 owner/repo).
+  # 둘 다 누락 시 기존 (name, owner/repo) 로 폴백 — 마이그레이션 grace.
+  TARGET_ID="$(yq -r '.target_id // ""' "${yaml_file}")"
+  [ -n "${TARGET_ID}" ] || TARGET_ID="${TARGET_NAME}"
+  TARGET_PERSISTENT_STORE_REF="$(yq -r '.persistent_store_ref // ""' "${yaml_file}")"
+  if [ -z "${TARGET_PERSISTENT_STORE_REF}" ]; then
+    if [ -n "${TARGET_GH_OWNER}" ] && [ -n "${TARGET_GH_REPO}" ]; then
+      TARGET_PERSISTENT_STORE_REF="${TARGET_GH_OWNER}/${TARGET_GH_REPO}"
+    fi
+  fi
+
+  # TCC-LEASE-CONFIG (P1-9): ttl_default 단위는 초. Invalid (≤0) 인 경우 시스템
+  # 기본 3600 으로 폴백한다 (TCC-PRECEDENCE 단계 3).
+  TARGET_LEASE_TTL_DEFAULT="$(yq -r '.lease.ttl_default // 0' "${yaml_file}")"
+  if ! [ "${TARGET_LEASE_TTL_DEFAULT}" -gt 0 ] 2>/dev/null; then
+    TARGET_LEASE_TTL_DEFAULT=3600
+  fi
+  TARGET_LEASE_TTL_BY_ROLE_JSON="$(yq -o=json '.lease.ttl_by_role // {}' "${yaml_file}" \
+                                       | jq -c '.')"
+
+  # TCC-AGENT-RUNNER-MAP (P1-9): default + by_role. default 미지정 시 환경변수
+  # LLM_TEAM_ADAPTER_LLM_RUNNER 기본값으로 폴백, 그것도 없으면 claude_code.
+  TARGET_AGENT_RUNNER_DEFAULT="$(yq -r '.agent_runner.default // ""' "${yaml_file}")"
+  [ -n "${TARGET_AGENT_RUNNER_DEFAULT}" ] \
+    || TARGET_AGENT_RUNNER_DEFAULT="${LLM_TEAM_ADAPTER_LLM_RUNNER:-claude_code}"
+  TARGET_AGENT_RUNNER_BY_ROLE_JSON="$(yq -o=json '.agent_runner.by_role // {}' "${yaml_file}" \
+                                          | jq -c '.')"
+
   export TARGET_NAME TARGET_GH_OWNER TARGET_GH_REPO TARGET_DEFAULT_BRANCH \
     TARGET_CLONE_PATH TARGET_INPUTS_DIR TARGET_LABEL_PREFIX \
     TARGET_NOTIFIER_CHANNEL TARGET_NOTIFIER_REF TARGET_DEV_CONCURRENCY \
-    TARGET_STALE_THRESHOLD_MIN TARGET_ENABLED TARGET_VERIFICATION_COMMANDS_JSON
+    TARGET_STALE_THRESHOLD_MIN TARGET_ENABLED TARGET_VERIFICATION_COMMANDS_JSON \
+    TARGET_ID TARGET_PERSISTENT_STORE_REF \
+    TARGET_LEASE_TTL_DEFAULT TARGET_LEASE_TTL_BY_ROLE_JSON \
+    TARGET_AGENT_RUNNER_DEFAULT TARGET_AGENT_RUNNER_BY_ROLE_JSON
+}
+
+# config_lease_ttl_for_role <role> [target_lease_ttl_by_role_json]
+# Returns the TTL (seconds) for `role`. Resolution order (TCC-PRECEDENCE):
+#   1. explicit env override LLM_TEAM_LEASE_TTL (if set, used directly)
+#   2. .lease.ttl_by_role[<role>] from target.yaml (case-insensitive role lookup)
+#   3. .lease.ttl_default
+# Caller must have load_target'd the target so TARGET_LEASE_* are populated, OR
+# pass the by_role JSON explicitly as $2.
+config_lease_ttl_for_role() {
+  local role="${1:-}" by_role="${2:-${TARGET_LEASE_TTL_BY_ROLE_JSON:-{\}}}"
+  if [ -n "${LLM_TEAM_LEASE_TTL:-}" ]; then
+    printf '%s' "${LLM_TEAM_LEASE_TTL}"
+    return 0
+  fi
+  local ttl=""
+  if [ -n "${role}" ] && [ -n "${by_role}" ]; then
+    # Try the role as given, then lower-case fallback.
+    ttl="$(printf '%s' "${by_role}" | jq -r --arg k "${role}" '.[$k] // empty' 2>/dev/null)"
+    if [ -z "${ttl}" ]; then
+      local lower
+      lower="$(printf '%s' "${role}" | tr '[:upper:]' '[:lower:]')"
+      ttl="$(printf '%s' "${by_role}" | jq -r --arg k "${lower}" '.[$k] // empty' 2>/dev/null)"
+    fi
+  fi
+  if [ -n "${ttl}" ] && [ "${ttl}" -gt 0 ] 2>/dev/null; then
+    printf '%s' "${ttl}"
+  else
+    printf '%s' "${TARGET_LEASE_TTL_DEFAULT:-3600}"
+  fi
+}
+
+# config_agent_runner_for_role <role> [target_by_role_json] [default]
+# Returns the agent_runner adapter id for `role` per TCC-AGENT-RUNNER-MAP.
+config_agent_runner_for_role() {
+  local role="${1:-}"
+  local by_role="${2:-${TARGET_AGENT_RUNNER_BY_ROLE_JSON:-{\}}}"
+  local default="${3:-${TARGET_AGENT_RUNNER_DEFAULT:-claude_code}}"
+  local adapter=""
+  if [ -n "${role}" ] && [ -n "${by_role}" ]; then
+    adapter="$(printf '%s' "${by_role}" | jq -r --arg k "${role}" '.[$k] // empty' 2>/dev/null)"
+    if [ -z "${adapter}" ]; then
+      local lower
+      lower="$(printf '%s' "${role}" | tr '[:upper:]' '[:lower:]')"
+      adapter="$(printf '%s' "${by_role}" | jq -r --arg k "${lower}" '.[$k] // empty' 2>/dev/null)"
+    fi
+  fi
+  printf '%s' "${adapter:-${default}}"
 }
 
 # resolve_secret <ref>

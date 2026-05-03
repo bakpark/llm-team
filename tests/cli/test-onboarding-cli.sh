@@ -199,12 +199,27 @@ pass "status --quiet"
 # ---------------------------------------------------------------------------
 "${CLI}" target add cli-onb-add --repo example/cli-onb-add --self-hosting --disabled --force >/dev/null \
   || fail "target add --self-hosting failed"
-[ "$(yq -r '.onboarding.schema' "${SANDBOX}/targets/cli-onb-add.yaml")" = "github-pipeline/v1" ] \
-  || fail "target add: onboarding.schema not set"
+# P1-8: target add now writes the contract-named field `onboarding.preset`
+# (legacy `onboarding.schema` was renamed to match TCC-ONBOARDING).
+[ "$(yq -r '.onboarding.preset' "${SANDBOX}/targets/cli-onb-add.yaml")" = "github-pipeline/v1" ] \
+  || fail "target add: onboarding.preset not set"
 [ "$(yq -r '.onboarding.self_hosting' "${SANDBOX}/targets/cli-onb-add.yaml")" = "true" ] \
   || fail "target add --self-hosting: self_hosting != true"
 [ "$(yq -r '.onboarding.acks | length' "${SANDBOX}/targets/cli-onb-add.yaml")" = "0" ] \
   || fail "target add: onboarding.acks should be empty map"
+# P2-5: skip_flags 배열 자리잡음.
+[ "$(yq -r '.onboarding.skip_flags | length' "${SANDBOX}/targets/cli-onb-add.yaml")" = "0" ] \
+  || fail "target add: onboarding.skip_flags should default to empty array"
+# P1-9: lease + agent_runner 섹션 생성.
+[ "$(yq -r '.lease.ttl_default' "${SANDBOX}/targets/cli-onb-add.yaml")" = "3600" ] \
+  || fail "target add: lease.ttl_default not set"
+[ "$(yq -r '.agent_runner.default' "${SANDBOX}/targets/cli-onb-add.yaml")" = "claude_code" ] \
+  || fail "target add: agent_runner.default not set"
+# P1-10: target_id + persistent_store_ref.
+[ "$(yq -r '.target_id' "${SANDBOX}/targets/cli-onb-add.yaml")" = "cli-onb-add" ] \
+  || fail "target add: target_id not set"
+[ "$(yq -r '.persistent_store_ref' "${SANDBOX}/targets/cli-onb-add.yaml")" = "example/cli-onb-add" ] \
+  || fail "target add: persistent_store_ref not set"
 pass "target add: onboarding section auto-generated"
 
 # (8) wizard non-TTY 거부.

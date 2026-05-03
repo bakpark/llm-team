@@ -130,8 +130,8 @@ if [ -n "${target}" ]; then
   # Onboarding 체크리스트(soft): block FAIL 은 fail, severity=warn FAIL 은 warn
   # 카운터로 합산. doctor 의 기존 메시지는 그대로 두고 onboarding 결과를 추가
   # 한 줄씩 보여 준다.
-  printf '\n[onboarding] schema=%s\n' \
-    "$(yq -r '.onboarding.schema // "github-pipeline/v1"' "$(cli_target_file "${target}")")"
+  printf '\n[onboarding] preset=%s\n' \
+    "$(yq -r '.onboarding.preset // .onboarding.schema // "github-pipeline/v1"' "$(cli_target_file "${target}")")"
   cli_source_runtime
   # shellcheck source=../../application/onboarding/verify.sh
   . "${LLM_TEAM_ROOT}/application/onboarding/verify.sh"

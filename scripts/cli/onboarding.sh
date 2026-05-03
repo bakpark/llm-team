@@ -72,7 +72,7 @@ onboarding_status_run() {
 _onb_print_table() {
   local target="$1" body="$2"
   local schema sh
-  schema="$(yq -r '.onboarding.schema // "github-pipeline/v1"' \
+  schema="$(yq -r '.onboarding.preset // .onboarding.schema // "github-pipeline/v1"' \
     "$(cli_target_file "${target}")")"
   sh="$(yq -r '.onboarding.self_hosting // false' \
     "$(cli_target_file "${target}")")"
@@ -105,7 +105,7 @@ _onb_print_table() {
 _onb_to_json() {
   local target="$1" body="$2" rc="$3"
   local schema sh
-  schema="$(yq -r '.onboarding.schema // "github-pipeline/v1"' \
+  schema="$(yq -r '.onboarding.preset // .onboarding.schema // "github-pipeline/v1"' \
     "$(cli_target_file "${target}")")"
   sh="$(yq -r '.onboarding.self_hosting // false' \
     "$(cli_target_file "${target}")")"
@@ -171,7 +171,7 @@ onboarding_ack_run() {
   # ack 키가 preset 에 등록된 것인지 가벼운 검증 (warn-only).
   _onb_load_engine
   local schema
-  schema="$(yq -r '.onboarding.schema // "github-pipeline/v1"' "${file}")"
+  schema="$(yq -r '.onboarding.preset // .onboarding.schema // "github-pipeline/v1"' "${file}")"
   if onboarding_preset_load "${schema}" 2>/dev/null; then
     if ! preset_items | awk -F'\t' -v k="${ack_key}" '$6==k {found=1} END{exit !found}' \
         ; then
@@ -223,7 +223,7 @@ onboarding_wizard_run() {
   printf 'Onboarding wizard for target=%s\n\n' "${target}"
 
   local schema
-  schema="$(yq -r '.onboarding.schema // "github-pipeline/v1"' "${file}")"
+  schema="$(yq -r '.onboarding.preset // .onboarding.schema // "github-pipeline/v1"' "${file}")"
   onboarding_preset_load "${schema}" || cli_die "failed to load preset ${schema}"
 
   # preset items 의 kind/ack_key 를 lookup 테이블로.

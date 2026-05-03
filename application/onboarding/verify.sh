@@ -81,12 +81,34 @@ _onboarding_self_hosting() {
   [ "${val}" = "true" ]
 }
 
-# target.yaml 의 onboarding.schema (기본값 github-pipeline/v1).
-_onboarding_schema_id() {
+# target.yaml 의 onboarding.preset (TCC-ONBOARDING) — 기본값 github-pipeline/v1.
+# Backward-compat: legacy `.onboarding.schema` 를 fallback 으로 받는다.
+_onboarding_preset_id() {
   local yaml="$1" val
-  val="$(yq -r '.onboarding.schema // ""' "${yaml}" 2>/dev/null)"
+  val="$(yq -r '.onboarding.preset // .onboarding.schema // ""' "${yaml}" 2>/dev/null)"
   [ -n "${val}" ] || val="github-pipeline/v1"
   printf '%s' "${val}"
+}
+
+# target.yaml 의 onboarding.skip_flags 배열 (TCC-ONBOARDING / P2-5). 한 줄 1
+# 항목으로 출력. 빈 배열/누락 시 무출력.
+_onboarding_skip_flags() {
+  local yaml="$1"
+  yq -r '.onboarding.skip_flags // [] | .[]' "${yaml}" 2>/dev/null \
+    | grep -v '^null$' \
+    || true
+}
+
+# Internal: 주어진 preset item id 가 target 의 skip_flags 안에 있는지.
+_onboarding_id_in_skip_flags() {
+  local yaml="$1" id="$2" flag
+  while IFS= read -r flag; do
+    [ -n "${flag}" ] || continue
+    if [ "${flag}" = "${id}" ]; then
+      return 0
+    fi
+  done < <(_onboarding_skip_flags "${yaml}")
+  return 1
 }
 
 # 한 줄 TSV emit. 메시지/remediation 의 탭/개행은 공백으로 평탄화.
@@ -122,9 +144,9 @@ onboarding_verify() {
   load_target "${target}" >/dev/null 2>&1 \
     || { printf 'onboarding_verify: load_target %s failed\n' "${target}" >&2; return 1; }
 
-  local schema
-  schema="$(_onboarding_schema_id "${yaml}")"
-  onboarding_preset_load "${schema}" || return 1
+  local preset
+  preset="$(_onboarding_preset_id "${yaml}")"
+  onboarding_preset_load "${preset}" || return 1
 
   local self_hosting=0
   _onboarding_self_hosting "${yaml}" && self_hosting=1
@@ -140,6 +162,14 @@ onboarding_verify() {
     if [ "${sh_only}" = "1" ] && [ "${self_hosting}" -ne 1 ]; then
       _onboarding_emit "SKIP" "${id}" "${severity}" \
         "self_hosting=false (skipped)" ""
+      continue
+    fi
+
+    # TCC-ONBOARDING.skip_flags (P2-5): 명시적으로 합의된 항목만 점검을 건너뛴다.
+    # SKIP 으로 emit 하되 message 에 사유를 남긴다.
+    if _onboarding_id_in_skip_flags "${yaml}" "${id}"; then
+      _onboarding_emit "SKIP" "${id}" "${severity}" \
+        "skip_flags=true (operator-acknowledged)" ""
       continue
     fi
 

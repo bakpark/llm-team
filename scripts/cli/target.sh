@@ -226,8 +226,17 @@ target_add() {
   fi
 
   mkdir -p "${LLM_TEAM_ROOT}/targets" "${LLM_TEAM_ROOT}/inputs/${name}"
+  # TCC-IDENTITY (P1-10): target_id 는 시스템 식별자, persistent_store_ref 는
+  # 영속 저장소 바인딩, label_prefix 는 라벨 격리. github 어댑터 환경에서
+  # persistent_store_ref 의 형태는 owner/repo.
+  # TCC-LEASE-CONFIG (P1-9): ttl_default 단위는 초.
+  # TCC-AGENT-RUNNER-MAP (P1-9): 기본은 환경에 따라 claude_code, by_role 누락 시 default.
+  # TCC-ONBOARDING (P1-8/P2-5): preset = TCC-ONBOARDING.preset, skip_flags 는
+  # 명시 합의된 항목만.
   cat >"${file}" <<EOF
 name: ${name}
+target_id: ${name}
+persistent_store_ref: ${owner}/${repo_name}
 github:
   owner: ${owner}
   repo: ${repo_name}
@@ -242,10 +251,17 @@ notifier:
   webhook_or_id: ${webhook_ref}
 dev_concurrency: 3
 stale_threshold_minutes: 60
+lease:
+  ttl_default: 3600
+  ttl_by_role: {}
+agent_runner:
+  default: claude_code
+  by_role: {}
 enabled: ${enabled}
 onboarding:
-  schema: github-pipeline/v1
+  preset: github-pipeline/v1
   self_hosting: ${self_hosting}
+  skip_flags: []
   acks: {}
 EOF
   printf 'Created target %s at %s\n' "${name}" "${file}"
