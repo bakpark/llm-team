@@ -369,8 +369,12 @@ it_issue_set_state() {
     }
     old_label="$(task_state_to_label "${old_state}")" || return 1
     old_label="$(label_with_prefix "${TARGET_LABEL_PREFIX:-}" "${old_label}")"
-    _in_memory_issue_set_field "${num}" --arg lbl "${old_label}" \
-      '.labels = ((.labels // []) | map(select(. != $lbl)))'
+    # Self-transition guard (BUG-2): new == old 일 때 remove 를 skip 하지 않으면
+    # 직전에 add 한 동일 label 이 그대로 사라진다.
+    if [ "${old_label}" != "${new_label}" ]; then
+      _in_memory_issue_set_field "${num}" --arg lbl "${old_label}" \
+        '.labels = ((.labels // []) | map(select(. != $lbl)))'
+    fi
   fi
 }
 
@@ -630,29 +634,38 @@ it_pr_set_cp_state() {
     log_error "it_pr_set_cp_state: PR #${num} not found"
     return 1
   }
-  local path body new_marker
+  # Resolve labels up-front for dedup + ordering (BUG-2).
+  local path new_label old_label
   path="$(_in_memory_pr_path "${num}")"
+  new_label="$(cp_state_to_label "${new_state}" 2>/dev/null || true)"
+  if [ -n "${new_label}" ]; then
+    new_label="$(label_with_prefix "${TARGET_LABEL_PREFIX:-}" "${new_label}")"
+  fi
+  if [ -n "${old_state}" ]; then
+    old_label="$(cp_state_to_label "${old_state}" 2>/dev/null || true)"
+    if [ -n "${old_label}" ]; then
+      old_label="$(label_with_prefix "${TARGET_LABEL_PREFIX:-}" "${old_label}")"
+    fi
+  fi
+
+  # Step 1: add new_label (before marker write — mirrors github adapter).
+  if [ -n "${new_label}" ]; then
+    _in_memory_pr_set_field "${num}" --arg lbl "${new_label}" \
+      '.labels = ((.labels // []) + [$lbl] | unique)'
+  fi
+
+  # Step 2: marker write.
+  local body new_marker
   body="$(jq -r '.body // ""' "${path}")"
   new_marker="$(state_marker change_proposal "${new_state}")"
   body="$(_in_memory_replace_cp_state_marker "${body}" "${new_marker}")"
   _in_memory_pr_set_field "${num}" --arg b "${body}" --arg ts "$(_in_memory_now)" \
     '.body = $b | .updated_at = $ts'
 
-  # Optional label sync.
-  local new_label old_label
-  new_label="$(cp_state_to_label "${new_state}" 2>/dev/null || true)"
-  if [ -n "${new_label}" ]; then
-    new_label="$(label_with_prefix "${TARGET_LABEL_PREFIX:-}" "${new_label}")"
-    _in_memory_pr_set_field "${num}" --arg lbl "${new_label}" \
-      '.labels = ((.labels // []) + [$lbl] | unique)'
-  fi
-  if [ -n "${old_state}" ]; then
-    old_label="$(cp_state_to_label "${old_state}" 2>/dev/null || true)"
-    if [ -n "${old_label}" ]; then
-      old_label="$(label_with_prefix "${TARGET_LABEL_PREFIX:-}" "${old_label}")"
-      _in_memory_pr_set_field "${num}" --arg lbl "${old_label}" \
-        '.labels = ((.labels // []) | map(select(. != $lbl)))'
-    fi
+  # Step 3: remove old_label (skip self-transition).
+  if [ -n "${old_label}" ] && [ "${old_label}" != "${new_label}" ]; then
+    _in_memory_pr_set_field "${num}" --arg lbl "${old_label}" \
+      '.labels = ((.labels // []) | map(select(. != $lbl)))'
   fi
 }
 

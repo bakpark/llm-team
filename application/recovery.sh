@@ -111,15 +111,24 @@ recovery_scan() {
       kind="$(printf '%s' "${row}" | awk -F'\t' '{print $1}')"
       from_state="$(printf '%s' "${row}" | awk -F'\t' '{print $2}')"
       to_state="$(printf '%s' "${row}" | awk -F'\t' '{print $3}')"
+      local rollback_ok=1
       if [ -n "${repo}" ]; then
         case "${kind}" in
           milestone)
-            it_milestone_set_state "${repo}" "${object_id}" "${to_state}" "${from_state}" 2>/dev/null \
-              || log_warn "recovery_scan: milestone ${object_id} ${from_state}→${to_state} failed"
+            if ! it_milestone_set_state "${repo}" "${object_id}" "${to_state}" "${from_state}" 2>/dev/null; then
+              log_warn "recovery_scan: milestone ${object_id} ${from_state}→${to_state} failed; escalating"
+              it_milestone_set_state "${repo}" "${object_id}" ESCALATED "${from_state}" 2>/dev/null \
+                || log_error "recovery_scan: milestone ${object_id} escalate failed (manual review required)"
+              rollback_ok=0
+            fi
             ;;
           issue)
-            it_issue_set_state "${repo}" "${object_id}" "${to_state}" "${from_state}" 2>/dev/null \
-              || log_warn "recovery_scan: issue ${object_id} ${from_state}→${to_state} failed"
+            if ! it_issue_set_state "${repo}" "${object_id}" "${to_state}" "${from_state}" 2>/dev/null; then
+              log_warn "recovery_scan: issue ${object_id} ${from_state}→${to_state} failed; escalating"
+              it_issue_set_state "${repo}" "${object_id}" ESCALATED "${from_state}" 2>/dev/null \
+                || log_error "recovery_scan: issue ${object_id} escalate failed (manual review required)"
+              rollback_ok=0
+            fi
             ;;
         esac
       fi
@@ -130,8 +139,23 @@ recovery_scan() {
       if [ "${kind}" = "issue" ] && declare -F workspace_prune_unit >/dev/null 2>&1; then
         workspace_prune_unit "${target}" "task-${object_id}" || true
       fi
+      # BUG-2 (operational label cleanup): rollback 성공 시점에 issue 의
+      # operational label (paused / human-gate:*) 을 정리한다. state label 은
+      # it_issue_set_state 가 이미 처리했으므로 여기서는 비-state 만 다룬다.
+      # 명시적 enumeration: wildcard 정리는 사용자 가시 label 까지 휩쓸 위험.
+      if [ "${rollback_ok}" -eq 1 ] && [ "${kind}" = "issue" ] && [ -n "${repo}" ]; then
+        local op_label
+        for op_label in paused "human-gate:reviewer-pending" "human-gate:integrator-pending"; do
+          it_issue_remove_label "${repo}" "${object_id}" "${op_label}" 2>/dev/null || true
+        done
+      fi
+      local result_value="recovered"
+      if [ "${rollback_ok}" -eq 0 ]; then
+        result_value="escalated"
+        to_state="ESCALATED"
+      fi
       _recovery_ledger_write "${target}" "${kind}" "${object_id}" \
-        "${from_state}" "${to_state}" "${operation}" "${lease_id}" "recovered" \
+        "${from_state}" "${to_state}" "${operation}" "${lease_id}" "${result_value}" \
         || log_warn "recovery_scan: ledger write failed for ${object_id}"
     else
       # PO/PM (no claim transition) — release the lease without state rollback.

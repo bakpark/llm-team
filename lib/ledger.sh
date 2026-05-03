@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 # lib/ledger.sh - transition ledger JSONL writer.
+#
+# `result` 필드 enum (자유 문자열이지만 운영 통계는 아래 값을 가정한다):
+#   applied   — 정상 transition.
+#   recovered — recovery_scan 이 expired lease 의 상태를 정상 회수함.
+#   escalated — recovery_scan 이 회수 시도 중 REST 실패 → ESCALATED 로 격상
+#               (BUG-1 fix: 과거에는 silent log_warn 후 'recovered' 로 잘못 기록).
+#   stale     — revision pin mismatch 등으로 신호가 무시됨.
+#   duplicate — 동일 idempotency_key 로 두 번째 호출.
+#   rejected  — 신호 검증 실패 (envelope schema / actor mismatch).
+#   failed    — 일반 적용 실패 (rc 정보는 별도 reason 필드).
 
 transition_ledger_path() {
   local target="$1"

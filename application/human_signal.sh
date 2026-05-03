@@ -148,11 +148,13 @@ human_signal_collect() {
 
 # human_signal_validate_extended <wrapper_json>
 # 0 = wrapper.body 가 RGC-SIGNALS envelope 이고, wrapper.actor == envelope.actor.
-# 비0 = 실패 (stderr 에 사유).
+# 비0 = 실패. stderr 에 log_error 가 남고, stdout 에 한 줄 reason 문자열을
+#       출력해 caller (drain) 가 캡처할 수 있게 한다 (BUG-1 fix).
 human_signal_validate_extended() {
   local wrapper="$1"
   if [ -z "${wrapper}" ]; then
     log_error "human_signal_validate_extended: wrapper is required"
+    printf 'wrapper required\n'
     return 1
   fi
   local body actor_wrap actor_body tmp
@@ -160,18 +162,24 @@ human_signal_validate_extended() {
   actor_wrap="$(jq -r '.actor // ""' <<<"${wrapper}")"
   if [ -z "${body}" ]; then
     log_error "human_signal_validate_extended: empty body"
+    printf 'empty body\n'
     return 1
   fi
-  tmp="$(_human_signal_body_to_tmp "${body}")" || return 1
+  tmp="$(_human_signal_body_to_tmp "${body}")" || {
+    printf 'tmp file allocation failed\n'
+    return 1
+  }
   if ! human_signal_validate "${tmp}" 2>/dev/null; then
     rm -f "${tmp}"
     log_error "human_signal_validate_extended: envelope schema invalid"
+    printf 'envelope schema invalid\n'
     return 1
   fi
   actor_body="$(jq -r '.actor // ""' "${tmp}")"
   rm -f "${tmp}"
   if [ "${actor_wrap}" != "${actor_body}" ]; then
     log_error "human_signal_validate_extended: actor mismatch (wrapper='${actor_wrap}' envelope='${actor_body}')"
+    printf "actor mismatch (wrapper='%s' envelope='%s')\n" "${actor_wrap}" "${actor_body}"
     return 1
   fi
 }
@@ -261,8 +269,9 @@ human_signal_drain() {
       continue
     fi
 
-    if ! human_signal_validate_extended "${wrapper}" 2>/dev/null; then
-      _human_signal_record "${signal_id}" "${comment_id}" "rejected" "validate failed"
+    local validate_reason
+    if ! validate_reason="$(human_signal_validate_extended "${wrapper}" 2>/dev/null)"; then
+      _human_signal_record "${signal_id}" "${comment_id}" "rejected" "${validate_reason:-validate failed}"
       continue
     fi
 

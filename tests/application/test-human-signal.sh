@@ -257,6 +257,20 @@ status_invalid="$(ps_get "${ns}" sig-invalid-1 | jq -r '.status')"
 [ "${status_invalid}" = "rejected" ] \
   || fail "sig-invalid-1 status expected 'rejected', got '${status_invalid}'"
 
+# BUG-1 fix: rejection reason 이 더 이상 정적 'validate failed' 가 아니라 실제
+# validation 단계의 사유 (envelope schema invalid / actor mismatch ...) 를 담아야 한다.
+reason_mismatch="$(ps_get "${ns}" sig-mismatch-1 | jq -r '.reason // ""')"
+case "${reason_mismatch}" in
+  *"actor mismatch"*) ;;
+  *) fail "sig-mismatch-1 reason expected to contain 'actor mismatch', got '${reason_mismatch}'" ;;
+esac
+
+reason_invalid="$(ps_get "${ns}" sig-invalid-1 | jq -r '.reason // ""')"
+case "${reason_invalid}" in
+  *"envelope schema invalid"*) ;;
+  *) fail "sig-invalid-1 reason expected to contain 'envelope schema invalid', got '${reason_invalid}'" ;;
+esac
+
 # applied signals should have status='applied'.
 for sid in sig-approve-1 sig-reject-1 sig-recover-1 sig-stop-1 sig-rework-1 \
            sig-pause-1 sig-resume-1 sig-amend-1; do

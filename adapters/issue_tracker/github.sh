@@ -305,6 +305,15 @@ it_issue_create() {
 
 # it_issue_set_state <repo> <num> <new_state> [<old_state>]
 # 라벨 atomic 전이 (add new → remove old).
+#
+# Invariant (RGC-RECOVERY): 호출 후 partial-fail 로 비0 을 반환하더라도 issue 의
+# state label 집합에는 항상 (old_label ∨ new_label) 중 최소 하나가 존재한다.
+# add-new 가 remove-old 보다 먼저 수행되므로:
+#   • add 단계 실패 시에는 old 가 그대로 남고
+#   • remove 단계 실패 시에는 new 와 old 가 함께 남는다 (다음 호출 / recovery
+#     에서 it_issue_clear_state_labels 로 정리 가능).
+# Self-transition (new_label == old_label) 은 add 만 수행하고 remove 를 skip 한다
+# — 그렇지 않으면 동일 label 을 add 한 직후 remove 하여 label 이 사라진다.
 it_issue_set_state() {
   local repo="$1" num="$2" new_state="$3" old_state="${4:-}"
   if [ -z "${repo}" ] || [ -z "${num}" ] || [ -z "${new_state}" ]; then
@@ -330,8 +339,10 @@ it_issue_set_state() {
     }
     old_label="$(task_state_to_label "${old_state}")" || return 1
     old_label="$(label_with_prefix "${TARGET_LABEL_PREFIX:-}" "${old_label}")"
-    _github_issue_remove_label "${repo}" "${num}" "${old_label}" \
-      || { log_error "it_issue_set_state: remove ${old_label} failed on issue #${num}"; return 1; }
+    if [ "${old_label}" != "${new_label}" ]; then
+      _github_issue_remove_label "${repo}" "${num}" "${old_label}" \
+        || { log_error "it_issue_set_state: remove ${old_label} failed on issue #${num}"; return 1; }
+    fi
   fi
 }
 
@@ -531,6 +542,15 @@ it_pr_create() {
 
 # it_pr_set_cp_state <repo> <num> <new_state> [<old_state>]
 # Body 안의 cp-state marker 를 멱등 갱신 + (있으면) cp:* queue label 도 갱신.
+#
+# 순서 invariant (BUG-2): 어떤 시점에 daemon 이 종료되어도 PR 의 cp-state 표기
+# 일관성이 깨지지 않도록 다음 순서를 강제한다.
+#   1) new_label add  (label 이 marker 보다 먼저 set)
+#   2) marker write   (PR body)
+#   3) old_label remove
+# 이렇게 하면 marker write 후의 어떤 partial-fail 상황에서도 PR 라벨 집합에는
+# 항상 (old_label ∨ new_label) 중 최소 하나가 존재한다 (gap window 없음).
+# Self-transition (new_label == old_label) 은 add 만 하고 remove 는 skip.
 it_pr_set_cp_state() {
   local repo="$1" num="$2" new_state="$3" old_state="${4:-}"
   [ -n "${repo}" ] && [ -n "${num}" ] && [ -n "${new_state}" ] || {
@@ -547,25 +567,36 @@ it_pr_set_cp_state() {
       return 1
     }
   fi
+
+  # Resolve labels up-front so dedup can compare even when only the new side
+  # has a queue label.
+  local new_label old_label
+  new_label="$(cp_state_to_label "${new_state}" 2>/dev/null || true)"
+  if [ -n "${new_label}" ]; then
+    new_label="$(label_with_prefix "${TARGET_LABEL_PREFIX:-}" "${new_label}")"
+  fi
+  if [ -n "${old_state}" ]; then
+    old_label="$(cp_state_to_label "${old_state}" 2>/dev/null || true)"
+    if [ -n "${old_label}" ]; then
+      old_label="$(label_with_prefix "${TARGET_LABEL_PREFIX:-}" "${old_label}")"
+    fi
+  fi
+
+  # Step 1: add new_label (before marker write — gap-free invariant).
+  if [ -n "${new_label}" ]; then
+    _github_issue_add_label "${repo}" "${num}" "${new_label}" || true
+  fi
+
+  # Step 2: marker write.
   local body new_marker
   body="$(_github_pr_get_body "${repo}" "${num}")" || return 1
   new_marker="$(state_marker change_proposal "${new_state}")"
   body="$(_github_replace_cp_state_marker "${body}" "${new_marker}")"
   _github_pr_set_body "${repo}" "${num}" "${body}" || return 1
 
-  # 옵션 라벨 동기화 (queue label 이 있는 상태에 한해서만).
-  local new_label old_label
-  new_label="$(cp_state_to_label "${new_state}" 2>/dev/null || true)"
-  if [ -n "${new_label}" ]; then
-    new_label="$(label_with_prefix "${TARGET_LABEL_PREFIX:-}" "${new_label}")"
-    _github_issue_add_label "${repo}" "${num}" "${new_label}" || true
-  fi
-  if [ -n "${old_state}" ]; then
-    old_label="$(cp_state_to_label "${old_state}" 2>/dev/null || true)"
-    if [ -n "${old_label}" ]; then
-      old_label="$(label_with_prefix "${TARGET_LABEL_PREFIX:-}" "${old_label}")"
-      _github_issue_remove_label "${repo}" "${num}" "${old_label}" || true
-    fi
+  # Step 3: remove old_label (skip self-transition / no-op cases).
+  if [ -n "${old_label}" ] && [ "${old_label}" != "${new_label}" ]; then
+    _github_issue_remove_label "${repo}" "${num}" "${old_label}" || true
   fi
 }
 

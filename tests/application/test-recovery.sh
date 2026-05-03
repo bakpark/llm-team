@@ -48,6 +48,12 @@ ledger_count_with_result() {
     | wc -l | tr -d ' '
 }
 
+issue_has_label() {
+  local num="$1" label="$2"
+  jq -e --arg lbl "${label}" '(.labels // []) | index($lbl)' \
+    "${LLM_TEAM_INMEM_IT_DIR}/issues/${num}.json" >/dev/null 2>&1
+}
+
 # Build a lease file directly (skipping lease_claim) so we can control expiry.
 write_lease_file() {
   local target="$1" object_id="$2" operation="$3" expires_epoch="$4"
@@ -163,6 +169,71 @@ after="$(ledger_count_with_result recovered)"
 [ "${after}" -gt "${before}" ] \
   || fail "scenario5: run_stale_recovery did not record ledger row"
 pass "scenario5: run_stale_recovery delegates to recovery_scan"
+
+# ----------------------------------------------------------------------------
+# Scenario 6: rollback set_state 실패 → ESCALATED + ledger 'escalated' (BUG-1)
+#   it_issue_set_state 를 wrap 해 TASK_READY 전이만 강제 실패시킨다. recovery 는
+#   ESCALATED 로 격상하고 ledger 에 result='escalated' 를 기록해야 한다.
+# ----------------------------------------------------------------------------
+issue_esc="$(it_issue_create "${REPO}" --title 'escalate target' --body '' --labels '' 2>/dev/null)" \
+  || fail "seed6: issue_create failed"
+it_issue_set_state "${REPO}" "${issue_esc}" TASK_IN_PROGRESS \
+  || fail "seed6: set TASK_IN_PROGRESS failed"
+
+# Save the real function under a new name, then install a fail-injection wrapper.
+__orig_iss_def="$(declare -f it_issue_set_state)"
+eval "${__orig_iss_def/it_issue_set_state/__real_it_issue_set_state}"
+it_issue_set_state() {
+  if [ "${2:-}" = "${issue_esc}" ] && [ "${3:-}" = "TASK_READY" ]; then
+    return 1
+  fi
+  __real_it_issue_set_state "$@"
+}
+
+write_lease_file "${TARGET_NAME}" "${issue_esc}" "Implement" "1"
+
+before_esc="$(ledger_count_with_result escalated)"
+recovery_scan "${TARGET_NAME}" "${REPO}" || fail "scenario6: recovery_scan returned nonzero"
+estate="$(it_issue_get_state "${REPO}" "${issue_esc}" 2>/dev/null)"
+[ "${estate}" = "ESCALATED" ] \
+  || fail "scenario6: issue state expected ESCALATED, got '${estate}'"
+after_esc="$(ledger_count_with_result escalated)"
+[ "${after_esc}" -gt "${before_esc}" ] \
+  || fail "scenario6: ledger 'escalated' row not written"
+pass "scenario6: rollback failure → ESCALATED + ledger 'escalated'"
+
+# Restore real function (subsequent scenarios depend on it).
+unset -f it_issue_set_state
+eval "${__orig_iss_def}"
+unset -f __real_it_issue_set_state
+
+# ----------------------------------------------------------------------------
+# Scenario 7: lease 만료 시 operational label 정리 (BUG-2 D)
+#   issue 에 'paused' 와 'human-gate:reviewer-pending' label 이 부착된 상태에서
+#   lease 가 만료되면, recovery 가 state label 교체 후 두 operational label 도
+#   제거해야 한다.
+# ----------------------------------------------------------------------------
+issue_op="$(it_issue_create "${REPO}" --title 'op cleanup target' --body '' --labels '' 2>/dev/null)" \
+  || fail "seed7: issue_create failed"
+it_issue_set_state "${REPO}" "${issue_op}" TASK_IN_PROGRESS \
+  || fail "seed7: set TASK_IN_PROGRESS failed"
+it_issue_add_label "${REPO}" "${issue_op}" "paused" \
+  || fail "seed7: add paused failed"
+it_issue_add_label "${REPO}" "${issue_op}" "human-gate:reviewer-pending" \
+  || fail "seed7: add human-gate failed"
+write_lease_file "${TARGET_NAME}" "${issue_op}" "Implement" "1"
+
+recovery_scan "${TARGET_NAME}" "${REPO}" || fail "scenario7: recovery_scan returned nonzero"
+opstate="$(it_issue_get_state "${REPO}" "${issue_op}" 2>/dev/null)"
+[ "${opstate}" = "TASK_READY" ] \
+  || fail "scenario7: issue state expected TASK_READY, got '${opstate}'"
+if issue_has_label "${issue_op}" "paused"; then
+  fail "scenario7: operational label 'paused' should be removed after recovery"
+fi
+if issue_has_label "${issue_op}" "human-gate:reviewer-pending"; then
+  fail "scenario7: operational label 'human-gate:reviewer-pending' should be removed after recovery"
+fi
+pass "scenario7: lease expiry → operational labels cleaned up"
 
 if [ "${failures}" -ne 0 ]; then
   echo "FAIL: ${failures} scenario(s) failed in test-recovery" >&2
