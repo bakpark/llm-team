@@ -291,6 +291,21 @@ agent_output_validate_extended() {
     return 1
   fi
 
+  # ----- (b) code_tree required entry must appear in input_revision_pins -----
+  # When runner injects code_tree as required, agent MUST include it in its
+  # output pins so revision_pin_revalidate can verify the RO tree snapshot.
+  if ! jq -e --slurpfile mf "${manifest_path}" '
+        ($mf[0].entries // []) as $entries
+        | (.input_revision_pins // []) as $pins
+        | ($pins | map(.object_id // "") | map(select(length > 0))) as $pin_ids
+        | [$entries[] | select(.object_kind == "code_tree" and .required == true) | .object_id] as $code_tree_required
+        | ($code_tree_required - $pin_ids) | length == 0
+      ' "${envelope_file}" >/dev/null 2>&1; then
+    log_error "agent_output_validate_extended: required code_tree entry missing from input_revision_pins"
+    _agent_io_cleanup_envelope_file
+    return 1
+  fi
+
   # ----- (e) 비밀/자격증명 포함 -----
   if grep -qE '(ghp_[A-Za-z0-9]+|Bearer [A-Za-z0-9._\-]+|password=|-----BEGIN [A-Z ]*PRIVATE KEY-----)' "${envelope_file}"; then
     log_error "agent_output_validate_extended: envelope contains secret/credential pattern"
@@ -480,15 +495,14 @@ revision_pin_revalidate() {
       stale=1
       continue
     fi
-    # code_tree: use workspace port instead of issue_tracker (AGC-CALL-BOUNDARY)
+    # code_tree: compare against current RO tree pin (not live branch HEAD).
+    # The expected pin is the SHA at RO mount time; ws_ro_tree_revision_pin
+    # returns the current pinned SHA. If they differ, the RO tree was
+    # refreshed mid-cycle and agent output may not be grounded in the
+    # snapshot it actually saw.
     if [ "${kind}" = "code_tree" ]; then
-      if [ "${id}" != "${repo}" ]; then
-        log_error "revision_pin_revalidate: code_tree id '${id}' does not match repo '${repo}'"
-        stale=1
-        continue
-      fi
-      if ! actual="$(ws_get_branch_head "${repo}" "${TARGET_DEFAULT_BRANCH:-main}" 2>/dev/null)"; then
-        log_error "revision_pin_revalidate: code_tree ${id} live branch pin lookup failed"
+      if ! actual="$(ws_ro_tree_revision_pin "${repo}" 2>/dev/null)"; then
+        log_error "revision_pin_revalidate: code_tree ${id} RO tree pin lookup failed"
         stale=1
         continue
       fi

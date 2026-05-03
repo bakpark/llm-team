@@ -282,6 +282,32 @@ case "${auto_root}" in
     ;;
 esac
 
+
+# ----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+# ws_ensure_ro_tree + ws_ro_tree_revision_pin
+# ----------------------------------------------------------------------------
+# canonical clone 필요 — ws_ensure_clone 호출 (멱등이므로 안전)
+ws_ensure_clone "${TARGET_NAME}" >/dev/null 2>&1 || true
+
+RO_PATH="$(ws_ensure_ro_tree "" 2>/dev/null)" || \
+  fail "ws_ensure_ro_tree failed (empty target, should use TARGET_NAME)"
+[ -n "${RO_PATH}" ] || fail "ws_ensure_ro_tree returned empty path"
+[ -d "${RO_PATH}" ] || fail "RO tree dir missing at ${RO_PATH}"
+
+RO_PIN="$(ws_ro_tree_revision_pin "" 2>/dev/null)" || \
+  fail "ws_ro_tree_revision_pin failed"
+[ -n "${RO_PIN}" ] || fail "ws_ro_tree_revision_pin returned empty SHA"
+
+# idempotence: 두 번째 호출 시 동일 pin 반환
+ws_ensure_ro_tree "" >/dev/null 2>&1 || true
+RO_PIN_2="$(ws_ro_tree_revision_pin "" 2>/dev/null)" || true
+if [ "${RO_PIN}" != "${RO_PIN_2}" ]; then
+  fail "RO tree idempotence failed: ${RO_PIN} vs ${RO_PIN_2}"
+fi
+# ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 if [ "${failures}" -gt 0 ]; then
   echo "FAIL: ${failures} in_memory workspace check(s) failed" >&2
   exit 1

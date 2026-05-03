@@ -409,9 +409,9 @@ ws_ensure_ro_tree() {
   fi
 
   # source SHA 결정 (default branch head)
-  source_sha="$(ws_get_branch_head "" "${TARGET_DEFAULT_BRANCH:-main}" 2>/dev/null)" || {
+  source_sha="$(ws_get_branch_head "${target}" "${TARGET_DEFAULT_BRANCH:-main}" 2>/dev/null)" || {
     # default branch 가 없으면 integration 브랜치 사용
-    source_sha="$(ws_get_branch_head "" "${LLM_TEAM_INTEGRATION_BRANCH:-integration}" 2>/dev/null)" || {
+    source_sha="$(ws_get_branch_head "${target}" "${LLM_TEAM_INTEGRATION_BRANCH:-integration}" 2>/dev/null)" || {
       log_error "ws_ensure_ro_tree: no reference branch found for target '${target}'"
       return 1
     }
@@ -446,9 +446,13 @@ ws_ro_tree_revision_pin() {
     log_error "ws_ro_tree_revision_pin: target name is required (arg or TARGET_NAME)"
     return 1
   }
-  local td ro_path
-  td="$(_in_memory_ws_target_dir "${target}")" || return 1
-  ro_path="${td}/repo-ro"
+  # TARGET_RO_TREE_PATH 가 설정되어 있으면 직접 사용 (runner context).
+  local ro_path="${TARGET_RO_TREE_PATH:-}"
+  if [ -z "${ro_path}" ]; then
+    local td
+    td="$(_in_memory_ws_target_dir "${target}")" || return 1
+    ro_path="${td}/repo-ro"
+  fi
 
   if [ ! -d "${ro_path}" ] || [ ! -f "${ro_path}/.ro-pin" ]; then
     log_error "ws_ro_tree_revision_pin: repo-ro not found at ${ro_path}; call ws_ensure_ro_tree first"

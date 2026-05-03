@@ -69,21 +69,41 @@ caller 에게 envelope output 으로만 결과를 돌려주세요.
 MARKER
       fi
       # code_tree: RO tree symlink (plan §Step 4)
+      # 상대경로 symlink 사용 — workdir 이동 시 깨지지 않도록 함.
       local ro_tree="${TARGET_RO_TREE_PATH:-${LLM_TEAM_ROOT}/workdir/${TARGET_NAME}/repo-ro}"
       if [ -n "${TARGET_RO_TREE_PATH:-}" ] || [ -d "${ro_tree}" ]; then
         if [ ! -d "${ro_tree}" ]; then
           log_error "agent_workspace_for: RO tree missing: ${ro_tree}"
           return 1
         fi
+        # 상대경로 계산: path(agent-cwd/<role>) 에서 ro_tree(workdir/<target>/repo-ro) 로.
+        # macOS realpath 는 --relative-to 미지원이므로 python3/os.path.relpath 사용.
+        local rel_target
+        if command -v python3 >/dev/null 2>&1; then
+          rel_target="$(python3 -c "import os.path; print(os.path.relpath('${ro_tree}', '$(dirname "${path}")'))" 2>/dev/null)" ||             rel_target="${ro_tree}"
+        elif command -v perl >/dev/null 2>&1; then
+          rel_target="$(perl -MFile::Spec -e "print File::Spec->rel2dir('${ro_tree}', '$(dirname "${path}")')" 2>/dev/null)" ||             rel_target="${ro_tree}"
+        else
+          # fallback: path 와 ro_tree 가 같은 workdir/<target> 하위라면 ../repo-ro 사용.
+          local agent_cwd_dir
+          agent_cwd_dir="$(dirname "${path}")"
+          local expected_parent
+          expected_parent="${LLM_TEAM_ROOT}/workdir/${TARGET_NAME}"
+          if [ "$(dirname "${agent_cwd_dir}")" = "${expected_parent}" ]; then
+            rel_target="../repo-ro"
+          else
+            rel_target="${ro_tree}"  # custom path 이면 절대경로 허용
+          fi
+        fi
         if [ -L "${path}/repo" ]; then
           local current
           current="$(readlink "${path}/repo")"
-          if [ "${current}" != "${ro_tree}" ]; then
+          if [ "${current}" != "${rel_target}" ]; then
             rm -f "${path}/repo"
-            ln -s "${ro_tree}" "${path}/repo"
+            ln -s "${rel_target}" "${path}/repo"
           fi
         elif [ ! -e "${path}/repo" ]; then
-          ln -s "${ro_tree}" "${path}/repo"
+          ln -s "${rel_target}" "${path}/repo"
         else
           log_error "agent_workspace_for: ${path}/repo exists and is not managed symlink"
           return 1

@@ -72,7 +72,6 @@ _onboarding_ack_is_true() {
   [ "${val}" = "true" ]
 }
 
-}
 
 # target.yaml 의 onboarding.preset (TCC-ONBOARDING) — 기본값 github-pipeline/v1.
 # Backward-compat: legacy `.onboarding.schema` 를 fallback 으로 받는다.
@@ -143,14 +142,12 @@ onboarding_verify() {
 
 
   local block_fail=0
-  local line id kind severity sh_only auto_fn ack_key summary
+  local line id kind severity auto_fn ack_key summary
   while IFS=$'\t' read -r id kind severity auto_fn ack_key summary; do
     [ -n "${id}" ] || continue
     case "${id}" in '#'*) continue ;; esac
     [ "${auto_fn}" = "-" ] && auto_fn=""
     [ "${ack_key}" = "-" ] && ack_key=""
-
-    fi
 
     # TCC-ONBOARDING.skip_flags (P2-5): 명시적으로 합의된 항목만 점검을 건너뛴다.
     # SKIP 으로 emit 하되 message 에 사유를 남긴다.

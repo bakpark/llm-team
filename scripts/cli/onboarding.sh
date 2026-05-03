@@ -71,11 +71,9 @@ onboarding_status_run() {
 
 _onb_print_table() {
   local target="$1" body="$2"
-  local schema sh
+  local schema
   schema="$(yq -r '.onboarding.preset // .onboarding.schema // "github-pipeline/v1"' \
     "$(cli_target_file "${target}")")"
-    "$(cli_target_file "${target}")")"
-
 
   local total=0 pass=0 fail=0 warn=0 skip=0
   local status id severity message remediation color reset
@@ -102,9 +100,8 @@ _onb_print_table() {
 
 _onb_to_json() {
   local target="$1" body="$2" rc="$3"
-  local schema sh
+  local schema
   schema="$(yq -r '.onboarding.preset // .onboarding.schema // "github-pipeline/v1"' \
-    "$(cli_target_file "${target}")")"
     "$(cli_target_file "${target}")")"
 
   jq -n \

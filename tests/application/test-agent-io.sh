@@ -408,6 +408,63 @@ env_no_pin_arr=$(jq -n --arg mid "${manifest_id}" '
 revision_pin_revalidate "${env_no_pin_arr}" "${repo}" \
   || fail "revision_pin_revalidate with empty pins should pass"
 
+
+# ----------------------------------------------------------------------------
+export LLM_TEAM_INMEM_WS_DIR="${TEST_INMEM_ROOT}/ws"
+
+# (4b) code_tree revision_pin_revalidate — RO tree pin 일치/불일치
+# ----------------------------------------------------------------------------
+# in_memory workspace 어댑터가 ws_ensure_ro_tree/ws_ro_tree_revision_pin 을
+# 제공하므로 code_tree pin 검증이 가능함.
+#
+# revision_pin_revalidate 는 code_tree 에서 ws_ro_tree_revision_pin("${repo}") 를
+# 호출하므로 target 을 ${repo} 로 맞추고 TARGET_RO_TREE_PATH 를 설정한다.
+
+# fixture: canonical clone + default branch seed 필요
+registry_load_adapter workspace in_memory >/dev/null 2>&1 || true
+
+# target yaml 설정 (in_memory workspace 가 필요)
+export TARGET_NAME="${repo}"
+export TARGET_DEFAULT_BRANCH="main"
+export LLM_TEAM_INTEGRATION_BRANCH="integration"
+
+# ws_ensure_clone 시뮬레이션: in_memory adapter 는 ws_ensure_clone 호출로 seed
+ws_ensure_clone "${repo}" >/dev/null 2>&1 || true
+
+# RO tree 생성 (seed SHA 기반)
+RO_TREE_PATH="$(ws_ensure_ro_tree "${repo}" 2>/dev/null)" || \
+  fail "code_tree: ws_ensure_ro_tree failed"
+export TARGET_RO_TREE_PATH="${RO_TREE_PATH}"
+CODE_TREE_PIN="$(ws_ro_tree_revision_pin "${repo}" 2>/dev/null)" || \
+  fail "code_tree: ws_ro_tree_revision_pin failed"
+
+# matching pin → PASS
+env_code_tree_ok="$(jq -n \
+  --arg id "${repo}" \
+  --arg pin "${CODE_TREE_PIN}" \
+  '{
+    manifest_id: "m-1", role: "PO", operation: "create",
+    input_revision_pins: [{object_kind: "code_tree", object_id: $id, revision_pin: $pin}],
+    idempotency_key: "x", summary: "y", artifacts: {}
+  }')"
+printf '%s\n' "${env_code_tree_ok}" >"${TEST_INMEM_ROOT}/env-code-tree-ok.json"
+revision_pin_revalidate "${TEST_INMEM_ROOT}/env-code-tree-ok.json" "${repo}" \
+  || fail "code_tree: matching pin should pass"
+
+# stale pin (다른 SHA) → FAIL
+env_code_tree_stale="$(jq -n \
+  --arg id "${repo}" \
+  '{
+    manifest_id: "m-1", role: "PO", operation: "create",
+    input_revision_pins: [{object_kind: "code_tree", object_id: $id, revision_pin: "deadbeef00000000000000000000000000000000"}],
+    idempotency_key: "x", summary: "y", artifacts: {}
+  }')"
+printf '%s\n' "${env_code_tree_stale}" >"${TEST_INMEM_ROOT}/env-code-tree-stale.json"
+if revision_pin_revalidate "${TEST_INMEM_ROOT}/env-code-tree-stale.json" "${repo}" 2>/dev/null; then
+  fail "code_tree: stale pin should fail"
+fi
+
+# ----------------------------------------------------------------------------
 # ----------------------------------------------------------------------------
 # (5) AGC-CALL-BOUNDARY: agent_io.sh has no direct gh/git/curl/claude calls
 # ----------------------------------------------------------------------------

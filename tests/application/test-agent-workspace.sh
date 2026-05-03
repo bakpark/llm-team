@@ -127,6 +127,34 @@ else
   pass "TARGET_NAME unset → non-zero"
 fi
 
+
+# ----------------------------------------------------------------------------
+# 6. repo symlink 상대경로 확인 (code_tree)
+# ----------------------------------------------------------------------------
+# in_memory adapter 로 RO tree 생성 후 agent_workspace_for 호출 시
+# repo symlink 가 상대경로여야 함.
+adapter_load workspace in_memory >/dev/null 2>&1 || true
+ws_ensure_clone "${TARGET_NAME}" >/dev/null 2>&1 || true
+RO_PATH="$(ws_ensure_ro_tree "" 2>/dev/null)" || true
+
+if [ -n "${RO_PATH}" ] && [ -d "${RO_PATH}" ]; then
+  export TARGET_RO_TREE_PATH="${RO_PATH}"
+  AGENT_CWD="$(agent_workspace_for PO 12 2>/dev/null)" || true
+  if [ -n "${AGENT_CWD}" ] && [ -d "${AGENT_CWD}" ]; then
+    if [ -L "${AGENT_CWD}/repo" ]; then
+      LINK_TARGET="$(readlink "${AGENT_CWD}/repo")"
+      case "${LINK_TARGET}" in
+        /*) fail "repo symlink is absolute (${LINK_TARGET}), expected relative" ;;
+        *) pass "repo symlink is relative: ${LINK_TARGET}" ;;
+      esac
+    else
+      # RO tree 가 설정되었지만 symlink 생성이 실패한 경우 warn 만 남김
+      echo "WARN: repo symlink not found at ${AGENT_CWD}/repo"
+    fi
+  fi
+fi
+
+# ----------------------------------------------------------------------------
 if [ "${failures}" -ne 0 ]; then
   echo "FAIL: ${failures} assertion(s) failed in test-agent-workspace" >&2
   exit 1

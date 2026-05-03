@@ -450,6 +450,72 @@ UNIT_LOCKED="task-locked"
 if ws_ensure "${UNIT_LOCKED}" >/dev/null 2>&1; then
   fail "G2 regression: ws_ensure proceeded despite fetchlock being held"
 fi
+
+# ----------------------------------------------------------------------------
+# Test 12: ws_ensure_ro_tree — RO tree 생성 및 idempotence
+# ----------------------------------------------------------------------------
+
+RO_PATH="$(ws_ensure_ro_tree "${TEST_TARGET}" 2>/dev/null)" || \
+  fail "R1: ws_ensure_ro_tree failed"
+if [ ! -d "${RO_PATH}" ]; then
+  fail "R1: RO tree directory not found at ${RO_PATH}"
+fi
+# detached HEAD 확인
+DETACHED="$(cd "${RO_PATH}" && git symbolic-ref --short HEAD 2>&1 || true)"
+if [ "${DETACHED}" != "HEAD" ] && ! printf '%s' "${DETACHED}" | grep -q 'detached'; then
+  fail "R1: RO tree is not detached (got: ${DETACHED})"
+fi
+
+# idempotence: 두 번째 호출 시 동일한 경로 반환, SHA 불변
+RO_PIN_1="$(ws_ro_tree_revision_pin "${TEST_TARGET}" 2>/dev/null)" || \
+  fail "R2: ws_ro_tree_revision_pin failed"
+RO_PATH_2="$(ws_ensure_ro_tree "${TEST_TARGET}" 2>/dev/null)" || \
+  fail "R2: ws_ensure_ro_tree retry failed"
+RO_PIN_2="$(ws_ro_tree_revision_pin "${TEST_TARGET}" 2>/dev/null)" || \
+  fail "R2: ws_ro_tree_revision_pin retry failed"
+if [ "${RO_PIN_1}" != "${RO_PIN_2}" ]; then
+  fail "R2: RO pin changed on idempotent call (${RO_PIN_1} vs ${RO_PIN_2})"
+fi
+
+# ----------------------------------------------------------------------------
+# Test 13: ws_ensure_ro_tree — stale refresh
+# ----------------------------------------------------------------------------
+(
+  cd "${TARGET_CLONE_PATH}"
+  git checkout --quiet main
+  echo "stale-trigger" >stale-marker.txt
+  git add stale-marker.txt
+  git commit --quiet -m "trigger stale"
+  git push --quiet origin main
+)
+
+RO_PATH_NEW="$(ws_ensure_ro_tree "${TEST_TARGET}" 2>/dev/null)" || \
+  fail "R3: ws_ensure_ro_tree failed after origin advance"
+RO_PIN_3="$(ws_ro_tree_revision_pin "${TEST_TARGET}" 2>/dev/null)" || \
+  fail "R3: ws_ro_tree_revision_pin failed after refresh"
+if [ "${RO_PIN_3}" = "${RO_PIN_1}" ]; then
+  fail "R3: RO pin did not update after origin advance (${RO_PIN_3})"
+fi
+
+# ----------------------------------------------------------------------------
+# Test 14: agent_workspace_for — repo symlink 상대경로
+# ----------------------------------------------------------------------------
+AGENT_PATH="$(agent_workspace_for PO "${TEST_TARGET}" 2>/dev/null)" || \
+  fail "S1: agent_workspace_for failed"
+if [ ! -L "${AGENT_PATH}/repo" ]; then
+  fail "S1: ${AGENT_PATH}/repo is not a symlink"
+fi
+LINK_TARGET="$(readlink "${AGENT_PATH}/repo")"
+case "${LINK_TARGET}" in
+  /*) fail "S1: repo symlink is absolute path (${LINK_TARGET}), expected relative" ;;
+  *) true ;;
+esac
+RESOLVED="$(cd "${AGENT_PATH}" && realpath repo 2>/dev/null)"
+if [ ! -d "${RESOLVED}" ]; then
+  fail "S1: repo symlink does not resolve to a directory"
+fi
+
+# ----------------------------------------------------------------------------
 # Released the lock.
 rmdir "${LOCK_HOLD}" 2>/dev/null || rm -rf "${LOCK_HOLD}" 2>/dev/null
 
