@@ -93,6 +93,16 @@ if echo "${labels_a}" | grep -Fxq "${LABEL_FEATURE_REQUEST}"; then
   fail "issue #${picked_issue1} should no longer have raw '${LABEL_FEATURE_REQUEST}' label"
 fi
 
+# milestone description must embed source issue title + body so that
+# subsequent PO Compose-PO snapshot exposes substantive content.
+ms1_desc="$(jq -r '.description // ""' "${INMEM_IT_DIR}/milestones/${picked_ms1}.json")"
+echo "${ms1_desc}" | grep -q "Source content (issue #${picked_issue1})" \
+  || fail "milestone #${picked_ms1} description missing 'Source content' section"
+echo "${ms1_desc}" | grep -q "feat A" \
+  || fail "milestone #${picked_ms1} description missing source issue title 'feat A'"
+echo "${ms1_desc}" | grep -q "feature A details" \
+  || fail "milestone #${picked_ms1} description missing source issue body"
+
 # ----------------------------------------------------------------------------
 # (2) Second promote — picks issue_b.
 # ----------------------------------------------------------------------------

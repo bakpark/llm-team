@@ -37,16 +37,20 @@ feature_request_promote() {
   fi
 
   # Issue body 인용 + title 은 "draft: <issue title>" 형태.
-  local issue_path issue_title issue_body
-  if declare -F it_issue_get_meta >/dev/null 2>&1; then
-    : # placeholder for future metadata getter; not in current port spec.
-  fi
-  # Port 에 issue title/body getter 가 없으므로, in_memory 에서는 파일 직접
-  # 읽지 못한다. 대신 issue 번호만 인용하는 안전한 placeholder body 를 작성한다.
-  # (Phase 4 caller_dispatch 에서 milestone body 를 enrich 할 수 있음)
+  local issue_title issue_body issue_snapshot
   issue_title="draft: feature-request #${issue_num}"
-  issue_body="$(printf 'Promoted from feature-request issue #%s.\n\nSource: %s issue #%s.\n' \
-    "${issue_num}" "${repo}" "${issue_num}")"
+  # Source issue 본문을 milestone description 에 임베드하여 후속 PO Compose-PO
+  # 가 it_object_get_snapshot(milestone) 으로 본문을 받을 때 source issue 본문이
+  # 노출되도록 한다. snapshot 미가용 시(어댑터 미지원/네트워크 실패) 안전한
+  # placeholder 로 폴백 — 기존 동작 보존.
+  issue_snapshot="$(it_object_get_snapshot "${repo}" issue "${issue_num}" 2>/dev/null || true)"
+  if [ -n "${issue_snapshot}" ]; then
+    issue_body="$(printf 'Promoted from feature-request issue #%s.\n\nSource: %s issue #%s.\n\n## Source content (issue #%s)\n\n%s\n' \
+      "${issue_num}" "${repo}" "${issue_num}" "${issue_num}" "${issue_snapshot}")"
+  else
+    issue_body="$(printf 'Promoted from feature-request issue #%s.\n\nSource: %s issue #%s.\n' \
+      "${issue_num}" "${repo}" "${issue_num}")"
+  fi
 
   local ms_num
   ms_num="$(it_milestone_create "${repo}" "${issue_title}" "${issue_body}")" || {
