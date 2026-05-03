@@ -14,6 +14,9 @@ notifier:
 dev_concurrency: 3
 stale_threshold_minutes: 60
 enabled: true
+lease:
+  ttl_default: 1800
+  ttl_by_role: {}
 onboarding:
   acks:
     use_default_branch_as_integration:
