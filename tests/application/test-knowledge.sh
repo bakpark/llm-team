@@ -26,9 +26,9 @@ failures=0
 fail() { echo "FAIL: $*" >&2; failures=$((failures + 1)); }
 
 # ----------------------------------------------------------------------------
-# Test 1: decision_log append-only
+# Test 1: decision_log append-only (P1-5: alternatives 는 필수 비어있지 않은 array)
 # ----------------------------------------------------------------------------
-DECISION1='{"decision_id":"d1","decision":"a","rationale":"because"}'
+DECISION1='{"decision_id":"d1","decision":"a","alternatives":["b","c"],"rationale":"because"}'
 knowledge_record_decision "${TEST_TARGET}" "${DECISION1}" \
   || fail "knowledge_record_decision failed"
 LOG="${KNOWLEDGE_ROOT}/decision-log.jsonl"
@@ -39,15 +39,35 @@ ts1="$(jq -r '.decided_at' "${LOG}")"
 [ -n "${ts1}" ] || fail "decided_at not auto-filled"
 # decision_id round-trips.
 [ "$(jq -r '.decision_id' "${LOG}")" = "d1" ] || fail "decision_id mismatch"
+# alternatives round-trips.
+[ "$(jq -r '.alternatives | length' "${LOG}")" = "2" ] \
+  || fail "alternatives count mismatch"
 
 # Second append.
-DECISION2='{"decision_id":"d2","decision":"b","decided_at":"2026-01-01T00:00:00Z"}'
+DECISION2='{"decision_id":"d2","decision":"b","alternatives":["x"],"decided_at":"2026-01-01T00:00:00Z"}'
 knowledge_record_decision "${TEST_TARGET}" "${DECISION2}" \
   || fail "second decision append failed"
 [ "$(wc -l <"${LOG}")" -eq 2 ] || fail "expected 2 lines after second append"
 # Existing decided_at preserved.
 ts2="$(tail -n 1 "${LOG}" | jq -r '.decided_at')"
 [ "${ts2}" = "2026-01-01T00:00:00Z" ] || fail "decided_at overwritten when already set"
+
+# P1-5 / KAC-DECISION-LOG: alternatives 누락/빈배열 거부.
+NO_ALT='{"decision_id":"d3","decision":"c","rationale":"r"}'
+if knowledge_record_decision "${TEST_TARGET}" "${NO_ALT}" 2>/dev/null; then
+  fail "knowledge_record_decision must reject decision missing alternatives (P1-5)"
+fi
+EMPTY_ALT='{"decision_id":"d4","decision":"d","alternatives":[],"rationale":"r"}'
+if knowledge_record_decision "${TEST_TARGET}" "${EMPTY_ALT}" 2>/dev/null; then
+  fail "knowledge_record_decision must reject empty alternatives array (P1-5)"
+fi
+NO_ID='{"decision":"e","alternatives":["a"]}'
+if knowledge_record_decision "${TEST_TARGET}" "${NO_ID}" 2>/dev/null; then
+  fail "knowledge_record_decision must reject missing decision_id"
+fi
+# Existing log must be unchanged after rejected entries.
+[ "$(wc -l <"${LOG}")" -eq 2 ] \
+  || fail "rejected entries must not be appended (got $(wc -l <"${LOG}") lines)"
 
 # ----------------------------------------------------------------------------
 # Test 2: context_summary idempotent (write-once per milestone)

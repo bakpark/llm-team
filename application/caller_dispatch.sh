@@ -722,16 +722,27 @@ _caller_apply_integrator_pkg() {
       it_milestone_set_state "${repo}" "${ms_num}" VALIDATE_READY REFACTOR_IN_PROGRESS \
         || { log_error "_caller_apply_integrator_pkg/PASS: milestone transition failed"; return 1; }
       # KAC-DECISION-LOG: integration PASS 자체가 1급 결정. append-only.
+      # P1-5: alternatives 는 KAC-DECISION-LOG 필수 필드 — 엔벨로프의
+      # artifacts.alternatives (또는 .artifacts.decision.alternatives) 를
+      # 우선 사용하고, 없으면 PASS 결정 본래 의미인 "accept-as-is" vs
+      # "request-changes" 두 옵션으로 결정적 fallback.
       if declare -F knowledge_record_decision >/dev/null 2>&1; then
-        local decision_json
+        local decision_json _alt_json
+        _alt_json="$(jq -c '
+          .artifacts.alternatives
+          // .artifacts.decision.alternatives
+          // ["accept-as-is", "request-changes"]
+        ' "${env_path}")"
         decision_json="$(jq -n \
           --arg decision_id "integrator-pass-${ms_num}-${idem_key}" \
           --arg decision "Integration PASS for milestone #${ms_num}" \
           --arg rationale "$(jq -r '.summary // empty' "${env_path}")" \
           --arg cp_path "${new_cp}" \
           --arg ms_id "${ms_num}" \
-          '{decision_id: $decision_id, decision: $decision, rationale: $rationale, cp_path: $cp_path, affected_milestones: [$ms_id]}')"
-        knowledge_record_decision "${target}" "${decision_json}" || true
+          --argjson alternatives "${_alt_json}" \
+          '{decision_id: $decision_id, decision: $decision, alternatives: $alternatives, rationale: $rationale, cp_path: $cp_path, affected_milestones: [$ms_id]}')"
+        knowledge_record_decision "${target}" "${decision_json}" \
+          || log_warn "_caller_apply_integrator_pkg/PASS: knowledge_record_decision rejected (P1-5 alternatives gate)"
       fi
       _caller_ledger_write "${target}" milestone "${ms_num}" REFACTOR_IN_PROGRESS VALIDATE_READY \
         "${operation}" "${idem_key}" "${manifest_id}" \
@@ -819,14 +830,23 @@ _caller_apply_qa_pkg() {
         if [ -n "${_qa_summary}" ]; then
           knowledge_snapshot_context_summary "${target}" "${ms_num}" "${_qa_summary}" || true
         fi
+        # P1-5: alternatives 필수 — 엔벨로프 우선, 없으면 결정적 fallback.
+        local _qa_alt_json
+        _qa_alt_json="$(jq -c '
+          .artifacts.alternatives
+          // .artifacts.decision.alternatives
+          // ["accept-as-is", "request-changes"]
+        ' "${env_path}")"
         _qa_decision="$(jq -n \
           --arg decision_id "qa-pass-${ms_num}-${idem_key}" \
           --arg decision "Milestone #${ms_num} validated DONE" \
           --arg rationale "$(jq -r '.summary // empty' "${env_path}")" \
           --arg cp_path "${new_cp}" \
           --arg ms_id "${ms_num}" \
-          '{decision_id: $decision_id, decision: $decision, rationale: $rationale, cp_path: $cp_path, affected_milestones: [$ms_id]}')"
-        knowledge_record_decision "${target}" "${_qa_decision}" || true
+          --argjson alternatives "${_qa_alt_json}" \
+          '{decision_id: $decision_id, decision: $decision, alternatives: $alternatives, rationale: $rationale, cp_path: $cp_path, affected_milestones: [$ms_id]}')"
+        knowledge_record_decision "${target}" "${_qa_decision}" \
+          || log_warn "_caller_apply_qa_pkg/PASS: knowledge_record_decision rejected (P1-5 alternatives gate)"
       fi
       _caller_ledger_write "${target}" milestone "${ms_num}" VALIDATE_IN_PROGRESS DONE \
         "${operation}" "${idem_key}" "${manifest_id}" \

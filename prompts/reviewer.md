@@ -48,6 +48,8 @@ artifacts 권장 키 (reviewer):
 - `artifacts.ac_reasoning[]`: AC-ID 기반 근거 항목 `{ac_id, status, note}`
 - `artifacts.verification_log_interpretation`: Caller 가 제공한 verification run 로그 해석
 - `artifacts.rework_guidance`: `request-changes` 인 경우 구체적 재작업 지시
+- `artifacts.alternatives`: KAC-DECISION-LOG 결정 본문에 첨부할 재고된 대안
+  목록(최소 1개). approve/request-changes 결정 직전에 비교한 옵션.
 
 예시:
 

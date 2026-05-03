@@ -65,6 +65,8 @@ artifacts 권장 키 (pm):
 - `artifacts.acceptance_criteria[]`: 안정 `AC-ID` 가 포함된 검증 가능한 수용 기준 목록
 - `artifacts.out_of_scope`: 명시적 out-of-scope 항목
 - `artifacts.conflict_notes`: 누적 결정과의 충돌 메모
+- `artifacts.alternatives`: KAC-DECISION-LOG 결정 본문에 첨부할 재고된 대안
+  목록(최소 1개). 시나리오 범위 결정 시 검토한 다른 옵션·이유.
 
 예시:
 

@@ -60,6 +60,9 @@ artifacts 권장 키 (po):
 - `artifacts.milestone_body_proposal`: 마일스톤 본문 후보
 - `artifacts.domain_research_spec`: 도메인 리서치 스펙 변경 제안
 - `artifacts.conflict_notes`: 누적 결정과의 충돌 메모
+- `artifacts.alternatives`: KAC-DECISION-LOG 결정 본문에 첨부할 재고된 대안
+  목록(최소 1개). 본 결정으로 이어지기 전에 검토한 다른 옵션·이유. caller 가
+  knowledge_record_decision 호출 시 그대로 인용한다.
 
 예시:
 

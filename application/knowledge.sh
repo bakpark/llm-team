@@ -26,25 +26,37 @@ _knowledge_root() {
 _knowledge_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 # knowledge_record_decision <target> <decision_json>
-# decision_json 은 임의 JSON 객체. KAC-DECISION-LOG 권장 필드:
-#   decision_id, decision, alternatives, rationale, decided_at,
-#   affected_milestones, supersedes (optional)
+# decision_json 은 임의 JSON 객체. KAC-DECISION-LOG 필수 필드:
+#   decision_id, decision, alternatives, rationale, affected_milestones,
+#   decided_at(자동), supersedes(옵션)
+# Q2 / P1-5: alternatives 는 enforce — 비어있으면 reject. 의사결정 품질의
+# 단일 게이트로, 재고된 옵션 0건이라는 결정은 KAC 위반.
 # 본 함수는 decided_at 이 비어 있으면 자동으로 현재 시각을 채워 jsonl 한 줄로
 # append 한다. 멱등성은 호출 측이 idempotency_key 등으로 보장한다(append-only).
 knowledge_record_decision() {
   local target="$1" decision_json="$2"
   if [ -z "${target}" ] || [ -z "${decision_json}" ]; then
     log_warn "knowledge_record_decision: target and decision_json are required"
-    return 0
+    return 1
+  fi
+  # KAC-DECISION-LOG 필수 필드 강제: decision_id, decision, alternatives 가
+  # 비어있지 않은 string/array 여야 한다.
+  if ! printf '%s' "${decision_json}" | jq -e '
+        (.decision_id | type == "string" and length > 0) and
+        (.decision    | type == "string" and length > 0) and
+        (.alternatives | type == "array" and length > 0)
+      ' >/dev/null 2>&1; then
+    log_error "knowledge_record_decision: KAC-DECISION-LOG (P1-5) requires non-empty decision_id/decision/alternatives"
+    return 1
   fi
   local root log
   root="$(_knowledge_root "${target}")"
   log="${root}/decision-log.jsonl"
-  mkdir -p "${root}" || return 0
+  mkdir -p "${root}" || return 1
   printf '%s' "${decision_json}" \
     | jq -c --arg ts "$(_knowledge_now)" '. + (if .decided_at == null or .decided_at == "" then {decided_at: $ts} else {} end)' \
     >>"${log}" 2>/dev/null \
-    || log_warn "knowledge_record_decision: append failed for target=${target}"
+    || { log_warn "knowledge_record_decision: append failed for target=${target}"; return 1; }
   return 0
 }
 
