@@ -57,6 +57,8 @@ _human_signal_ledger_write() {
     log_error "_human_signal_ledger_write: mktemp failed"
     return 1
   }
+  # Human-signal-driven transitions do not run inside an agent lease, so they
+  # cite null lease_token. transition_ledger's split-brain guard exempts null.
   jq -n \
     --arg transition_id "$(_human_signal_uuid)" \
     --arg target_id "${target}" \
@@ -81,6 +83,7 @@ _human_signal_ledger_write() {
        idempotency_key: \$idempotency_key,
        manifest_id: \$manifest_id,
        timestamp: \$timestamp,
+       lease_token: null,
        result: \"applied\",
        duplicate: false
      } | ${extra}" >"${tmp}" || {

@@ -51,6 +51,10 @@ _recovery_ledger_write() {
   local operation="$6" lease_id="$7" result="$8"
   local tmp
   tmp="$(mktemp -t recovery-ledger.XXXXXX)" || return 1
+  # Recovery writes intentionally cite null lease_token: recovery acts after a
+  # lease has expired/been revoked, so there is no in-flight token to cite.
+  # The transition_ledger split-brain check exempts null tokens, allowing the
+  # next live worker's strictly-greater token to advance the bound.
   jq -n \
     --arg transition_id "recovery-${result}-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}" \
     --arg target_id "${target}" \
@@ -76,6 +80,7 @@ _recovery_ledger_write() {
        idempotency_key: $idempotency_key,
        manifest_id: $manifest_id,
        timestamp: $timestamp,
+       lease_token: null,
        result: $result,
        duplicate: false
      }' >"${tmp}" || { rm -f "${tmp}"; return 1; }

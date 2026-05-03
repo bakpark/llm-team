@@ -197,6 +197,8 @@ _runner_ledger_write() {
   local operation="$6" idempotency_key="$7" manifest_id="$8" result="$9"
   local tmp
   tmp="$(mktemp -t runner-ledger.XXXXXX)" || return 1
+  local lease_token
+  lease_token="$(lease_get_token "${target}" "${obj_id}" 2>/dev/null || true)"
   jq -n \
     --arg transition_id "runner-${result}-$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}" \
     --arg target_id "${target}" \
@@ -210,6 +212,7 @@ _runner_ledger_write() {
     --arg manifest_id "${manifest_id:-}" \
     --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg result "${result}" \
+    --arg lease_token "${lease_token}" \
     '{
       transition_id: $transition_id,
       target_id: $target_id,
@@ -222,6 +225,7 @@ _runner_ledger_write() {
       idempotency_key: $idempotency_key,
       manifest_id: $manifest_id,
       timestamp: $timestamp,
+      lease_token: (if $lease_token == "" then null else $lease_token end),
       result: $result,
       duplicate: false
     }' >"${tmp}" || { rm -f "${tmp}"; return 1; }

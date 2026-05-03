@@ -36,6 +36,27 @@ lease_claim() {
     fi
   fi
 
+  # Per RGC-LEASE: lease_token must be unique per lease and monotonically
+  # increasing per object_id. We persist a per-object sequence file and
+  # combine it with target + object_id to produce a deterministic, sortable
+  # token string.
+  local seq_file token_seq lease_token
+  seq_file="${dir}/${object_id}.seq"
+  if [ -f "${seq_file}" ]; then
+    token_seq="$(cat "${seq_file}" 2>/dev/null || echo 0)"
+    case "${token_seq}" in
+      ''|*[!0-9]*) token_seq=0 ;;
+    esac
+  else
+    token_seq=0
+  fi
+  token_seq=$((token_seq + 1))
+  printf '%s\n' "${token_seq}" >"${seq_file}.tmp" \
+    && mv "${seq_file}.tmp" "${seq_file}" \
+    || { rm -rf "${lock}" 2>/dev/null || true; return 1; }
+  # Zero-pad so lexicographic compare matches numeric compare up to 1e10 leases.
+  lease_token="$(printf '%s-lt-%010d' "${object_id}" "${token_seq}")"
+
   lease_id="${operation}-${object_id}-${now}-$$"
   local expires_epoch expires_at
   expires_epoch=$((now + ttl_seconds))
@@ -49,6 +70,7 @@ lease_claim() {
     --arg expires_at "${expires_at}" \
     --argjson expires_epoch "${expires_epoch}" \
     --argjson input_revision_pins "${pins_json}" \
+    --arg lease_token "${lease_token}" \
     '{
       lease_id: $lease_id,
       object_id: $object_id,
@@ -57,13 +79,33 @@ lease_claim() {
       claimed_at: $claimed_at,
       expires_at: $expires_at,
       expires_epoch: $expires_epoch,
-      input_revision_pins: $input_revision_pins
+      input_revision_pins: $input_revision_pins,
+      lease_token: $lease_token
     }' >"${lease_file}" || {
       rm -rf "${lock}" 2>/dev/null || true
       return 1
     }
   rm -rf "${lock}" 2>/dev/null || true
   printf '%s\n' "${lease_id}"
+}
+
+# lease_get_token <target> <object_id>
+# Echoes the lease_token of the current active lease for object_id, or empty
+# (rc=1) if no active lease exists. Best-effort — does not check expiry, since
+# Caller writes inside an in-flight lease should still cite even on the edge of
+# expiry (split-brain detection is the ledger's concern).
+lease_get_token() {
+  local target="$1" object_id="$2"
+  if [ -z "${target}" ] || [ -z "${object_id}" ]; then
+    return 1
+  fi
+  local lease_file
+  lease_file="$(lease_dir "${target}")/${object_id}.json"
+  [ -f "${lease_file}" ] || return 1
+  local token
+  token="$(jq -r '.lease_token // ""' "${lease_file}" 2>/dev/null || echo "")"
+  [ -n "${token}" ] || return 1
+  printf '%s\n' "${token}"
 }
 
 lease_release() {

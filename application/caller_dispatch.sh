@@ -91,6 +91,8 @@ _caller_ledger_write() {
     log_error "_caller_ledger_write: mktemp failed"
     return 1
   }
+  local lease_token
+  lease_token="$(lease_get_token "${target}" "${object_id}" 2>/dev/null || true)"
   jq -n \
     --arg transition_id "$(_caller_uuid)" \
     --arg target_id "${target}" \
@@ -103,6 +105,7 @@ _caller_ledger_write() {
     --arg idempotency_key "${idempotency_key}" \
     --arg manifest_id "${manifest_id}" \
     --arg timestamp "$(_caller_now)" \
+    --arg lease_token "${lease_token}" \
     "{
        transition_id: \$transition_id,
        target_id: \$target_id,
@@ -115,6 +118,7 @@ _caller_ledger_write() {
        idempotency_key: \$idempotency_key,
        manifest_id: \$manifest_id,
        timestamp: \$timestamp,
+       lease_token: (if \$lease_token == \"\" then null else \$lease_token end),
        result: \"applied\",
        duplicate: false
      } | ${extra_program}" >"${tmp}" || {
