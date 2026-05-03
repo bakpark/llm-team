@@ -65,6 +65,11 @@ context_manifest_validate "${trunc_manifest}" \
 jq -e '.entries[0].truncated == true and (.entries[0].truncation_reason | length > 0)' \
   "${trunc_manifest}" >/dev/null \
   || fail "truncated/truncation_reason fields must be persisted on the entry"
+# P1-2 lock + code_tree: tree fetch_scope must be accepted as valid.
+tree_manifest="$(context_manifest_create "contract-test-tree" "Compose-PO" "milestone" "M-tree")"
+context_manifest_add_entry "${tree_manifest}" "code_tree" "owner/repo" "tree" "abc1234" true "read-only codebase access"
+context_manifest_validate "${tree_manifest}" || fail "manifest with tree fetch_scope should validate"
+
 # fetch_scope enum must still reject invalid values (P1-2 lock).
 if context_manifest_add_entry "${trunc_manifest}" "task" "T-3" "anywhere" "rev-3" \
      true "bad scope" 2>/dev/null; then
