@@ -103,3 +103,106 @@
 - 5개 fix/chore 커밋 (위 표 A 참고)
 - 본 문서 (`docs/history/e2e-pipeline-2026-05-03.md`)
 - workdir/llm-team/* (manifests, ledger, daemon log) — gitignored, 보존됨
+
+---
+
+## 재실행 (fix 적용 후, 2026-05-03 20:49 ~ 23:32 KST, ~2h45m)
+
+위 B 섹션의 미해결 결함 3건 (B-1 / B-2 / B-3) 에 대한 코드 fix 4 commit
+(`7c9e6ea` ledger reason+backoff infra, `0d96fdc` B-2, `eb8f198` B-1,
+`4b7a720` B-3) 적용 후 동일 e2e 절차 재실행. 이전 실행과 같은 worktree·daemon
+설정 (interval 120s, lease TTL 30m, 30s 모니터, auto-approve injector).
+
+### 도달 깊이 비교
+
+| Stage | 이전 e2e (~7h) | 재실행 (~2h45m) |
+|-------|----------------|-----------------|
+| 0. Promote (issue → milestone) | ✅ ms#7, #8 | ✅ ms#9, #10 |
+| 1. PO Compose-PO → PO_GATE | ✅✅ | ✅✅ |
+| 2. Auto-approve PO_GATE → PM_DRAFT | ✅✅ | ✅✅ |
+| 3. PM Compose-PM → PM_GATE | ✅✅ | ✅✅ |
+| 4. Auto-approve PM_GATE → DECOMPOSE_READY | ✅✅ | ✅✅ |
+| 5. Planner Decompose → IMPLEMENTING | ✅✅ (ms#7 6 task / ms#8 14 task) | ✅✅ (ms#9 4 task / ms#10 6 task) |
+| 6. Coder Implement | ❌ 47회 무한 retry 후 ROI 한계 | ❌ → **자동 ESCALATED** (4 task × 3회 = 12 error 후 차단) |
+
+→ 양 milestone 모두 IMPLEMENTING 통과. Coder 단계의 LLM 출력 품질 한계는
+변하지 않았지만 **무한 retry 가 retry guard 로 결정적으로 차단됨**.
+
+### Ledger 통계 비교
+
+| 지표 | 이전 e2e | 재실행 | 비고 |
+|---|---|---|---|
+| 총 row 증가분 | 154 (이전 e2e 전체) | 36 (재실행 본 segment) | 재실행은 이전 ledger 위에 append (155–190) |
+| applied | 14 | 16 | 도달 깊이 동일하면서 약간 증가 (PO/PM/Planner 통과 정상) |
+| error | 138 | **12** | retry guard 가 무한 retry 차단 → 비용 1/12 |
+| escalated | 0 | **4** | 새 retry guard 발동 (task #44, #45, #48, #52) |
+| stale | 1 | 2 | 비슷한 수준 |
+| recovered | 1 | 2 | recovery_scan 정상 |
+
+### Fix 검증 결과
+
+#### B-1 (title suffix + silent swallow 제거) — 검증 ✓
+- 생성된 milestone title:
+  - ms#9 = `draft: feature-request #22 @2026-05-03T09:34:21Z`
+  - ms#10 = `draft: feature-request #23 @2026-05-03T09:34:23Z`
+- 두 milestone 모두 promote 단계에서 422 충돌 0건 (이전 closed milestone 잔존
+  이 없는 환경이라 직접 충돌은 자연 발생 안 함; suffix 적용은 단위 테스트
+  + 실 e2e title 모두 확인).
+- promote silent swallow 제거 효과는 본 e2e 에선 promote 실패 0건이라 발동
+  없음 (단위 테스트로 fallback 경로 cover).
+
+#### B-2 (ws_apply_patch 진단 + retry guard) — 검증 ✓ (핵심)
+- 4 task (#44, #45, #48, #52) 모두 같은 패턴:
+  ```
+  cycle 1: stale (envelope pin 자체-stale; LLM 호출 ~3분 동안 milestone updated_at 바뀜)
+  cycle 2-4: error 3회
+  cycle 5: ESCALATED, reason="retry_guard:3 consecutive errors"
+  ```
+- 이전 e2e 의 task #24 (47회 동일 패턴 반복) 와 비교: **47회 → 5회로 차단**.
+  Coder 비용/시간이 단일 task 당 ~10× 절감.
+- ESCALATED 도달 후에는 ready_object_pick 이 더 이상 픽업 안 함 → daemon 이
+  계속 idle 사이클만 돌고 신규 비용 0. 이전 실행의 7시간 → 2h45m 으로 전체
+  실행 시간도 절반 이하.
+
+#### B-3 (lr_invoke transport_error 분류 + backoff retry) — 발동 없음
+- 본 실행에서는 Anthropic API 가 transport_error 를 한 번도 반환하지 않음
+  (이전 e2e 의 ms#8 Decompose 1+시간 retry 같은 이벤트 0건). 코드 경로 자체
+  는 단위 테스트 (`tests/lib/test-llm-runner-port.sh` 확장) 로 cover.
+- runner 의 lr_call 로그 형식 변경은 적용 확인:
+  `runner: lr_call exit_status=ok reason=none attempt=1/3` (이전엔 `exit_status=ok` 만).
+
+### 잔존 이슈 (재실행에서 새로 관찰)
+
+- **첫 cycle stale**: Coder 의 첫 ws_apply_patch 시도가 매번 stale revision 으로
+  실패 (ledger 의 task #44 첫 row 의 `result=stale` 참조). 원인 추정: lr_call
+  이 ~3분 걸리는데 그동안 task issue 의 updated_at 이 다른 사이클 활동
+  (라벨 transition, 코멘트 추가 등) 으로 바뀌어 envelope 의 input_revision_pin
+  이 stale 처리됨. 본 retry guard 는 stale 후 error 3회 까지 대기하는데, stale
+  자체도 retry guard 카운트에 포함시킬지는 별도 정책 결정 필요.
+- **task 간 격상 후 milestone-level 정리 부재**: ms#9 의 4 task 가 모두
+  ESCALATED 됐지만 milestone 자체는 IMPLEMENTING 으로 머묾. milestone-level
+  격상 (`milestone-IMPLEMENTING-ESCALATED`) 매트릭스가 없어서 자동 진전 불가.
+  운영상 사람이 task 들을 진단/리셋하거나 milestone 도 격상해야 함.
+
+### 후속 권장 (변경)
+
+이전 권장 P0 (Coder/Planner 무한 retry guard) 와 P0 (precheck 진단) 는 본
+fix 로 해결됨. 새 우선순위:
+
+1. **P1** — 첫 cycle stale 자체 흡수 또는 카운트: lr_call 동안 발생한
+   metadata-only updated_at 변경은 무해하므로, revision_pin_revalidate 가 이를
+   체질 (예: timestamp 만 변하고 본문/state 변동 없는 경우 ok) 하거나, retry
+   guard 가 stale 도 카운트하도록 확장.
+2. **P1** — `ws_apply_patch` precheck 의 진단 정보를 ledger reason 에도 캡처.
+   현재는 log_error 에만 들어가고 ledger 의 reason 필드는 null. precheck
+   diag 첫 줄을 reason 으로 옮기면 문서/통계에서 즉시 확인 가능.
+3. **P2** — milestone-level 자동 격상: 모든 task 가 ESCALATED 면 milestone 도
+   자동으로 ESCALATED 로 전이 (state matrix 확장 필요).
+4. **P2** — `lr_invoke` transport_error 의 backoff retry 동작 검증을 fake
+   adapter 시퀀스 fixture 로 통합 테스트 cover (현재는 단위 분류만).
+
+### 본 재실행에서 추가된 산출
+
+- 4 fix/feat 커밋 (`7c9e6ea` / `0d96fdc` / `eb8f198` / `4b7a720`).
+- 본 섹션 (`docs/history/e2e-pipeline-2026-05-03.md` 추가).
+- 백업 ledger: `/tmp/e2e-260503-ledger-rerun.jsonl` (190 rows).
