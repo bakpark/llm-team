@@ -61,18 +61,16 @@ ready_object_pick() {
 # Internal pickers (one per role group)
 # ============================================================================
 
-# PO: feature-request issue without milestone first, then PO_DRAFT milestone.
+# PO: PO_DRAFT milestone (post-promote).
+# 이전 구현은 unaccepted feature_request_issue 도 후보로 반환했으나, 그 경로는
+# _caller_apply_spec_proposal 가 milestone target 을 가정하므로 항상 apply
+# 실패로 귀결되었다 (it_milestone_update on issue#N 시도). Promote 가 같은
+# cycle 내에서 PO 데몬에 의해 우선 실행되므로 (scheduler/runner.sh:
+# feature_request_promote → ready_object_pick), pick 시점에는 PO_DRAFT
+# milestone 이 적재되어 있다. Promote 가 실패해도 다음 cycle 의 promote 가
+# 흡수하므로 PO 가 idle 사이클을 돌더라도 데이터 손실 없음.
 _ready_object_pick_po() {
   local repo="$1"
-  local fr_label="${LABEL_FEATURE_REQUEST:-feature-request}"
-  fr_label="$(label_with_prefix "${TARGET_LABEL_PREFIX:-}" "${fr_label}")"
-  local issue_num
-  issue_num="$(it_issue_list_with_label "${repo}" "${fr_label}" --no-milestone 2>/dev/null \
-                | head -n 1)"
-  if [ -n "${issue_num}" ]; then
-    printf 'feature_request_issue\t%s\n' "${issue_num}"
-    return 0
-  fi
   _ready_object_pick_milestone "${repo}" PO_DRAFT
 }
 

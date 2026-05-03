@@ -135,12 +135,14 @@ it_issue_set_state "${REPO}" "${coder_b}" TASK_READY >/dev/null
 it_issue_set_blocked_by "${REPO}" "${coder_b}" "${blocker_integrated}" >/dev/null
 
 # ----------------------------------------------------------------------------
-# (1) PO: feature-request issue must take priority over PO_DRAFT milestone.
+# (1) PO: PO_DRAFT milestone 만 픽업한다. feature_request_issue 는 promote 단
+#     계 책임이며, _caller_apply_spec_proposal 가 milestone target 만 적용
+#     가능하므로 raw issue 를 픽업하면 항상 apply 실패였다 — 픽업 단계에서 차단.
 # ----------------------------------------------------------------------------
-assert_pick_eq PO feature_request_issue "${fr_issue}"
+assert_pick_eq PO milestone "${po_ms}"
 
-# Once the feature-request issue is linked to a milestone (no longer "intake"
-# stage), PO must fall through to the PO_DRAFT milestone.
+# feature-request issue 가 promote 되어 milestone 에 링크되어도 동일하게 PO_DRAFT
+# milestone 이 픽업된다 (intake 단계 자체가 picker 책임이 아님).
 it_issue_link_to_milestone "${REPO}" "${fr_issue}" "${po_ms}" >/dev/null
 assert_pick_eq PO milestone "${po_ms}"
 
