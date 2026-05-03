@@ -362,6 +362,7 @@ ws_list() {
 # ws_get_branch_head <repo> <branch>  → echo head sha of <branch>
 # `repo` 인자는 contract 시그니처 호환용 — git_worktree adapter 는 canonical clone 을
 # 사용하므로 TARGET_NAME 기반 clone path 에서 조회. 인자 검증만 수행.
+# live pin 조회: fetch 후 origin/<branch> 를 우선 반환 (로컬 HEAD 는 stale 가능).
 ws_get_branch_head() {
   local repo="$1" branch="$2"
   if [ -z "${repo}" ] || [ -z "${branch}" ]; then
@@ -374,16 +375,17 @@ ws_get_branch_head() {
     log_error "ws_get_branch_head: canonical clone missing at ${clone_path}; call ws_ensure_clone first"
     return 1
   fi
-  # 로컬에 branch ref 가 있으면 그대로, 없으면 fetch 후 origin/<branch>.
+  # fetch 후 origin/<branch> 우선 (로컬 branch HEAD 는 stale 가능하므로)
   (
     cd "${clone_path}" || exit 1
-    if git rev-parse --verify --quiet "${branch}" >/dev/null 2>&1; then
-      git rev-parse "${branch}"
-      exit 0
-    fi
     git fetch --quiet origin "${branch}" >/dev/null 2>&1 || true
     if git rev-parse --verify --quiet "origin/${branch}" >/dev/null 2>&1; then
       git rev-parse "origin/${branch}"
+      exit 0
+    fi
+    # fallback: 로컬 branch ref
+    if git rev-parse --verify --quiet "${branch}" >/dev/null 2>&1; then
+      git rev-parse "${branch}"
       exit 0
     fi
     exit 1
@@ -392,7 +394,6 @@ ws_get_branch_head() {
     return 1
   }
 }
-
 # ws_get_branch_base <repo> <branch>  → echo merge-base sha (branch ↔ integration)
 # integration branch 는 ${LLM_TEAM_INTEGRATION_BRANCH:-integration} 에서 결정.
 ws_get_branch_base() {
@@ -434,4 +435,111 @@ ws_get_branch_base() {
     log_error "ws_get_branch_base: cannot compute merge-base for '${branch}' against '${integration}'"
     return 1
   }
+}
+
+# ws_ensure_ro_tree <target>  → echo ro_path
+# target 의 read-only code tree 를 보장하고 경로를 stdout 으로 반환.
+# canonical clone 에서 fetch 후 origin/<default_branch> SHA 로 detached worktree 생성.
+# 기존 repo-ro 가 stale 이면 제거 후 재생성. idempotent.
+ws_ensure_ro_tree() {
+  local target="${1:-${TARGET_NAME:-}}"
+  if [ -z "${target}" ]; then
+    log_error "ws_ensure_ro_tree: target name is required"
+    return 1
+  fi
+  local clone_path ro_path source_sha current_sha
+  clone_path="$(_workspace_clone_path)"
+  ro_path="${LLM_TEAM_ROOT}/workdir/${target}/repo-ro"
+
+  if [ ! -d "${clone_path}/.git" ]; then
+    log_error "ws_ensure_ro_tree: canonical clone missing at ${clone_path}; call ws_ensure_clone first"
+    return 1
+  fi
+
+  # source commit 결정: fetch 후 origin/<default_branch> 사용 (로컬 HEAD 는 stale 가능)
+  if ! _workspace_fetchlock_acquire; then
+    log_error "ws_ensure_ro_tree: failed to acquire fetchlock for target '${target}'; aborting"
+    return 1
+  fi
+  source_sha="$(
+    cd "${clone_path}" || exit 1
+    git fetch --prune origin >/dev/null 2>&1
+    if git rev-parse --verify --quiet "origin/${TARGET_DEFAULT_BRANCH:-main}" >/dev/null 2>&1; then
+      git rev-parse "origin/${TARGET_DEFAULT_BRANCH:-main}"
+    else
+      git rev-parse HEAD
+    fi
+  )"
+  local fetch_rc=$?
+  _workspace_fetchlock_release
+  if [ "${fetch_rc}" -ne 0 ] || [ -z "${source_sha}" ]; then
+    log_error "ws_ensure_ro_tree: failed to resolve source SHA for ${target}"
+    return 1
+  fi
+
+  # 기존 repo-ro 가 있으면 stale 체크
+  if [ -d "${ro_path}" ]; then
+    current_sha="$(cd "${ro_path}" && git rev-parse HEAD 2>/dev/null)" || true
+    if [ "${current_sha}" = "${source_sha}" ]; then
+      # idempotent: 동일 SHA — 권한만 재확인
+      find "${ro_path}" -type d ! -perm -u+x -exec chmod u+x {} \; 2>/dev/null || true
+      find "${ro_path}" -type d -exec chmod a-w {} + 2>/dev/null || true
+      find "${ro_path}" -type f -exec chmod a-w {} + 2>/dev/null || true
+      printf '%s\n' "${ro_path}"
+      return 0
+    fi
+    # stale: 제거 후 재생성 (쓰기 권한 임시 복원)
+    log_info "ws_ensure_ro_tree: repo-ro stale (current=${current_sha} source=${source_sha}); refreshing"
+    chmod -R u+w "${ro_path}" 2>/dev/null || true
+    _workspace_fetchlock_acquire || {
+      log_error "ws_ensure_ro_tree: failed to acquire fetchlock for remove; aborting"
+      return 1
+    }
+    ( cd "${clone_path}" && git worktree remove --force "${ro_path}" >/dev/null 2>&1 ) || true
+    _workspace_fetchlock_release
+    rm -rf "${ro_path}" 2>/dev/null || true
+  fi
+
+  # detached worktree 생성
+  if ! _workspace_fetchlock_acquire; then
+    log_error "ws_ensure_ro_tree: failed to acquire fetchlock for worktree add; aborting"
+    return 1
+  fi
+  (
+    cd "${clone_path}" || exit 1
+    git worktree add --detach "${ro_path}" "${source_sha}" >/dev/null 2>&1
+  )
+  local add_rc=$?
+  _workspace_fetchlock_release
+  if [ "${add_rc}" -ne 0 ]; then
+    log_error "ws_ensure_ro_tree: git worktree add failed for ${ro_path}"
+    return 1
+  fi
+
+  # read-only 강제 (디렉토리 x 권한은 유지)
+  find "${ro_path}" -type d -exec chmod a-w {} + 2>/dev/null || true
+  find "${ro_path}" -type f -exec chmod a-w {} + 2>/dev/null || true
+
+  printf '%s\n' "${ro_path}"
+}
+
+# ws_ro_tree_revision_pin <target>  → echo sha
+# 현재 RO tree 가 고정한 commit SHA 반환. repo-ro 가 없으면 실패.
+ws_ro_tree_revision_pin() {
+  local target="${1:-${TARGET_NAME:-}}"
+  if [ -z "${target}" ]; then
+    log_error "ws_ro_tree_revision_pin: target name is required"
+    return 1
+  fi
+  local ro_path="${LLM_TEAM_ROOT}/workdir/${target}/repo-ro"
+  if [ ! -d "${ro_path}" ]; then
+    log_error "ws_ro_tree_revision_pin: repo-ro not found at ${ro_path}; call ws_ensure_ro_tree first"
+    return 1
+  fi
+  local sha
+  sha="$(cd "${ro_path}" && git rev-parse HEAD 2>/dev/null)" || {
+    log_error "ws_ro_tree_revision_pin: failed to get HEAD SHA from ${ro_path}"
+    return 1
+  }
+  printf '%s\n' "${sha}"
 }
