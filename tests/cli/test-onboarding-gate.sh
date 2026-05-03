@@ -69,7 +69,6 @@ stale_threshold_minutes: 60
 enabled: true
 onboarding:
   schema: github-pipeline/v1
-  self_hosting: false
   acks: {}
 EOF
 

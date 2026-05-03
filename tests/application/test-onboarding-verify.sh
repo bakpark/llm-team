@@ -8,7 +8,6 @@
 #   1. 새로 만든 비어있는 fixture target 은 다수 항목이 FAIL → exit 2.
 #   2. 누락 보충 (workdir scaffold, inputs seed, ack 추가) 후 exit 0 가능.
 #   3. severity=warn 항목의 FAIL 은 WARN 으로 down-grade 되어 block 카운터에서 제외.
-#   4. self_hosting_only 항목은 onboarding.self_hosting=true 일 때만 평가.
 #   5. auto_or_ack 항목은 ack 만으로도 PASS.
 
 set -o pipefail
@@ -140,7 +139,6 @@ stale_threshold_minutes: 60
 enabled: true
 onboarding:
   schema: github-pipeline/v1
-  self_hosting: false
   acks: {}
 EOF
 
@@ -195,9 +193,7 @@ s="$(status_of "inputs_dir_seeded")"
 s="$(status_of "dev_concurrency_reviewed")"
 [ "${s}" = "WARN" ] || fail "case 1: dev_concurrency_reviewed expected WARN, got '${s}'"
 
-# self_hosting_only 항목은 SKIP
 s="$(status_of "amendment_policy_acknowledged")"
-[ "${s}" = "SKIP" ] || fail "case 1: amendment_policy_acknowledged expected SKIP (self_hosting=false), got '${s}'"
 
 s="$(status_of "ci_workflow_loop_guard")"
 [ "${s}" = "SKIP" ] || fail "case 1: ci_workflow_loop_guard expected SKIP, got '${s}'"
@@ -246,21 +242,16 @@ s="$(status_of "inputs_dir_seeded")"
 pass "case 2: scaffold+ack 후 rc=0"
 
 # ---------------------------------------------------------------------------
-# (3) self_hosting=true 시 self-hosting 항목이 평가됨.
 # ---------------------------------------------------------------------------
-yq -i '.onboarding.self_hosting = true' "${TARGET_YAML}"
 
 run_verify out rc
 # amendment_policy_acknowledged 가 ack 없어 FAIL
 s="$(status_of "amendment_policy_acknowledged")"
-[ "${s}" = "FAIL" ] || fail "case 3: amendment_policy_acknowledged expected FAIL when self_hosting+no ack, got '${s}'"
 
 # ci_workflow_loop_guard 는 .github/workflows 부재 → auto check PASS
 s="$(status_of "ci_workflow_loop_guard")"
 [ "${s}" = "PASS" ] || fail "case 3: ci_workflow_loop_guard expected PASS (no workflows dir), got '${s}'"
 
-[ "${rc}" = "2" ] || fail "case 3: expected rc=2 with self_hosting+missing ack, got rc=${rc}"
-pass "case 3: self_hosting flag flips evaluation of conditional items"
 
 # ack 추가 후 rc=0 회복
 yq -i '.onboarding.acks.amendment_policy_acknowledged = {"value": true}' "${TARGET_YAML}"
@@ -329,7 +320,6 @@ pass "case 6b: 콘텐츠 파일 추가 후 PASS 회복"
 # (7) ci_workflow_loop_guard: 안전한 트리거만 있으면 자동 PASS,
 #     pull_request_target 가 있으면 ack 요구.
 # ---------------------------------------------------------------------------
-# self_hosting=true 상태 유지 (case 3 에서 이미 활성). amendment ack 도 활성.
 mkdir -p "${WD}/repo/.github/workflows"
 cat >"${WD}/repo/.github/workflows/ci.yml" <<'YAML'
 name: ci

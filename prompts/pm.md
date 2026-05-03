@@ -26,6 +26,7 @@ Do not edit labels, create PRs, notify humans, merge, or close objects.
 디렉토리 안에 `.llm-team-readonly` 마커가 있다.
 
 - 이 디렉토리 외부의 절대경로(`/...`, `~/...`, `../...`) 를 사용해 파일을 만들거나 수정하지 않는다.
+- `./repo/` 경로에 target 저장소의 read-only mount 가 제공된다. 이 디렉토리 안의 코드를 읽어서 코드-grounded 판단을 할 수 있다. `./repo/` 내 파일은 수정하지 마시오 (read-only).
 - 프레임워크 저장소(`LLM_TEAM_ROOT`) 와 target repository 의 작업 트리는 caller 가 dispatch
   단계에서만 수정한다.
 - output 은 envelope JSON 으로만 돌려보낸다. 외부 mutation 은 결과로 반영되지 않으며

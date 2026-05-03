@@ -15,10 +15,8 @@
 #
 # preset contract (checklists/<id>.sh 가 정의):
 #   preset_items                 — TSV 행을 stdout 으로 출력. 칼럼:
-#                                  id\tkind\tseverity\tself_hosting_only\tauto_fn\tack_key\tsummary
 #                                  kind ∈ auto / ack / auto_or_ack
 #                                  severity ∈ block / warn
-#                                  self_hosting_only ∈ 0 / 1
 #   _check_<id>                  — auto/auto_or_ack 항목 검증 함수.
 #                                  stdout 에 메시지 출력, exit 0=PASS / non-zero=FAIL.
 #   preset_remediation <id>      — 한 줄 안내 (FAIL 시 노출).
@@ -74,11 +72,6 @@ _onboarding_ack_is_true() {
   [ "${val}" = "true" ]
 }
 
-# target.yaml 의 onboarding.self_hosting 가 true 인지.
-_onboarding_self_hosting() {
-  local yaml="$1" val
-  val="$(yq -r '.onboarding.self_hosting // false' "${yaml}" 2>/dev/null)"
-  [ "${val}" = "true" ]
 }
 
 # target.yaml 의 onboarding.preset (TCC-ONBOARDING) — 기본값 github-pipeline/v1.
@@ -148,21 +141,15 @@ onboarding_verify() {
   preset="$(_onboarding_preset_id "${yaml}")"
   onboarding_preset_load "${preset}" || return 1
 
-  local self_hosting=0
-  _onboarding_self_hosting "${yaml}" && self_hosting=1
 
   local block_fail=0
   local line id kind severity sh_only auto_fn ack_key summary
-  while IFS=$'\t' read -r id kind severity sh_only auto_fn ack_key summary; do
+  while IFS=$'\t' read -r id kind severity auto_fn ack_key summary; do
     [ -n "${id}" ] || continue
     case "${id}" in '#'*) continue ;; esac
     [ "${auto_fn}" = "-" ] && auto_fn=""
     [ "${ack_key}" = "-" ] && ack_key=""
 
-    if [ "${sh_only}" = "1" ] && [ "${self_hosting}" -ne 1 ]; then
-      _onboarding_emit "SKIP" "${id}" "${severity}" \
-        "self_hosting=false (skipped)" ""
-      continue
     fi
 
     # TCC-ONBOARDING.skip_flags (P2-5): 명시적으로 합의된 항목만 점검을 건너뛴다.

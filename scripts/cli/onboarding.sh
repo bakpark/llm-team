@@ -74,10 +74,8 @@ _onb_print_table() {
   local schema sh
   schema="$(yq -r '.onboarding.preset // .onboarding.schema // "github-pipeline/v1"' \
     "$(cli_target_file "${target}")")"
-  sh="$(yq -r '.onboarding.self_hosting // false' \
     "$(cli_target_file "${target}")")"
 
-  printf '[%s] target=%s  self_hosting=%s\n\n' "${schema}" "${target}" "${sh}"
 
   local total=0 pass=0 fail=0 warn=0 skip=0
   local status id severity message remediation color reset
@@ -107,20 +105,17 @@ _onb_to_json() {
   local schema sh
   schema="$(yq -r '.onboarding.preset // .onboarding.schema // "github-pipeline/v1"' \
     "$(cli_target_file "${target}")")"
-  sh="$(yq -r '.onboarding.self_hosting // false' \
     "$(cli_target_file "${target}")")"
 
   jq -n \
     --arg target "${target}" \
     --arg schema "${schema}" \
-    --argjson self_hosting "$([ "${sh}" = "true" ] && echo true || echo false)" \
     --argjson exit_code "${rc}" \
     --rawfile body <(printf '%s' "${body}") \
     '
     {
       target: $target,
       schema: $schema,
-      self_hosting: $self_hosting,
       exit_code: $exit_code,
       items: ($body | split("\n") | map(select(length > 0)) | map(
         split("\t") | {

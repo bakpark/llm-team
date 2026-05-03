@@ -374,6 +374,43 @@ fi
 # against the post-transition pin (otherwise revalidate sees a self-stale pin).
 TARGET_REVISION_PIN="$(_runner_pin_for "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}")"
 
+# code_tree: PO/PM/Planner RO tree pre-manifest guarantee (plan §Step 5)
+RO_PATH=""
+CODE_TREE_PIN=""
+case "${ROLE}" in
+  PO|PM|Planner)
+    ws_ensure_clone "${TARGET}" >/dev/null 2>&1 || {
+      log_error "runner: ws_ensure_clone failed (${ROLE}) — skipping cycle"
+      _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+      _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
+        "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
+        "${OPERATION}" "" "" "error" \
+        "ws_ensure_clone failed" || true
+      exit 1
+    }
+    RO_PATH="$(ws_ensure_ro_tree "${TARGET}" 2>/dev/null)" || {
+      log_error "runner: ws_ensure_ro_tree failed (${ROLE}) — skipping cycle"
+      _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+      _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
+        "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
+        "${OPERATION}" "" "" "error" \
+        "ws_ensure_ro_tree failed" || true
+      exit 1
+    }
+    CODE_TREE_PIN="$(ws_ro_tree_revision_pin "${TARGET}" 2>/dev/null)" || {
+      log_error "runner: ws_ro_tree_revision_pin failed (${ROLE}) — skipping cycle"
+      _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+      _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
+        "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
+        "${OPERATION}" "" "" "error" \
+        "ws_ro_tree_revision_pin failed" || true
+      exit 1
+    }
+    export TARGET_RO_TREE_PATH="${RO_PATH}"
+    ;;
+esac
+
+
 # ============================================================================
 # Manifest build (primary entry)
 # ============================================================================
@@ -403,6 +440,21 @@ case "${ROLE}" in
     fi
     ;;
 esac
+
+
+# code_tree manifest entry inject (plan §Step 5) — before context_manifest_validate
+if [[ "${ROLE}" == "PO" || "${ROLE}" == "PM" || "${ROLE}" == "Planner" ]]; then
+  if [ -n "${CODE_TREE_PIN}" ]; then
+    context_manifest_add_entry \
+      "${MANIFEST_FILE}" \
+      "code_tree" \
+      "${TARGET_GH_OWNER}/${TARGET_GH_REPO}" \
+      "tree" \
+      "${CODE_TREE_PIN}" \
+      "true" \
+      "read-only target codebase for grounded reasoning"
+  fi
+fi
 
 context_manifest_validate "${MANIFEST_FILE}" || {
   log_error "runner: manifest validate failed"

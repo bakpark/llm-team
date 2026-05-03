@@ -68,6 +68,27 @@ agent_workspace_for() {
 caller 에게 envelope output 으로만 결과를 돌려주세요.
 MARKER
       fi
+      # code_tree: RO tree symlink (plan §Step 4)
+      local ro_tree="${TARGET_RO_TREE_PATH:-${LLM_TEAM_ROOT}/workdir/${TARGET_NAME}/repo-ro}"
+      if [ -n "${TARGET_RO_TREE_PATH:-}" ] || [ -d "${ro_tree}" ]; then
+        if [ ! -d "${ro_tree}" ]; then
+          log_error "agent_workspace_for: RO tree missing: ${ro_tree}"
+          return 1
+        fi
+        if [ -L "${path}/repo" ]; then
+          local current
+          current="$(readlink "${path}/repo")"
+          if [ "${current}" != "${ro_tree}" ]; then
+            rm -f "${path}/repo"
+            ln -s "${ro_tree}" "${path}/repo"
+          fi
+        elif [ ! -e "${path}/repo" ]; then
+          ln -s "${ro_tree}" "${path}/repo"
+        else
+          log_error "agent_workspace_for: ${path}/repo exists and is not managed symlink"
+          return 1
+        fi
+      fi
       printf '%s\n' "${path}"
       ;;
     *)

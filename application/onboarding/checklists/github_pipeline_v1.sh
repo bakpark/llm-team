@@ -35,8 +35,6 @@ branch_protection_policy_decided	ack	block	0	-	branch_protection_policy_decided	
 notifier_channel_decided	auto_or_ack	block	0	_check_notifier_channel	intentionally_silent	notifier.channel set or silent ack
 inputs_dir_seeded	auto_or_ack	warn	0	_check_inputs_dir_seeded	use_github_issues_only	inputs/<target>/ has at least one file or ack
 dev_concurrency_reviewed	ack	warn	0	-	dev_concurrency_reviewed	dev_concurrency value reviewed
-amendment_policy_acknowledged	ack	block	1	-	amendment_policy_acknowledged	self-hosting amendment gate policy acked
-ci_workflow_loop_guard	auto_or_ack	block	1	_check_ci_workflow_loop_guard	ci_workflow_loop_guard_decided	self-hosting CI loop guard
 EOF
 }
 

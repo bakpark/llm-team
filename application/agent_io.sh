@@ -480,10 +480,24 @@ revision_pin_revalidate() {
       stale=1
       continue
     fi
-    if ! actual="$(it_revision_pin_get "${repo}" "${kind}" "${id}" 2>/dev/null)"; then
-      log_error "revision_pin_revalidate: cannot fetch live pin for ${kind}#${id}"
-      stale=1
-      continue
+    # code_tree: use workspace port instead of issue_tracker (AGC-CALL-BOUNDARY)
+    if [ "${kind}" = "code_tree" ]; then
+      if [ "${id}" != "${repo}" ]; then
+        log_error "revision_pin_revalidate: code_tree id '${id}' does not match repo '${repo}'"
+        stale=1
+        continue
+      fi
+      if ! actual="$(ws_get_branch_head "${repo}" "${TARGET_DEFAULT_BRANCH:-main}" 2>/dev/null)"; then
+        log_error "revision_pin_revalidate: code_tree ${id} live branch pin lookup failed"
+        stale=1
+        continue
+      fi
+    else
+      if ! actual="$(it_revision_pin_get "${repo}" "${kind}" "${id}" 2>/dev/null)"; then
+        log_error "revision_pin_revalidate: cannot fetch live pin for ${kind}#${id}"
+        stale=1
+        continue
+      fi
     fi
     if [ "${actual}" != "${expected}" ]; then
       log_error "revision_pin_revalidate: stale pin — ${kind}#${id}: expected='${expected}' actual='${actual}'"
