@@ -942,7 +942,7 @@ it_revision_pin_get() {
     return 1
   }
   case "${kind}" in
-    issue)
+    issue|task|feature_request_issue)
       _in_memory_issue_exists "${num}" || return 1
       jq -r '.updated_at // empty' "$(_in_memory_issue_path "${num}")"
       ;;

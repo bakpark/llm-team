@@ -301,6 +301,11 @@ pin_pr="$(it_revision_pin_get "${repo}" pr "${pr1}")"
 [ -n "${pin_pr}" ] || fail "revision_pin_get pr empty"
 pin_ms="$(it_revision_pin_get "${repo}" milestone "${ms}")"
 [ -n "${pin_ms}" ] || fail "revision_pin_get milestone empty"
+# kind aliases for issue: task / feature_request_issue must resolve identically.
+pin_task="$(it_revision_pin_get "${repo}" task "${issue1}")"
+[ "${pin_task}" = "${pin_iss}" ] || fail "revision_pin_get task should equal issue pin (got '${pin_task}' vs '${pin_iss}')"
+pin_fr="$(it_revision_pin_get "${repo}" feature_request_issue "${issue1}")"
+[ "${pin_fr}" = "${pin_iss}" ] || fail "revision_pin_get feature_request_issue should equal issue pin (got '${pin_fr}' vs '${pin_iss}')"
 
 # ----------------------------------------------------------------------------
 # (8) Progress with children

@@ -824,7 +824,7 @@ it_revision_pin_get() {
     return 1
   }
   case "${kind}" in
-    issue|pr)
+    issue|pr|task|feature_request_issue)
       gh_with_retry gh api "repos/${repo}/issues/${num}" --jq '.updated_at // empty'
       ;;
     milestone)
