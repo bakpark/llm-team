@@ -153,9 +153,20 @@ set -e
 [ "${rc_empty}" -ne 0 ] \
   || fail "feature_request_promote with empty repo should fail"
 
+# ----------------------------------------------------------------------------
+# (7) B-1: milestone title 에 issue updated_at suffix 가 붙어 있어 e2e 반복 시
+#     발생하는 GitHub milestone title 충돌(422 Validation Failed) 을 회피한다.
+# ----------------------------------------------------------------------------
+ms1_title="$(jq -r '.title // ""' "${INMEM_IT_DIR}/milestones/${picked_ms1}.json")"
+echo "${ms1_title}" | grep -qE "^draft: feature-request #${picked_issue1} @" \
+  || fail "(7) milestone title missing '@<updated_at>' suffix (got '${ms1_title}')"
+ms2_title="$(jq -r '.title // ""' "${INMEM_IT_DIR}/milestones/${picked_ms2}.json")"
+[ "${ms1_title}" != "${ms2_title}" ] \
+  || fail "(7) two promoted milestones share title (suffix not effective)"
+
 if [ "${failures}" -gt 0 ]; then
   echo "FAIL: ${failures} feature_request_promote check(s) failed" >&2
   exit 1
 fi
 
-echo "PASS: feature_request_promote (oldest-first; PO_DRAFT milestone; label transition; idempotent)"
+echo "PASS: feature_request_promote (oldest-first; PO_DRAFT milestone; label transition; idempotent; title suffix)"

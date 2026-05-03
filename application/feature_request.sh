@@ -37,8 +37,18 @@ feature_request_promote() {
   fi
 
   # Issue body 인용 + title 은 "draft: <issue title>" 형태.
-  local issue_title issue_body issue_snapshot
-  issue_title="draft: feature-request #${issue_num}"
+  # B-1 fix: title 에 issue updated_at 을 suffix 로 붙여 e2e 반복 / 잔존 closed
+  # milestone 과의 title 충돌(GitHub 422 Validation Failed: title already_exists)
+  # 을 회피한다. issue 내용이 안 바뀐 같은 cycle 내 재시도는 동일 suffix 로
+  # idempotent. it_revision_pin_get 가 updated_at(ISO timestamp) 을 반환.
+  # 어댑터가 pin 을 못 주면(in_memory 일부 케이스) suffix 없이 기존 동작 유지.
+  local issue_title issue_body issue_snapshot issue_updated_at
+  issue_updated_at="$(it_revision_pin_get "${repo}" issue "${issue_num}" 2>/dev/null || true)"
+  if [ -n "${issue_updated_at}" ]; then
+    issue_title="draft: feature-request #${issue_num} @${issue_updated_at}"
+  else
+    issue_title="draft: feature-request #${issue_num}"
+  fi
   # Source issue 본문을 milestone description 에 임베드하여 후속 PO Compose-PO
   # 가 it_object_get_snapshot(milestone) 으로 본문을 받을 때 source issue 본문이
   # 노출되도록 한다. snapshot 미가용 시(어댑터 미지원/네트워크 실패) 안전한

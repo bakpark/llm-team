@@ -262,7 +262,19 @@ if [ "${DRY_RUN}" -eq 1 ]; then
 fi
 
 if [ "${ROLE}" = "PO" ]; then
-  feature_request_promote "${TARGET_REPO}" >/dev/null 2>&1 || true
+  # B-1 fix: 이전엔 `>/dev/null 2>&1 || true` 로 모든 promote 실패가 silent
+  # swallow 됐다 (title 중복 / API 에러 모두 흔적 없음). 이제 stderr 는 흐르도록
+  # 두고, 실패 시 ledger 에 error row 를 남겨 운영 가시성을 확보한다. 처리할
+  # feature-request issue 가 없어 비0 종료(rc=1)인 정상 케이스는 silent (rc 1
+  # 만 흡수). 그 외 비0 (it_milestone_create / set_state / link 실패 등) 은 기록.
+  _fr_rc=0
+  feature_request_promote "${TARGET_REPO}" >/dev/null 2>&1 || _fr_rc=$?
+  if [ "${_fr_rc}" -ne 0 ] && [ "${_fr_rc}" -ne 1 ]; then
+    log_error "runner: feature_request_promote failed (rc=${_fr_rc})"
+    _runner_ledger_write "${TARGET}" "system" "po-promote" \
+      "(failed)" "(failed)" "Promote" "" "" "error" \
+      "feature_request_promote rc=${_fr_rc}" || true
+  fi
 fi
 
 # ============================================================================
