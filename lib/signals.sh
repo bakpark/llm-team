@@ -34,9 +34,20 @@ control_state_get() {
 control_state_set() {
   local state="$1"
   case "${state}" in
-    RUNNING|PAUSED) ;;
+    RUNNING|PAUSED|STOPPED) ;;
     *) log_error "control_state_set: invalid state '${state}'"; return 1 ;;
   esac
   mkdir -p "$(dirname "$(control_state_path)")" || return 1
   printf '%s\n' "${state}" >"$(control_state_path)"
+}
+
+# control_state_blocks_new_leases — return 0 (true) when the global control
+# state forbids new lease claims (PAUSED or STOPPED per RGC-SIGNALS).
+control_state_blocks_new_leases() {
+  local s
+  s="$(control_state_get)"
+  case "${s}" in
+    PAUSED|STOPPED) return 0 ;;
+    *) return 1 ;;
+  esac
 }

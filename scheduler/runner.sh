@@ -109,10 +109,13 @@ log_info "runner: role=${ROLE} operation=${OPERATION} target=${TARGET} repo=${TA
 
 # Operational gates ---------------------------------------------------------
 
-if [ "$(control_state_get)" = "PAUSED" ]; then
-  log_info "runner: control state is PAUSED; no lease will be claimed"
-  exit 0
-fi
+_RUNNER_CONTROL_STATE="$(control_state_get)"
+case "${_RUNNER_CONTROL_STATE}" in
+  PAUSED|STOPPED)
+    log_info "runner: control state is ${_RUNNER_CONTROL_STATE}; no lease will be claimed"
+    exit 0
+    ;;
+esac
 
 # Phase 8: recovery_scan — expired leases get state-rollback per RGC-RECOVERY.
 # run_stale_recovery now delegates to application/recovery.sh.recovery_scan.

@@ -99,6 +99,130 @@ daemon_start_role() {
   pid="$!"
   printf '%s\n' "${pid}" >"${pid_file}"
   printf 'started daemon scope=%s role=%s pid=%s log=%s\n' "${scope}" "${role}" "${pid}" "${log_file}"
+
+  # P2-7 / RGC-DAEMON-STARTUP: brief liveness check so atomic-start can detect
+  # a worker that died at boot (e.g. lockd conflict). Sleep small fraction of a
+  # second to let nohup'd process settle, then verify pid.
+  sleep 1
+  if ! cli_pid_running "${pid}"; then
+    rm -f "${pid_file}" 2>/dev/null || true
+    log_error "daemon scope=${scope} role=${role}: pid=${pid} died immediately after start"
+    return 1
+  fi
+  return 0
+}
+
+# RGC-DAEMON-STARTUP: pre-flight scan. Returns 0 if NO daemon for any
+# (scope, role) in the about-to-start set is currently holding its lockd via a
+# live pid. Returns 1 with a stderr report listing conflicts.
+daemon_start_preflight() {
+  local scope="$1" role_spec="$2"
+  local conflicts=0 role lockd lock_pid scope_safe scope_label
+  scope_label="$(cli_scope_label "${scope}")"
+  scope_safe="$(printf '%s' "${scope_label}" | tr '/ :' '___')"
+  while IFS= read -r role; do
+    [ -n "${role}" ] || continue
+    lockd="${LLM_TEAM_ROOT}/workdir/daemon-${role}-${scope_safe}.lockd"
+    [ -d "${lockd}" ] || continue
+    lock_pid="$(cat "${lockd}/pid" 2>/dev/null || true)"
+    if [ -n "${lock_pid}" ] && cli_pid_running "${lock_pid}"; then
+      printf 'preflight: lockd held by live pid for scope=%s role=%s pid=%s\n' \
+        "${scope}" "${role}" "${lock_pid}" >&2
+      conflicts=$((conflicts + 1))
+    fi
+  done <<EOF
+$(cli_expand_roles "${role_spec}")
+EOF
+  [ "${conflicts}" -eq 0 ]
+}
+
+# RGC-DAEMON-STARTUP: atomic-start wrapper. Starts every (scope, role) pair in
+# DAEMON_ROLE_SPEC. If any role fails to start, stops all already-started
+# siblings and writes a single ledger row {object_kind:system, object_id:<scope>}
+# with result=rolled_back (or escalated if a sibling refuses to stop).
+daemon_start_atomic() {
+  local scope="$1"
+  if ! daemon_start_preflight "${scope}" "${DAEMON_ROLE_SPEC}"; then
+    cli_die "daemon start aborted: lock conflicts detected (RGC-DAEMON-STARTUP)" 1
+  fi
+
+  local started_roles=() role rc
+  while IFS= read -r role; do
+    [ -n "${role}" ] || continue
+    if daemon_start_role "${scope}" "${role}" "${DAEMON_INTERVAL}"; then
+      started_roles+=("${role}")
+    else
+      log_error "daemon start: role=${role} failed; rolling back ${#started_roles[@]} sibling(s)"
+      local rb_role rb_failed=0
+      for rb_role in "${started_roles[@]+"${started_roles[@]}"}"; do
+        if ! daemon_stop_role "${scope}" "${rb_role}" >/dev/null 2>&1; then
+          rb_failed=$((rb_failed + 1))
+          log_error "daemon start rollback: stop ${rb_role} failed"
+        fi
+      done
+      _daemon_atomic_ledger "${scope}" \
+        "$([ "${rb_failed}" -eq 0 ] && echo rolled_back || echo escalated)" \
+        "${started_roles[*]+"${started_roles[*]}"}" "${role}"
+      cli_die "daemon start failed for role=${role}; siblings rolled back" 1
+    fi
+  done <<EOF
+$(cli_expand_roles "${DAEMON_ROLE_SPEC}")
+EOF
+}
+
+# Append a #RGC-LEDGER row (object_kind=system, object_id=<scope>) describing
+# an atomic-start rollback. Best-effort: ledger writer is sourced lazily, and
+# any failure is logged but does not abort the user-facing error path.
+_daemon_atomic_ledger() {
+  local scope="$1" result="$2" started="$3" failed_role="$4"
+  local target ledger_target
+  if [ "${scope}" = "all" ]; then
+    target="all"
+  else
+    target="${scope}"
+  fi
+  if ! command -v transition_ledger_write >/dev/null 2>&1; then
+    cli_source_runtime 2>/dev/null || true
+  fi
+  command -v transition_ledger_write >/dev/null 2>&1 || return 0
+  local tmp
+  tmp="$(mktemp -t daemon-startup-ledger.XXXXXX)" || return 0
+  jq -n \
+    --arg transition_id "daemon-startup-${result}-$(date -u +%s)-$$-${RANDOM}" \
+    --arg target_id "${target}" \
+    --arg object_kind "system" \
+    --arg object_id "${target}" \
+    --arg from_state "(startup)" \
+    --arg to_state "(startup)" \
+    --arg operation "DaemonStartup" \
+    --arg caller_id "cli-daemon-${USER:-unknown}-$$" \
+    --arg idempotency_key "daemon-startup-${target}-$(date -u +%s%N 2>/dev/null || date -u +%s)" \
+    --arg manifest_id "" \
+    --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg result "${result}" \
+    --arg started "${started}" \
+    --arg failed_role "${failed_role}" \
+    '{
+       transition_id: $transition_id,
+       target_id: $target_id,
+       object_kind: $object_kind,
+       object_id: $object_id,
+       from_state: $from_state,
+       to_state: $to_state,
+       operation: $operation,
+       caller_id: $caller_id,
+       idempotency_key: $idempotency_key,
+       manifest_id: $manifest_id,
+       timestamp: $timestamp,
+       lease_token: null,
+       result: $result,
+       duplicate: false,
+       result_detail: ("started_roles=" + $started + " failed_role=" + $failed_role)
+     }' >"${tmp}" 2>/dev/null || { rm -f "${tmp}"; return 0; }
+  ledger_target="${target}"
+  [ "${ledger_target}" != "all" ] || ledger_target="system"
+  transition_ledger_write "${ledger_target}" "${tmp}" 2>/dev/null || true
+  rm -f "${tmp}" 2>/dev/null || true
 }
 
 daemon_stop_role() {
@@ -217,7 +341,8 @@ case "${cmd}" in
     else
       onboarding_gate_check "${DAEMON_SCOPE}" || exit $?
     fi
-    run_for_roles daemon_start_role "${DAEMON_SCOPE}"
+    # P2-7 / RGC-DAEMON-STARTUP: atomic startup. preflight + start-all-or-rollback.
+    daemon_start_atomic "${DAEMON_SCOPE}"
     ;;
   stop)
     parse_scope_and_options "$@"

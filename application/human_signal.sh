@@ -451,6 +451,14 @@ _human_signal_apply_recover() {
 _human_signal_apply_stop() {
   local repo="$1" kind="$2" id="$3"
   case "${kind}" in
+    system)
+      # P1-17 / RGC-SIGNALS line 70: system-scope stop blocks NEW lease claims.
+      # In-flight leases continue (RGC-LEASE expiry/release handles them); only
+      # the gate to claim more is closed. control_state_set is the single
+      # source of truth read by runner.sh and lease.sh.
+      control_state_set STOPPED \
+        || { log_error "stop: control_state_set STOPPED failed"; return 1; }
+      ;;
     milestone)
       local cur
       cur="$(it_milestone_get_state "${repo}" "${id}")"

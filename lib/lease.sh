@@ -15,6 +15,14 @@ lease_claim() {
   case "${ttl_seconds}" in
     ''|*[!0-9]*) log_error "lease_claim: ttl_seconds must be a positive integer"; return 1 ;;
   esac
+  # P1-17 / RGC-SIGNALS: a `stop` signal at system scope (or a `pause` signal)
+  # blocks NEW lease claims. Defense in depth — runner.sh also checks at the
+  # top, but enforcing here means any caller path goes through one gate.
+  if declare -F control_state_blocks_new_leases >/dev/null 2>&1 \
+     && control_state_blocks_new_leases; then
+    log_warn "lease_claim: control state forbids new lease claims (object=${object_id})"
+    return 1
+  fi
   local dir lock lease_file now expires lease_id
   dir="$(lease_dir "${target}")"
   mkdir -p "${dir}" || return 1
