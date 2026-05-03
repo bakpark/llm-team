@@ -33,6 +33,7 @@
 11. [`github-side-effect-timeline.md`](github-side-effect-timeline.md) — 하나의 operation 에서 발생하는 GitHub side-effect 시퀀스.
 12. [`self-hosting.md`](self-hosting.md) — `TCC-ONBOARDING.self_hosting` 의 의미와 안전 장치.
 13. [`agent-runner-adapters.md`](agent-runner-adapters.md) — agent runner 포트의 어댑터 매핑(`claude_code`, `fake`, 향후).
+14. [`adapter-inventory.md`](adapter-inventory.md) — 5 port × production adapter 스냅샷, cross-cutting 운영 가정(단일 호스트·macOS 호환·외부 도구 의존), 한계 인덱스.
 
 ## 진행 중인 방향
 
