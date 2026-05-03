@@ -195,9 +195,12 @@ _runner_input_state_for() {
 }
 
 # Write a non-applied RGC-LEDGER entry (claim_failed / invalid / stale / error).
+# reason 은 옵셔널 (10번째 인자). 비어있으면 row 에서 null 로 기록되며, 기존
+# reason-인자 없는 호출자와 호환된다.
 _runner_ledger_write() {
   local target="$1" obj_kind="$2" obj_id="$3" from_state="$4" to_state="$5"
   local operation="$6" idempotency_key="$7" manifest_id="$8" result="$9"
+  local reason="${10:-}"
   local tmp
   tmp="$(mktemp -t runner-ledger.XXXXXX)" || return 1
   local lease_token
@@ -216,6 +219,7 @@ _runner_ledger_write() {
     --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg result "${result}" \
     --arg lease_token "${lease_token}" \
+    --arg reason "${reason}" \
     '{
       transition_id: $transition_id,
       target_id: $target_id,
@@ -230,6 +234,7 @@ _runner_ledger_write() {
       timestamp: $timestamp,
       lease_token: (if $lease_token == "" then null else $lease_token end),
       result: $result,
+      reason: (if $reason == "" then null else $reason end),
       duplicate: false
     }' >"${tmp}" || { rm -f "${tmp}"; return 1; }
   transition_ledger_write "${target}" "${tmp}" || { rm -f "${tmp}"; return 1; }

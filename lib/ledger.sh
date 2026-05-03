@@ -65,3 +65,43 @@ transition_ledger_write() {
 
   jq -c '.' "${entry_file}" >>"${path}"
 }
+
+# ledger_count_recent_errors <target> <object_kind> <object_id> <operation> <window_count>
+#
+# 가장 최근 <window_count> ledger row 를 검사해 동일 (object_kind, object_id,
+# operation) 조합이 result="error" 인 *연속* 횟수를 stdout 으로 출력 (정수).
+# "연속" 은 tail 의 끝에서부터 위로 거슬러 올라가며, 매칭 row 가 error 면
+# 카운트, applied/recovered/escalated 등 비-error 매칭 row 를 만나는 즉시 중단.
+# 매칭되지 않는 row (다른 object/op) 는 건너뜀.
+#
+# 사용처: retry guard 가 "직전 N 회 모두 같은 실패 패턴" 일 때만 ESCALATED 격상.
+# applied 가 한 번이라도 끼어 있으면 카운트 리셋 (정상 진행 후 재실패는 새 사이클).
+ledger_count_recent_errors() {
+  local target="$1" object_kind="$2" object_id="$3" operation="$4" window="${5:-100}"
+  if [ -z "${target}" ] || [ -z "${object_kind}" ] || [ -z "${object_id}" ] || [ -z "${operation}" ]; then
+    log_error "ledger_count_recent_errors: target/object_kind/object_id/operation required"
+    return 2
+  fi
+  local path
+  path="$(transition_ledger_path "${target}")"
+  if [ ! -f "${path}" ]; then
+    printf '0\n'
+    return 0
+  fi
+  tail -n "${window}" "${path}" 2>/dev/null \
+    | jq -r --arg ok "${object_kind}" --arg oid "${object_id}" --arg op "${operation}" '
+        select(.object_kind == $ok and .object_id == $oid and .operation == $op)
+        | .result // ""
+      ' 2>/dev/null \
+    | awk '
+        BEGIN { count = 0 }
+        {
+          if ($0 == "error") {
+            count++
+          } else {
+            count = 0
+          }
+        }
+        END { print count }
+      '
+}
