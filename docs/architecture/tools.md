@@ -29,11 +29,18 @@ Agent는 도구 실행 권한이 아니라 콘텐츠 산출 권한을 가진다.
 | Helper | 책임 |
 |---|---|
 | `context_manifest_create` | manifest 파일 생성(target/operation/object 식별자 + 빈 entries) |
-| `context_manifest_add_entry` | object_kind/id, fetch_scope(`metadata`/`body`/`body+comments`), revision_pin, required, purpose 추가 |
+| `context_manifest_add_entry` | object_kind/id, fetch_scope(`metadata`/`body`/`body+comments`/`tree`), revision_pin, required, purpose 추가 |
 | `context_manifest_validate` | manifest 전체 스키마 검증(`AGC-CONTEXT-MANIFEST`) |
 | `revision_pin_revalidate` (`application/agent_io.sh`) | Agent output 적용 전 revision pin 재검증 |
 
 Agent는 manifest 밖 객체를 읽지 않는다.
+
+### Workspace Port Helpers (code_tree용)
+
+| Helper | 책임 |
+|---|---|
+| `ws_ensure_ro_tree` (`adapters/workspace/git_worktree.sh`) | target 의 read-only code tree 보장. stale 시 재생성 후 경로 반환 |
+| `ws_ro_tree_revision_pin` (`adapters/workspace/git_worktree.sh`) | 현재 RO tree 가 고정한 commit SHA 반환 |
 
 ## GitHub Helpers
 

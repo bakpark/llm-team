@@ -16,7 +16,7 @@
 | `recovery.sh` | 만료 lease 스윕 + 객체 회수 (`SOC-Recover`) | `recovery_scan` | `it_*`, lease | runner.sh 매 cycle 시작 | `test-recovery.sh` |
 | `human_signal.sh` | `RGC-SIGNALS` envelope drain + gate 적용 | `human_signal_drain` | `it_*`, ledger | runner.sh 진입부 | `test-human-signal.sh` |
 | `feature_request.sh` | `feature-request` issue → PO milestone 승격 | `feature_request_promote` | `it_*` | runner.sh 진입부 | `test-feature-request.sh` |
-| `agent_io.sh` | LLM 호출 + envelope 추출/검증(`AGC-INVALID`) + pin recheck | `agent_prompt_assemble`, `agent_output_parse`, `agent_output_validate_extended`, `revision_pin_revalidate` | `lr_*`, ledger | runner.sh 단계 4 | `test-agent-io.sh` |
+| `agent_io.sh` | LLM 호출 + envelope 추출/검증(`AGC-INVALID`) + pin recheck | `agent_prompt_assemble`, `agent_output_parse`, `agent_output_validate_extended`, `revision_pin_revalidate` | `lr_*`, ledger, `ws_*`(code_tree pin 재검증) | runner.sh 단계 4 | `test-agent-io.sh` |
 | `agent_workspace.sh` | 격리 worktree 생성/정리(`AGC-WORKSPACE`) | `agent_workspace_for` | `ws_*` | runner.sh 단계 3, 6 | `test-agent-workspace.sh` |
 | `caller_dispatch.sh` | role × output_kind 분기별 side-effect 실행(`SOC-OPERATIONS`) | `caller_apply_output` | 전 port | runner.sh 단계 5 | `test-caller-dispatch*.sh` |
 | `verification_runner.sh` | Reviewer/Integrator/QA pre-action 의 deterministic verification(`RGC-VERIFICATION`) | `verification_run_for`, `verification_attach_to_manifest` | `ws_*`, `ps_*` | dispatch pre-action | `test-verification-runner.sh` |

@@ -4,10 +4,11 @@
 
 ## 1. fetch_scope 구현 매핑
 
-[`#AGC-CONTEXT-MANIFEST`](../contracts/agent-and-context-contract.md#AGC-CONTEXT-MANIFEST) 의 `fetch_scope ∈ {metadata, body, body+comments}` 는 다음 위치에서 적용된다.
+[`#AGC-CONTEXT-MANIFEST`](../contracts/agent-and-context-contract.md#AGC-CONTEXT-MANIFEST) 의 `fetch_scope ∈ {metadata, body, body+comments, tree}` 는 다음 위치에서 적용된다.
 
 - `lib/context.sh` `context_manifest_create()` 가 manifest entry 단위로 `fetch_scope` 를 받아 entry metadata 에 기록.
 - `context_manifest_add_entry()` 가 issue-tracker adapter 의 snapshot getter 를 호출. 어댑터(`adapters/issue_tracker/github.sh` 등)는 `fetch_scope` 에 따라 GraphQL projection 을 좁힌다.
+  - 단, `fetch_scope=tree` 는 본문 snapshot/truncation 대상이 아니다. cwd mount 의미이며, workspace port(`ws_ensure_ro_tree`)가 read-only code tree를 보장하고 `agent_workspace_for()` 가 symlink 를 생성한다.
 - snapshot 직렬화 시점에 revision pin(예: `headSha`, `updatedAt`) 이 같은 entry 안에 함께 저장된다. 이 pin 은 [`#AGC-CONTEXT-MANIFEST`](../contracts/agent-and-context-contract.md#AGC-CONTEXT-MANIFEST) 의 매 호출 후 *재검증* 입력이다.
 
 ## 2. 역할별 default scope
@@ -17,6 +18,7 @@
 | 역할 | 기본 fetch_scope | 비고 |
 |---|---|---|
 | PO / PM / Planner | `metadata` 또는 `body` | 누적 spec(KAC) 위주, 댓글은 manifest 외부에서 처리 |
+| PO / PM / Planner (code_tree) | `tree` | target codebase read-only mount. 본문 snapshot/truncation 대상 아님 |
 | Coder | `body` | task 본문 + blocker 본문 |
 | Reviewer / Integrator / QA | `body+comments` | 합의·결정 문맥이 댓글에 누적되므로 필수 |
 
