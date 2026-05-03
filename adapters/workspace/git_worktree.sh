@@ -257,12 +257,22 @@ ws_apply_patch() {
     }
 
     # B1 사전 검증.
-    if ! git apply --check --3way "${patch_file}" >/dev/null 2>&1; then
+    # `git apply --check` stderr 를 캡처해 진단을 log_error 에 남긴다 (B-2 fix).
+    # 이전엔 `>/dev/null 2>&1` 로 버려 "malformed or non-applicable" 한 줄밖에
+    # 없었고, hunk 거부 위치/원인을 알 수 없어 무한 retry 가 디버깅 불가능했다.
+    precheck_diag="$(git apply --check --3way "${patch_file}" 2>&1 >/dev/null)" \
+      && precheck_rc=0 || precheck_rc=$?
+    if [ "${precheck_rc}" -ne 0 ]; then
       # 이미 적용된 patch (멱등 retry) 는 reverse-applicable 이어야 한다.
       if git apply --check --reverse "${patch_file}" >/dev/null 2>&1; then
         exit 0
       fi
-      log_error "ws_apply_patch: patch precheck failed (malformed or non-applicable) for unit '${unit_id}'"
+      # 첫 30 라인만 표시 (큰 patch 의 stderr 폭발 방지).
+      diag_head="$(printf '%s\n' "${precheck_diag}" | head -n 30)"
+      log_error "ws_apply_patch: patch precheck failed (malformed or non-applicable) for unit '${unit_id}'
+--- git apply --check stderr (head -30) ---
+${diag_head}
+--- end ---"
       exit 1
     fi
 

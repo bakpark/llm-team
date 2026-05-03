@@ -317,6 +317,93 @@ applied_after="$(ledger_result_count applied)"
 pass "scenario4: stale revision → stale ledger row, state preserved"
 rm -f "${out4}"
 
+# ============================================================================
+# Scenario 6 (B-2): Retry guard escalation
+#   같은 (object, operation) 의 ledger row 가 result="error" 로 N (default 3) 회
+#   연속 쌓이면, 다음 cycle 시작 시 retry guard hook 이 격상 발동: ESCALATED
+#   상태로 전이 시도 + ledger 에 result="escalated" row 추가 + cycle exit 0
+#   (lr_call/외부 부수효과 없이).
+# ============================================================================
+clear_po_draft_residue
+ms6="$(seed_po_draft_milestone 'retry-guard')"
+pin6="$(milestone_pin "${ms6}")"
+write_po_fixture "${ms6}" "${pin6}" "po-retry-${ms6}"
+
+# 미리 같은 (milestone, ms6, Compose-PO) 에 result="error" row 3건 적재.
+seed_error_row() {
+  local kind="$1" id="$2" op="$3"
+  local tmp; tmp="$(mktemp)"
+  jq -nc \
+    --arg tid "seed-err-${id}-$(date -u +%s%N)-${RANDOM}" \
+    --arg target "${TARGET_NAME}" \
+    --arg k "${kind}" --arg i "${id}" --arg op "${op}" \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg idem "seed-err-${id}-$(date -u +%s%N)-${RANDOM}" \
+    '{
+      transition_id:$tid, target_id:$target, object_kind:$k, object_id:$i,
+      from_state:"X", to_state:"X", operation:$op, caller_id:"test-seed",
+      idempotency_key:$idem, timestamp:$ts, lease_token:null, result:"error"
+    }' >"${tmp}"
+  transition_ledger_write "${TARGET_NAME}" "${tmp}" \
+    || fail "scenario6: seed_error_row write failed"
+  rm -f "${tmp}"
+}
+for _ in 1 2 3; do
+  seed_error_row milestone "${ms6}" Compose-PO
+done
+
+escalated_before="$(ledger_result_count escalated)"
+applied_before="$(ledger_result_count applied)"
+out6="$(mktemp)"
+run_runner "${out6}" || true
+escalated_after="$(ledger_result_count escalated)"
+applied_after="$(ledger_result_count applied)"
+
+[ "${escalated_after}" -gt "${escalated_before}" ] \
+  || { echo "--- runner output (scenario6) ---" >&2; cat "${out6}" >&2; \
+       fail "scenario6: retry guard did not write escalated ledger row"; }
+[ "${applied_after}" -eq "${applied_before}" ] \
+  || fail "scenario6: retry guard should NOT apply envelope (no lr_call)"
+
+# Last escalated row should reference (milestone, ms6, Compose-PO) and reason
+# should mention retry_guard.
+last_esc="$(jq -c 'select(.result=="escalated")' "${LEDGER_PATH}" | tail -1)"
+[ "$(echo "${last_esc}" | jq -r '.object_id')" = "${ms6}" ] \
+  || fail "scenario6: escalated row object_id mismatch (got '$(echo "${last_esc}" | jq -r '.object_id')')"
+[ "$(echo "${last_esc}" | jq -r '.operation')" = "Compose-PO" ] \
+  || fail "scenario6: escalated row operation mismatch"
+echo "${last_esc}" | jq -r '.reason // ""' | grep -q "retry_guard" \
+  || fail "scenario6: escalated row reason missing 'retry_guard' tag (got '$(echo "${last_esc}" | jq -r '.reason // "")')"
+
+pass "scenario6: retry guard → escalated ledger row + no apply"
+rm -f "${out6}"
+
+# ============================================================================
+# Scenario 7 (B-2): Retry guard disable env
+#   LLM_TEAM_RETRY_GUARD_DISABLE=1 이면 동일 조건에서 격상하지 않고 정상 처리.
+# ============================================================================
+clear_po_draft_residue
+ms7="$(seed_po_draft_milestone 'retry-guard-disabled')"
+pin7="$(milestone_pin "${ms7}")"
+write_po_fixture "${ms7}" "${pin7}" "po-retry-dis-${ms7}"
+for _ in 1 2 3; do
+  seed_error_row milestone "${ms7}" Compose-PO
+done
+
+escalated_before="$(ledger_result_count escalated)"
+applied_before="$(ledger_result_count applied)"
+out7="$(mktemp)"
+LLM_TEAM_RETRY_GUARD_DISABLE=1 run_runner "${out7}" || true
+escalated_after="$(ledger_result_count escalated)"
+applied_after="$(ledger_result_count applied)"
+[ "${escalated_after}" -eq "${escalated_before}" ] \
+  || fail "scenario7: disable=1 should NOT escalate"
+[ "${applied_after}" -gt "${applied_before}" ] \
+  || { echo "--- runner output (scenario7) ---" >&2; cat "${out7}" >&2; \
+       fail "scenario7: disable=1 should proceed and apply"; }
+pass "scenario7: retry guard disabled → normal apply path"
+rm -f "${out7}"
+
 if [ "${failures}" -ne 0 ]; then
   echo "FAIL: ${failures} scenario(s) failed in test-runner-pipeline" >&2
   exit 1

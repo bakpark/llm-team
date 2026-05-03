@@ -271,6 +271,15 @@ if [ -n "$(cd "${WS_NEG}" && git status --porcelain)" ]; then
   fail "I2 regression: malformed patch left dirty working tree"
 fi
 
+# B-2 (precheck diagnostics): stderr 가 단순 "malformed or non-applicable" 만이
+# 아니라 git apply --check 의 실제 진단 출력을 함께 노출해야 한다. 이 테스트가
+# 없으면 회귀로 stderr 가 다시 silenced 될 위험.
+NEG_DIAG="$(ws_apply_patch "${UNIT_NEG}" "${BAD_PATCH}" "test: bad patch" 2>&1 >/dev/null || true)"
+echo "${NEG_DIAG}" | grep -q "patch precheck failed" \
+  || fail "B-2: precheck diagnostics missing 'patch precheck failed' header"
+echo "${NEG_DIAG}" | grep -q "git apply --check stderr" \
+  || fail "B-2: precheck diagnostics missing 'git apply --check stderr' section"
+
 # ----------------------------------------------------------------------------
 # Test 8: B1 — 3way conflict markers force rollback (working tree unchanged)
 # ----------------------------------------------------------------------------

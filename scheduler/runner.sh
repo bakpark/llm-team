@@ -332,6 +332,31 @@ if ! _runner_claim_transition "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}"
   exit 1
 fi
 
+# Retry guard (B-2): 같은 (object_kind, object_id, operation) 가 최근 N회 모두
+# error 였으면 ESCALATED 로 격상 + cycle 종료. claim_transition 직후에 검사하는
+# 이유는 ESCALATED 로의 직접 전이가 *_IN_PROGRESS 상태에서만 매트릭스로 허용
+# (lib/state.sh state_transition_allowed) 되기 때문이다.
+RETRY_GUARD_MAX="${LLM_TEAM_RETRY_GUARD_MAX_ERRORS:-3}"
+if [ "${LLM_TEAM_RETRY_GUARD_DISABLE:-0}" != "1" ] && [ "${RETRY_GUARD_MAX}" -gt 0 ]; then
+  RECENT_ERRORS="$(ledger_count_recent_errors "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" "${OPERATION}" 200 2>/dev/null || echo 0)"
+  if [ "${RECENT_ERRORS}" -ge "${RETRY_GUARD_MAX}" ]; then
+    log_error "runner: retry guard triggered (${RECENT_ERRORS} consecutive errors) — escalating ${TARGET_OBJECT_KIND}/${TARGET_OBJECT_ID} ${OPERATION}"
+    case "${TARGET_OBJECT_KIND}" in
+      issue|task)
+        it_issue_set_state "${TARGET_REPO}" "${TARGET_OBJECT_ID}" ESCALATED 2>/dev/null \
+          || log_warn "runner: it_issue_set_state ESCALATED failed (continuing to ledger)" ;;
+      milestone)
+        it_milestone_set_state "${TARGET_REPO}" "${TARGET_OBJECT_ID}" ESCALATED 2>/dev/null \
+          || log_warn "runner: it_milestone_set_state ESCALATED failed (continuing to ledger)" ;;
+    esac
+    _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
+      "$(_runner_input_state_for "${ROLE}")" "ESCALATED" \
+      "${OPERATION}" "" "" "escalated" \
+      "retry_guard:${RECENT_ERRORS} consecutive errors"
+    exit 0
+  fi
+fi
+
 # Re-capture revision_pin after claim_transition: the *_IN_PROGRESS state is
 # what the agent sees as input, so manifest entries and revalidate compare
 # against the post-transition pin (otherwise revalidate sees a self-stale pin).
