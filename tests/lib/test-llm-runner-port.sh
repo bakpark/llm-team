@@ -116,6 +116,64 @@ fi
 
 rm -f "${prompt_ref}" "${prompt_unknown_ref}"
 
+# ── (6) B-3: lr_classify_diagnostic_reason ────────────────────────────────
+# transport_error 의 세부 원인 (5xx | 4xx | network | timeout | unknown) 을
+# diagnostics 파일에서 첫 매칭으로 분류. retry 정책 결정에 사용.
+diag_tmp="$(mktemp -t lrport-diag.XXXXXX)"
+
+printf 'Error: 503 Service Unavailable\n' >"${diag_tmp}"
+got="$(lr_classify_diagnostic_reason transport_error "${diag_tmp}")"
+[ "${got}" = "5xx" ] || fail "(6) 503 should classify as 5xx, got '${got}'"
+
+printf 'API responded with status 500\n' >"${diag_tmp}"
+got="$(lr_classify_diagnostic_reason transport_error "${diag_tmp}")"
+[ "${got}" = "5xx" ] || fail "(6) status 500 should classify as 5xx, got '${got}'"
+
+printf 'HTTP 429 Too Many Requests\n' >"${diag_tmp}"
+got="$(lr_classify_diagnostic_reason transport_error "${diag_tmp}")"
+[ "${got}" = "4xx" ] || fail "(6) 429 should classify as 4xx, got '${got}'"
+
+printf 'curl: (7) Failed to connect: Connection refused\n' >"${diag_tmp}"
+got="$(lr_classify_diagnostic_reason transport_error "${diag_tmp}")"
+[ "${got}" = "network" ] || fail "(6) connection refused should classify as network, got '${got}'"
+
+printf 'something weird happened\n' >"${diag_tmp}"
+got="$(lr_classify_diagnostic_reason transport_error "${diag_tmp}")"
+[ "${got}" = "unknown" ] || fail "(6) un-matched stderr should classify as unknown, got '${got}'"
+
+# timeout exit_status 는 diag 내용 무관하게 timeout 으로 분류.
+got="$(lr_classify_diagnostic_reason timeout "${diag_tmp}")"
+[ "${got}" = "timeout" ] || fail "(6) timeout exit_status should classify as timeout, got '${got}'"
+
+# diag 파일 부재 → unknown (방어).
+got="$(lr_classify_diagnostic_reason transport_error "/nonexistent-$$")"
+[ "${got}" = "unknown" ] || fail "(6) missing diag file should classify as unknown, got '${got}'"
+
+rm -f "${diag_tmp}"
+
+# ── (7) B-3: lr_call meta.error_reason 필드 ───────────────────────────────
+# 성공 시 null, 비-ok 시 enum 값이어야 한다 (port 계약 확장).
+prompt_ok_ref="$(mktemp -t lrport-prompt-ok.XXXXXX)"
+printf '%s' $'# Role: po\n# Operation: Compose-PO\n# Manifest-id: m-port-7\n\nbody' >"${prompt_ok_ref}"
+meta_ok="$(lr_call "${prompt_ok_ref}" 2>/dev/null)"
+reason_ok="$(printf '%s' "${meta_ok}" | jq -r '.error_reason')"
+[ "${reason_ok}" = "null" ] \
+  || fail "(7) ok meta.error_reason should be null (json), got '${reason_ok}'"
+
+prompt_uk2_ref="$(mktemp -t lrport-prompt-uk2.XXXXXX)"
+printf '%s' $'# Role: planner\n# Operation: Decompose\n# Manifest-id: m-port-7b\n' >"${prompt_uk2_ref}"
+meta_uk2="$(lr_call "${prompt_uk2_ref}" 2>/dev/null)"
+reason_uk2="$(printf '%s' "${meta_uk2}" | jq -r '.error_reason // "null"')"
+case "${reason_uk2}" in
+  5xx|4xx|network|timeout|unknown) ;;
+  *) fail "(7) non-ok meta.error_reason must be enum value, got '${reason_uk2}'" ;;
+esac
+env_uk2="$(printf '%s' "${meta_uk2}" | jq -r '.envelope_ref // ""')"
+diag_uk2="$(printf '%s' "${meta_uk2}" | jq -r '.diagnostics_ref // ""')"
+env_ok="$(printf '%s' "${meta_ok}" | jq -r '.envelope_ref // ""')"
+diag_ok="$(printf '%s' "${meta_ok}" | jq -r '.diagnostics_ref // ""')"
+rm -f "${env_uk2}" "${diag_uk2}" "${env_ok}" "${diag_ok}" "${prompt_ok_ref}" "${prompt_uk2_ref}"
+
 if [ "${failures}" -gt 0 ]; then
   echo "FAIL: ${failures} llm_runner port check(s) failed" >&2
   exit 1

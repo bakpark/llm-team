@@ -525,33 +525,73 @@ PROMPT_REF="$(mktemp -t runner-prompt.XXXXXX)"
 printf '%s' "${PROMPT_TEXT}" >"${PROMPT_REF}"
 _runner_cleanup_prompt() { rm -f "${PROMPT_REF:-}" 2>/dev/null || true; }
 
+# B-3: lr_invoke retry loop. transient transport error (5xx | network | timeout)
+# 만 같은 cycle 내 backoff 후 재시도. 4xx / malformed_output / adapter_unavailable
+# / unknown 은 retry 무의미 → 즉시 break. 같은 cycle 내 retry 이므로 lease 유지
+# (다음 cycle 까지 ~120s 기다리지 않음 → 비용 ↓).
+LR_MAX_ATTEMPTS="${LLM_TEAM_LR_MAX_ATTEMPTS:-3}"
+LR_BACKOFF_BASE="${LLM_TEAM_LR_BACKOFF_BASE:-5}"
+LR_BACKOFF_MAX="${LLM_TEAM_LR_BACKOFF_MAX:-60}"
+LR_ATTEMPT=0
 LR_META=""
-if ! LR_META="$(lr_call "${PROMPT_REF}" "${AGENT_CWD}" 2>/dev/null)"; then
-  log_error "runner: lr_call infrastructure failure"
-  _runner_cleanup_prompt
-  _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
-  _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
-    "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
-    "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "error" || true
-  exit 1
-fi
-_runner_cleanup_prompt
+LR_EXIT_STATUS=""
+LR_ENVELOPE_REF=""
+LR_DIAGNOSTICS_REF=""
+LR_ERROR_REASON=""
 
-LR_EXIT_STATUS="$(printf '%s' "${LR_META}" | jq -r '.exit_status // ""')"
-LR_ENVELOPE_REF="$(printf '%s' "${LR_META}" | jq -r '.envelope_ref // ""')"
-LR_DIAGNOSTICS_REF="$(printf '%s' "${LR_META}" | jq -r '.diagnostics_ref // ""')"
 _runner_cleanup_lr_refs() {
   rm -f "${LR_ENVELOPE_REF:-}" "${LR_DIAGNOSTICS_REF:-}" 2>/dev/null || true
 }
-log_info "runner: lr_call exit_status=${LR_EXIT_STATUS}"
+
+while :; do
+  if ! LR_META="$(lr_call "${PROMPT_REF}" "${AGENT_CWD}" 2>/dev/null)"; then
+    log_error "runner: lr_call infrastructure failure"
+    _runner_cleanup_prompt
+    _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+    _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
+      "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
+      "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "error" \
+      "lr_call_infra_failure" || true
+    exit 1
+  fi
+  LR_EXIT_STATUS="$(printf '%s' "${LR_META}" | jq -r '.exit_status // ""')"
+  LR_ENVELOPE_REF="$(printf '%s' "${LR_META}" | jq -r '.envelope_ref // ""')"
+  LR_DIAGNOSTICS_REF="$(printf '%s' "${LR_META}" | jq -r '.diagnostics_ref // ""')"
+  LR_ERROR_REASON="$(printf '%s' "${LR_META}" | jq -r '.error_reason // ""')"
+  log_info "runner: lr_call exit_status=${LR_EXIT_STATUS} reason=${LR_ERROR_REASON:-none} attempt=$((LR_ATTEMPT+1))/${LR_MAX_ATTEMPTS}"
+
+  if [ "${LR_EXIT_STATUS}" = "ok" ]; then
+    break
+  fi
+
+  case "${LR_EXIT_STATUS}:${LR_ERROR_REASON}" in
+    transport_error:5xx|transport_error:network|timeout:*)
+      LR_ATTEMPT=$((LR_ATTEMPT + 1))
+      if [ "${LR_ATTEMPT}" -ge "${LR_MAX_ATTEMPTS}" ]; then
+        log_error "runner: lr_invoke gave up after ${LR_ATTEMPT} attempt(s) (${LR_EXIT_STATUS}/${LR_ERROR_REASON})"
+        break
+      fi
+      log_warn "runner: lr_invoke transient failure (${LR_EXIT_STATUS}/${LR_ERROR_REASON}); backoff before retry ${LR_ATTEMPT}/${LR_MAX_ATTEMPTS}"
+      _runner_cleanup_lr_refs
+      backoff_sleep "${LR_ATTEMPT}" "${LR_BACKOFF_BASE}" "${LR_BACKOFF_MAX}"
+      continue
+      ;;
+    *)
+      log_error "runner: lr_invoke non-retriable (${LR_EXIT_STATUS}/${LR_ERROR_REASON:-none})"
+      break
+      ;;
+  esac
+done
+_runner_cleanup_prompt
 
 if [ "${LR_EXIT_STATUS}" != "ok" ]; then
-  log_error "runner: lr_invoke non-ok (${LR_EXIT_STATUS}); diagnostics=${LR_DIAGNOSTICS_REF}"
+  log_error "runner: lr_invoke final failure (${LR_EXIT_STATUS}/${LR_ERROR_REASON:-none}); diagnostics=${LR_DIAGNOSTICS_REF}"
   _runner_cleanup_lr_refs
   _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
   _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
     "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
-    "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "error" || true
+    "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "error" \
+    "lr_invoke:${LR_EXIT_STATUS}:${LR_ERROR_REASON:-none}" || true
   exit 1
 fi
 

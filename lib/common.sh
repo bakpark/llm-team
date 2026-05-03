@@ -45,6 +45,8 @@ registry_load_default || log_warn "common.sh: registry_load_default reported err
 . "${LLM_TEAM_ROOT}/lib/lease.sh"
 # shellcheck source=lib/ledger.sh
 . "${LLM_TEAM_ROOT}/lib/ledger.sh"
+# shellcheck source=lib/backoff.sh
+. "${LLM_TEAM_ROOT}/lib/backoff.sh"
 # shellcheck source=lib/signals.sh
 . "${LLM_TEAM_ROOT}/lib/signals.sh"
 # shellcheck source=lib/verification.sh

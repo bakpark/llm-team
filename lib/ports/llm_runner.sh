@@ -68,6 +68,35 @@ lr_classify_exit() {
   esac
 }
 
+# lr_classify_diagnostic_reason <exit_status> <diagnostics_ref> → prints one of:
+#   5xx | 4xx | network | timeout | unknown
+#
+# transport_error 의 세부 원인을 diagnostics 파일에서 첫 매칭으로 추출. retry
+# 정책 결정에 사용 (B-3): 5xx/network/timeout 은 transient → backoff retry,
+# 4xx/unknown 은 persistent → 즉시 실패.
+lr_classify_diagnostic_reason() {
+  local exit_status="${1:-}" diag_ref="${2:-}"
+  if [ "${exit_status}" = "timeout" ]; then
+    printf 'timeout'
+    return 0
+  fi
+  if [ -z "${diag_ref}" ] || [ ! -f "${diag_ref}" ]; then
+    printf 'unknown'
+    return 0
+  fi
+  # 우선순위: 5xx → 4xx → network → unknown.
+  if grep -Eqi '\b50[0-9]\b|internal server error|bad gateway|service unavailable|gateway timeout' "${diag_ref}" 2>/dev/null; then
+    printf '5xx'; return 0
+  fi
+  if grep -Eqi '\b(429|401|403|400)\b|too many requests|unauthorized|forbidden|bad request' "${diag_ref}" 2>/dev/null; then
+    printf '4xx'; return 0
+  fi
+  if grep -Eqi 'connection refused|no route to host|could not resolve|name resolution|network is unreachable|temporary failure|connection reset' "${diag_ref}" 2>/dev/null; then
+    printf 'network'; return 0
+  fi
+  printf 'unknown'
+}
+
 # lr_call <prompt_ref> [agent_cwd]
 #   prompt_ref: path to a regular file containing the prompt body.
 #   agent_cwd:  optional path; if non-empty, lr_invoke runs with this cwd.
@@ -98,11 +127,16 @@ lr_call() {
   raw_code=$?
   consumed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   exit_status="$(lr_classify_exit "${raw_code}")"
+  local error_reason=""
+  if [ "${exit_status}" != "ok" ]; then
+    error_reason="$(lr_classify_diagnostic_reason "${exit_status}" "${diagnostics_ref}")"
+  fi
 
   jq -cn \
     --arg exit_status "${exit_status}" \
     --arg envelope_ref "${envelope_ref}" \
     --arg diagnostics_ref "${diagnostics_ref}" \
     --arg consumed_at "${consumed_at}" \
-    '{exit_status:$exit_status, envelope_ref:$envelope_ref, diagnostics_ref:$diagnostics_ref, consumed_at:$consumed_at}'
+    --arg error_reason "${error_reason}" \
+    '{exit_status:$exit_status, envelope_ref:$envelope_ref, diagnostics_ref:$diagnostics_ref, consumed_at:$consumed_at, error_reason:(if $error_reason == "" then null else $error_reason end)}'
 }
