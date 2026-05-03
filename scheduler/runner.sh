@@ -555,6 +555,12 @@ fi
 # ----- revision pin re-check -----
 if ! revision_pin_revalidate "${ENVELOPE_FILE}" "${TARGET_REPO}" 2>/dev/null; then
   log_error "runner: envelope revision pins are stale"
+  # DEBUG (e2e): preserve envelope for postmortem when stale.
+  if [ "${LLM_TEAM_DEBUG_KEEP_STALE_ENVELOPE:-0}" = "1" ]; then
+    _stale_dump="${LLM_TEAM_ROOT}/workdir/${TARGET}/manifests/$(context_manifest_id "${MANIFEST_FILE}")-stale-envelope.json"
+    cp "${ENVELOPE_FILE}" "${_stale_dump}" 2>/dev/null && log_error "runner: stale envelope preserved at ${_stale_dump}" || true
+    revision_pin_revalidate "${ENVELOPE_FILE}" "${TARGET_REPO}" >&2 || true
+  fi
   _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
   _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
     "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \

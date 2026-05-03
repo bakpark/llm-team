@@ -31,3 +31,12 @@ onboarding:
       value: true
       note: 알림 채널 미설정, dashboard/status로 직접 모니터링
       ts: "2026-05-02T08:05:39Z"
+    use_github_issues_only:
+      value: true
+      ts: "2026-05-03T01:20:24Z"
+    dev_concurrency_reviewed:
+      value: true
+      ts: "2026-05-03T01:20:24Z"
+    gh_token_workflow_scope:
+      value: true
+      ts: "2026-05-03T01:20:24Z"
