@@ -68,7 +68,7 @@ draft 의 모든 issue/제안을 다음 4 개 destination 으로 분류한다. (
   - contract: AGC-CONTEXT-MANIFEST(fetch_scope), RGC-LEASE(role-specific TTL + lease_token), RGC-LEDGER(result enum 확장), AGC-ISSUE-BODY, SOC-DISPATCH-MATRIX, SOC-RECOVERY-OPERATION, RGC-FAILURE(partial-fail rollback), RGC-DAEMON-STARTUP, KAC-MANIFEST-FROM-KNOWLEDGE, `target-config-contract.md`(TCC), `agent-runner-port-contract.md`(ARC).
   - architecture P1/P2: `lease-and-recovery.md`, `context-snapshot.md`, `github-side-effect-timeline.md`, `self-hosting.md`, `agent-runner-adapters.md`.
   - 기존 architecture 확장: `daemons.md`(Daemon Lifecycle), `tools.md`(Helper Call-Site Map), `state-machine.md`(Recover Operation Mapping), `agent-output-format-mapping.md`(Issue Body 2-Layer Rendering).
-- **Phase 4** (진행): `.human/draft/` 의 graduate 항목 → `.human/archive/2026-05-pipeline-fixes/` 이동.
+- **Phase 4** (진행): `.human/draft/` 의 graduate 항목 → `.human/archive/2026-05-pipeline-fixes/` 이동. `.human/` 은 gitignored 개인 운영 노트이므로 repo history 에서는 진행 상태를 직접 추적하지 않는다.
 
 ## 5. Open Questions — 본 direction 의 기본 선택
 

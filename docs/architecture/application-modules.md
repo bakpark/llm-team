@@ -23,7 +23,7 @@
 | `release.sh` | QA PASS 시 release tag/notes 발행 | `release_publish_from_milestone` | `it_*`, `ps_*` | dispatch QA PASS 분기 | `test-release.sh` |
 | `knowledge.sh` | decision-log / context-summary 누적(`KAC`) | `knowledge_record_decision`, `knowledge_snapshot_context_summary` | `it_*` | dispatch QA PASS 분기 | `test-knowledge.sh` |
 | `ledger_summary.sh` | ledger 통계 / 최근 결과 추출(운영 도구) | `ledger_pipeline_summary`, `ledger_caller_window`, `ledger_recent` | ledger | CLI 보조 | `test-ledger-summary.sh` |
-| `workspace_prune.sh` | 종료된 task worktree 정리 | `workspace_prune_unit`, `workspace_prune_units` | `ws_*` | 주기적/수동 | (없음) |
+| `workspace_prune.sh` | 종료된 task worktree 정리 | `workspace_prune_unit`, `workspace_prune_units` | `ws_*` | 주기적/수동 | `test-workspace-prune.sh` |
 
 `onboarding/` 서브디렉토리는 별도 use case set 으로 운영 진입 게이트를 담당한다(테스트 `test-onboarding-verify.sh`).
 

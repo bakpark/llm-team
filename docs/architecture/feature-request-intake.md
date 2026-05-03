@@ -52,7 +52,7 @@
 
 - 후보 issue 는 `created_at asc` 로 정렬된다(가장 오래된 1건만 선택).
 - 한 cycle 당 1건만 promote. 다수 처리는 cycle 반복으로 흡수한다.
-- PO 픽업 시 PO 는 두 후보 풀(feature-request, `PO_DRAFT`)을 본다. 후보 풀 간 공정성은 [`pipeline-end-to-end.md`](pipeline-end-to-end.md) 의 Pickup 절을 따른다(현재 known limitation: tier-1 우선 → starvation 가능. 운영 가이드 [`daemons.md`](daemons.md) 참조).
+- PO 픽업 시 PO 는 두 후보 풀(feature-request, `PO_DRAFT`)을 본다. 후보 풀 간 공정성은 [`pipeline-end-to-end.md`](pipeline-end-to-end.md#1-pickup-oldest-ready-first) 의 Pickup 절과 [`daemons.md`](daemons.md#scheduling-fairness) 의 Scheduling Fairness 절을 따른다(현재 known limitation: tier-1 우선 → starvation 가능).
 
 ## 멱등성
 
@@ -78,4 +78,4 @@
 ## 알려진 한계
 
 - issue title/body 의 *원문* 인용은 현재 port 미지원으로 placeholder body 만 사용된다. PO 호출 시 milestone body 를 enrich 하는 단계가 별도로 필요하다(`feature_request.sh` 모듈 주석 참조).
-- 사람의 라벨 회전이 빈번한 경우 starvation 또는 중복 promote 가능. 운영 절차는 [`daemons.md`](daemons.md) 의 sweep 가이드를 따른다.
+- 사람의 라벨 회전이 빈번한 경우 starvation 또는 중복 promote 가능. 현재 별도 starvation sweep 은 없으며, 운영자는 ledger/queue 관측 후 라벨 상태를 수동 정리한다.

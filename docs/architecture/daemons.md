@@ -60,6 +60,8 @@ Worker slot은 role별로 독립된다.
 
 동일 우선순위의 ready 객체는 oldest-ready-first로 claim한다. priority override가 있으면 transition ledger에 기록한다.
 
+현재 구현은 후보 풀 내부의 oldest-ready-first 만 보장한다. 후보 풀이 여러 개인 role(예: PO 의 `feature-request` issue 와 `PO_DRAFT` milestone)은 tier 순회 정책을 따르며, 별도 starvation guard 나 자동 promotion sweep 은 없다. 장기 적체는 ledger/queue 관측 후 운영자가 priority override 또는 라벨 정리로 해소한다.
+
 ## Single Instance
 
 역할별 runner를 여러 프로세스로 실행할 수 있지만, 동일 객체 claim은 lease compare-and-set으로 직렬화해야 한다. OS-level lock은 보조 수단이며 authoritative concurrency control은 lease다.

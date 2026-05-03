@@ -33,7 +33,7 @@ Caller 의 한 cycle 은 *하나의* `(role, target)` 쌍에 대해 다음 6 단
 
 ### 1. Pickup (oldest-ready-first)
 
-Caller 는 *역할 × target* 단위로 1개의 ready 객체만 선점한다. 선택 기준은 SOC 의 input state 와 dependency join 이다.
+Caller 는 *역할 × target* 단위로 1개의 ready 객체만 선점한다. 선택 기준은 pre-claim READY 후보와 dependency join 이다. lease claim 이 성공하면 단계 2 에서 SOC 의 input state 인 `*_IN_PROGRESS` 로 전이한다.
 
 | 역할 | 후보 객체 | 정렬 / 선택 기준 |
 |---|---|---|

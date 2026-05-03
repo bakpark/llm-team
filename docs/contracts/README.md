@@ -85,6 +85,24 @@ Section ID prefix는 문서별로 고정한다.
 | `ARC` | Agent Runner Port Contract |
 | `CONTRACT` | Contract README |
 
+<a id="CONTRACT-ARCHITECTURE-MAPPING"></a>
+## CONTRACT-ARCHITECTURE-MAPPING: Architecture Mapping Index
+
+Contract 문서만 읽는 contributor 는 다음 표에서 구현 매핑 문서로 이동한다. Architecture 문서는 contract 를 override 하지 않으며, contract 절의 적용 위치와 구현 선택만 설명한다.
+
+| Contract anchor | Architecture mapping |
+|---|---|
+| [`AGC-CONTEXT-MANIFEST`](agent-and-context-contract.md#AGC-CONTEXT-MANIFEST) | [`context-snapshot.md`](../architecture/context-snapshot.md), [`pipeline-end-to-end.md`](../architecture/pipeline-end-to-end.md) |
+| [`AGC-OUTPUT`](agent-and-context-contract.md#AGC-OUTPUT), [`AGC-OUTPUT-RUNTIME-ENRICH`](agent-and-context-contract.md#AGC-OUTPUT-RUNTIME-ENRICH), [`AGC-ISSUE-BODY`](agent-and-context-contract.md#AGC-ISSUE-BODY) | [`agent-output-format-mapping.md`](../architecture/agent-output-format-mapping.md), [`pipeline-end-to-end.md`](../architecture/pipeline-end-to-end.md) |
+| [`SOC-OBJECTS`](state-and-operation-contract.md#SOC-OBJECTS), [`SOC-OPERATIONS`](state-and-operation-contract.md#SOC-OPERATIONS), [`SOC-DISPATCH-MATRIX`](state-and-operation-contract.md#SOC-DISPATCH-MATRIX) | [`state-machine.md`](../architecture/state-machine.md), [`pipeline-end-to-end.md`](../architecture/pipeline-end-to-end.md), [`github-side-effect-timeline.md`](../architecture/github-side-effect-timeline.md) |
+| [`SOC-RECOVERY-OPERATION`](state-and-operation-contract.md#SOC-RECOVERY-OPERATION) | [`state-machine.md`](../architecture/state-machine.md), [`lease-and-recovery.md`](../architecture/lease-and-recovery.md) |
+| [`RGC-LEASE`](reliability-and-gate-contract.md#RGC-LEASE), [`RGC-RECOVERY`](reliability-and-gate-contract.md#RGC-RECOVERY), [`RGC-FAILURE`](reliability-and-gate-contract.md#RGC-FAILURE), [`RGC-LEDGER`](reliability-and-gate-contract.md#RGC-LEDGER) | [`lease-and-recovery.md`](../architecture/lease-and-recovery.md), [`daemons.md`](../architecture/daemons.md), [`github-side-effect-timeline.md`](../architecture/github-side-effect-timeline.md) |
+| [`RGC-FAIRNESS`](reliability-and-gate-contract.md#RGC-FAIRNESS), [`RGC-DAEMON-STARTUP`](reliability-and-gate-contract.md#RGC-DAEMON-STARTUP) | [`daemons.md`](../architecture/daemons.md), [`self-hosting.md`](../architecture/self-hosting.md) |
+| [`RGC-VERIFICATION`](reliability-and-gate-contract.md#RGC-VERIFICATION) | [`tools.md`](../architecture/tools.md), [`pipeline-end-to-end.md`](../architecture/pipeline-end-to-end.md) |
+| [`KAC-MANIFEST-FROM-KNOWLEDGE`](knowledge-contract.md#KAC-MANIFEST-FROM-KNOWLEDGE), [`KAC-TRACEABILITY`](knowledge-contract.md#KAC-TRACEABILITY) | [`context-snapshot.md`](../architecture/context-snapshot.md), [`application-modules.md`](../architecture/application-modules.md) |
+| [`TCC-LEASE-CONFIG`](target-config-contract.md#TCC-LEASE-CONFIG), [`TCC-ONBOARDING`](target-config-contract.md#TCC-ONBOARDING), [`TCC-AGENT-RUNNER-MAP`](target-config-contract.md#TCC-AGENT-RUNNER-MAP) | [`lease-and-recovery.md`](../architecture/lease-and-recovery.md), [`self-hosting.md`](../architecture/self-hosting.md), [`agent-runner-adapters.md`](../architecture/agent-runner-adapters.md) |
+| [`ARC-PORT-SIGNATURE`](agent-runner-port-contract.md#ARC-PORT-SIGNATURE), [`ARC-EXIT-CLASSES`](agent-runner-port-contract.md#ARC-EXIT-CLASSES), [`ARC-ADAPTER-SUBSTITUTION`](agent-runner-port-contract.md#ARC-ADAPTER-SUBSTITUTION) | [`agent-runner-adapters.md`](../architecture/agent-runner-adapters.md), [`adapter-inventory.md`](../architecture/adapter-inventory.md) |
+
 <a id="CONTRACT-CHANGE"></a>
 ## CONTRACT-CHANGE: Change Rules
 
