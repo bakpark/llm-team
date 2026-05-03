@@ -71,7 +71,7 @@
 
 | 결과 | 의미 |
 |---|---|
-| `success` | 1건 promote 완료 |
+| `applied` | 1건 promote 완료 |
 | `noop` | 처리할 issue 없음 |
 | `error` | 영속 저장소 lookup/write 실패 |
 

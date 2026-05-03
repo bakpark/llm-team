@@ -67,7 +67,7 @@ Signal별 허용 대상과 기본 집행:
 | `pause` | system | `RUNNING` | 전역 control state를 `PAUSED`로 전이 |
 | `resume` | system | `PAUSED` | 전역 control state를 `RUNNING`으로 전이 |
 | `amendment_approve` | contract 또는 concept document | pending amendment CP | Caller가 amendment CP를 병합 |
-| `stop` | system, milestone, task | any non-terminal state | 새 lease claim 중단. 대상이 있으면 ESCALATED로 전이 |
+| `stop` | system, milestone, task | any non-terminal state | system 대상이면 전역 control state를 `STOPPED`로 전이하고 새 lease claim을 중단. workflow 대상이 있으면 ESCALATED로 전이 |
 
 <a id="RGC-LEASE"></a>
 ## RGC-LEASE: Lease and Worker Slots
@@ -254,7 +254,7 @@ Ledger는 감사, 재현, 장애 복구의 기준이다.
 
 | 값 | 의미 |
 |---|---|
-| `success` | 전이가 의도대로 완료 |
+| `applied` | 전이가 의도대로 완료 |
 | `noop` | 전이 조건이 충족되지 않아 부작용 없이 종료 |
 | `claim_failed` | lease 점유 경쟁에서 패배 |
 | `duplicate` | 동일 idempotency key의 선행 기록을 발견하여 부작용 없이 수렴 |
@@ -279,10 +279,12 @@ Ledger는 감사, 재현, 장애 복구의 기준이다.
 시스템은 전역 control state를 가진다.
 
 ```text
-RUNNING | PAUSED
+RUNNING | PAUSED | STOPPED
 ```
 
 `PAUSED` 상태에서 Caller는 새 lease를 claim하지 않는다. 이미 진행 중인 lease는 정책에 따라 완료를 기다리거나 stale recovery 대상이 된다. 사람은 governance/input signal로 pause와 resume을 요청하고, Caller가 이를 집행한다.
+
+`STOPPED` 상태도 새 lease claim을 차단한다. `STOPPED` 는 운영자가 현재 군집을 종료하려는 terminal-ish control state 이며, `resume` signal 의 직접 대상이 아니다. 다시 실행하려면 운영자는 새 daemon/caller 시작 절차를 수행해야 하며, 그 시작은 `#RGC-DAEMON-STARTUP` 의 atomicity 정책을 따른다.
 
 <a id="RGC-NOTIFICATION"></a>
 ## RGC-NOTIFICATION: Notification
