@@ -449,15 +449,47 @@ if ! AGENT_CWD="$(agent_workspace_for "${ROLE}" "${TARGET_OBJECT_ID}" 2>/dev/nul
 fi
 log_info "runner: agent_cwd=${AGENT_CWD} role=${ROLE}"
 
-LLM_OUT=""
-if ! LLM_OUT="$( cd "${AGENT_CWD}" && lr_invoke "${PROMPT_TEXT}" 2>/dev/null )"; then
-  log_error "runner: lr_invoke failed"
+# ARC port boundary: write prompt to a ref, call lr_call wrapper. lr_call
+# pipes prompt via stdin to the adapter (#ARC-CALL-SEMANTICS / I3), captures
+# stdout to envelope_ref, stderr to diagnostics_ref, classifies exit code into
+# #ARC-EXIT-CLASSES, and emits {exit_status, envelope_ref, diagnostics_ref,
+# consumed_at} JSON metadata.
+PROMPT_REF="$(mktemp -t runner-prompt.XXXXXX)"
+printf '%s' "${PROMPT_TEXT}" >"${PROMPT_REF}"
+_runner_cleanup_prompt() { rm -f "${PROMPT_REF:-}" 2>/dev/null || true; }
+
+LR_META=""
+if ! LR_META="$(lr_call "${PROMPT_REF}" "${AGENT_CWD}" 2>/dev/null)"; then
+  log_error "runner: lr_call infrastructure failure"
+  _runner_cleanup_prompt
   _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
   _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
     "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
     "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "error" || true
   exit 1
 fi
+_runner_cleanup_prompt
+
+LR_EXIT_STATUS="$(printf '%s' "${LR_META}" | jq -r '.exit_status // ""')"
+LR_ENVELOPE_REF="$(printf '%s' "${LR_META}" | jq -r '.envelope_ref // ""')"
+LR_DIAGNOSTICS_REF="$(printf '%s' "${LR_META}" | jq -r '.diagnostics_ref // ""')"
+_runner_cleanup_lr_refs() {
+  rm -f "${LR_ENVELOPE_REF:-}" "${LR_DIAGNOSTICS_REF:-}" 2>/dev/null || true
+}
+log_info "runner: lr_call exit_status=${LR_EXIT_STATUS}"
+
+if [ "${LR_EXIT_STATUS}" != "ok" ]; then
+  log_error "runner: lr_invoke non-ok (${LR_EXIT_STATUS}); diagnostics=${LR_DIAGNOSTICS_REF}"
+  _runner_cleanup_lr_refs
+  _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+  _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
+    "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
+    "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "error" || true
+  exit 1
+fi
+
+LLM_OUT="$(cat "${LR_ENVELOPE_REF}" 2>/dev/null || true)"
+_runner_cleanup_lr_refs
 
 ENVELOPE_JSON=""
 if ! ENVELOPE_JSON="$(agent_output_parse "${LLM_OUT}" 2>/dev/null)"; then

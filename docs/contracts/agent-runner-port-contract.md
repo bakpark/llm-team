@@ -44,6 +44,10 @@ agent runner는 다음 입력을 받아 다음 출력을 반환하는 단일 호
 
 `envelope_ref`가 가리키는 본문의 형식과 필수 필드는 `docs/contracts/agent-and-context-contract.md#AGC-OUTPUT`가 정의한다. 본 contract는 envelope의 *콘텐츠* 를 정의하지 않는다.
 
+`prompt_ref`는 prompt 본문에 대한 참조다. caller는 prompt 본문을 생성하여 참조 가능한 위치(파일 또는 영속 저장소)에 둔 뒤 그 식별자를 입력으로 전달한다. adapter는 `prompt_ref`를 해석하여 본문을 stdin 으로 받는다(#ARC-CALL-SEMANTICS).
+
+`exit_status`, `envelope_ref`, `diagnostics_ref`, `consumed_at` 4개 출력은 *호출 단위로 항상 함께* 생성된다. 호출이 비정상 종료한 경우에도 `exit_status`는 #ARC-EXIT-CLASSES 의 enum 중 하나로 분류되며, `diagnostics_ref`는 adapter 의 stderr 를 보존한다.
+
 <a id="ARC-CALL-SEMANTICS"></a>
 ## ARC-CALL-SEMANTICS: Call Semantics
 
@@ -51,6 +55,7 @@ agent runner는 다음 입력을 받아 다음 출력을 반환하는 단일 호
 - adapter는 입력의 의미를 임의로 확장하지 않는다. 예를 들어 `agent_cwd` 외부의 파일을 Agent에게 노출시키지 않는다.
 - adapter는 출력에 *Caller가 요청하지 않은 부작용* 을 첨부하지 않는다. envelope과 diagnostics 외의 영속 저장소 write는 금지된다.
 - 호출 시간 한도(`timeout`) 도달 시 adapter는 호출을 중단하고 `timeout` 분류로 종료한다. 부분 envelope은 출력하지 않거나, 부분임을 명시적으로 표시한다.
+- prompt 본문은 stdin 으로 adapter 에 전달된다. argv 경유 전달은 ARG_MAX 한계로 인해 금지된다.
 
 <a id="ARC-EXIT-CLASSES"></a>
 ## ARC-EXIT-CLASSES: Exit Classification
@@ -68,6 +73,8 @@ agent runner는 다음 입력을 받아 다음 출력을 반환하는 단일 호
 `ok` 후의 envelope 검증(필수 필드, 권한 경계, revision pin 재검증)은 `#AGC-OUTPUT`, `#AGC-OUTPUT-RUNTIME-ENRICH`, `#AGC-INVALID`가 정의한다. `ok`가 곧 성공을 의미하지는 않는다.
 
 `#RGC-FAILURE`의 STALE/FAIL/ESCALATED 분류는 `exit_status`와 envelope 검증 결과를 종합해 도출된다.
+
+분류는 두 단계로 이루어진다. 1) adapter 는 자신이 알 수 있는 종료 사유(빈 prompt, 미발견 binary, 매칭 fixture 부재 등)를 결정적인 raw 종료 코드로 표현한다. 2) port 경계의 helper(`lr_classify_exit`)가 raw 코드를 enum 으로 매핑한다. 매핑되지 않는 코드는 `transport_error`로 흡수된다(#ARC-FAILURE-MODES).
 
 <a id="ARC-IDEMPOTENCY"></a>
 ## ARC-IDEMPOTENCY: Idempotency

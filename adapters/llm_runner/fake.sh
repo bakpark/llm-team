@@ -4,10 +4,9 @@
 # Test adapter for the llm_runner port. Replaces `claude` CLI with a
 # deterministic fixture lookup, used by Phase 5 / 9 의 결정적 파이프라인 검증.
 #
-# 시그니처:
-#   lr_invoke <prompt_string>   (port spec — claude_code adapter 와 동일)
+# 시그니처(#ARC-CALL-SEMANTICS, port I3): prompt 는 stdin 으로 들어온다.
 #
-# Fixture key 도출 (lr_invoke 가 prompt_string 만 받으므로 콘텐츠 기반):
+# Fixture key 도출 (lr_invoke 가 prompt 본문만 받으므로 콘텐츠 기반):
 #   prompt 의 첫 ~10줄에서 다음 세 헤더를 grep 으로 추출한다:
 #     # Role: <role>
 #     # Operation: <operation>
@@ -118,14 +117,19 @@ _fake_emit() {
   fi
 }
 
-# lr_invoke <prompt_string>
-#   stdin: 사용 안 함 (prompt 는 매개변수 — port spec)
+# lr_invoke
+#   stdin: prompt 본문 (port I3)
 #   stdout: fixture 콘텐츠 (정책에 따라 fenced wrapping)
 #   stderr: 어댑터 진단/에러
-#   return: 0 정상, 64 빈 prompt, 65 헤더 누락,
-#           66 fixture dir 미설정/부재, 67 매칭 fixture 부재
+#   return (#ARC-EXIT-CLASSES via lr_classify_exit):
+#     0   ok
+#     64  transport_error      빈 prompt (port I2)
+#     65  malformed_output     헤더(Role/Operation/Manifest-id) 누락
+#     66  adapter_unavailable  LLM_TEAM_FAKE_FIXTURE_DIR 미설정/부재
+#     67  malformed_output     매칭 fixture 부재
 lr_invoke() {
-  local prompt="$1"
+  local prompt
+  prompt="$(cat)"
   if [ -z "${prompt}" ]; then
     log_error "lr_invoke: empty prompt"
     return 64

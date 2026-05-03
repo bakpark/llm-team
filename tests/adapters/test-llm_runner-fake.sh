@@ -63,7 +63,7 @@ cat >"${TEST_FIXTURE_DIR}/po-Compose-PO.json" <<'EOF'
 EOF
 
 prompt_po=$'# Role: po\n# Operation: Compose-PO\n# Manifest-id: m-1\n\nbody...'
-out_po="$(lr_invoke "${prompt_po}" 2>/dev/null)" \
+out_po="$(printf '%s' "${prompt_po}" | lr_invoke 2>/dev/null)" \
   || fail "lr_invoke (po) returned non-zero (out='${out_po}')"
 # fenced wrapping 확인
 printf '%s' "${out_po}" | grep -q '^```json' \
@@ -89,19 +89,19 @@ EOF
 
 # (3a) manifest 매칭이 먼저 잡혀야 한다
 prompt_coder_special=$'# Role: coder\n# Operation: Implement\n# Manifest-id: m-special\n'
-out_coder_special="$(lr_invoke "${prompt_coder_special}" 2>/dev/null)"
+out_coder_special="$(printf '%s' "${prompt_coder_special}" | lr_invoke 2>/dev/null)"
 printf '%s' "${out_coder_special}" | grep -q 'coder special manifest' \
   || fail "lookup priority: manifest-specific fixture should win (got='${out_coder_special}')"
 
 # (3b) manifest 매칭 없으면 role-operation 기본
 prompt_coder_default=$'# Role: coder\n# Operation: Implement\n# Manifest-id: m-other\n'
-out_coder_default="$(lr_invoke "${prompt_coder_default}" 2>/dev/null)"
+out_coder_default="$(printf '%s' "${prompt_coder_default}" | lr_invoke 2>/dev/null)"
 printf '%s' "${out_coder_default}" | grep -q 'coder default' \
   || fail "lookup priority: role-operation fixture should fall through (got='${out_coder_default}')"
 
 # (3c) role-operation 도 없으면 role-only
 prompt_reviewer=$'# Role: reviewer\n# Operation: Review\n# Manifest-id: m-x\n'
-out_reviewer="$(lr_invoke "${prompt_reviewer}" 2>/dev/null)"
+out_reviewer="$(printf '%s' "${prompt_reviewer}" | lr_invoke 2>/dev/null)"
 printf '%s' "${out_reviewer}" | grep -q 'reviewer fallback' \
   || fail "lookup priority: role-only fixture fallback failed (got='${out_reviewer}')"
 
@@ -109,22 +109,22 @@ printf '%s' "${out_reviewer}" | grep -q 'reviewer fallback' \
 # (4) 헤더 누락 prompt → 비0 + stderr 메시지
 # ----------------------------------------------------------------------------
 prompt_no_role=$'# Operation: Compose-PO\n# Manifest-id: m-1\n\nbody'
-err="$(lr_invoke "${prompt_no_role}" 2>&1 1>/dev/null)" && \
+err="$(printf '%s' "${prompt_no_role}" | lr_invoke 2>&1 1>/dev/null)" && \
   fail "lr_invoke without Role header should return non-zero"
 printf '%s' "${err}" | grep -q 'no role/operation/manifest header' \
   || fail "missing-header diagnostic should mention 'no role/operation/manifest header' (got='${err}')"
 
 prompt_no_op=$'# Role: po\n# Manifest-id: m-1\n'
-lr_invoke "${prompt_no_op}" 2>/dev/null && fail "lr_invoke without Operation header should fail"
+printf '%s' "${prompt_no_op}" | lr_invoke 2>/dev/null && fail "lr_invoke without Operation header should fail"
 
 prompt_no_manifest=$'# Role: po\n# Operation: Compose-PO\n'
-lr_invoke "${prompt_no_manifest}" 2>/dev/null && fail "lr_invoke without Manifest-id header should fail"
+printf '%s' "${prompt_no_manifest}" | lr_invoke 2>/dev/null && fail "lr_invoke without Manifest-id header should fail"
 
 # ----------------------------------------------------------------------------
 # (5) fixture 부재 → 비0 + stderr "no fixture for"
 # ----------------------------------------------------------------------------
 prompt_unknown=$'# Role: planner\n# Operation: Decompose\n# Manifest-id: m-1\n'
-err_nf="$(lr_invoke "${prompt_unknown}" 2>&1 1>/dev/null)" && \
+err_nf="$(printf '%s' "${prompt_unknown}" | lr_invoke 2>&1 1>/dev/null)" && \
   fail "lr_invoke for unknown role should return non-zero"
 printf '%s' "${err_nf}" | grep -q 'no fixture for' \
   || fail "missing-fixture diagnostic should mention 'no fixture for' (got='${err_nf}')"
@@ -141,15 +141,15 @@ printf '%s\n' '{"call":2,"summary":"third integrator output"}' >"${seq_dir}/2.js
 
 prompt_int=$'# Role: integrator\n# Operation: Refactor\n# Manifest-id: m-seq\n'
 
-out0="$(lr_invoke "${prompt_int}" 2>/dev/null)"
+out0="$(printf '%s' "${prompt_int}" | lr_invoke 2>/dev/null)"
 printf '%s' "${out0}" | grep -q 'first integrator output' \
   || fail "sequence fixture call#0 mismatch (got='${out0}')"
 
-out1="$(lr_invoke "${prompt_int}" 2>/dev/null)"
+out1="$(printf '%s' "${prompt_int}" | lr_invoke 2>/dev/null)"
 printf '%s' "${out1}" | grep -q 'second integrator output' \
   || fail "sequence fixture call#1 mismatch (got='${out1}')"
 
-out2="$(lr_invoke "${prompt_int}" 2>/dev/null)"
+out2="$(printf '%s' "${prompt_int}" | lr_invoke 2>/dev/null)"
 printf '%s' "${out2}" | grep -q 'third integrator output' \
   || fail "sequence fixture call#2 mismatch (got='${out2}')"
 
@@ -161,13 +161,13 @@ counter_count="$(printf '%s' "${counter_json}" | jq -r '.count // 0')"
   || fail "sequence counter should be 3 after 3 calls (got='${counter_count}', json='${counter_json}')"
 
 # 4번째 호출은 fixture 부재 → 비0
-lr_invoke "${prompt_int}" 2>/dev/null \
+printf '%s' "${prompt_int}" | lr_invoke 2>/dev/null \
   && fail "sequence call#3 should fail when no 3.json fixture exists"
 
 # ----------------------------------------------------------------------------
 # (7) LLM_TEAM_FAKE_WRAP_FENCED=0 → wrapping 안 함 (raw 그대로)
 # ----------------------------------------------------------------------------
-LLM_TEAM_FAKE_WRAP_FENCED=0 out_raw="$(lr_invoke "${prompt_po}" 2>/dev/null)"
+LLM_TEAM_FAKE_WRAP_FENCED=0 out_raw="$(printf '%s' "${prompt_po}" | lr_invoke 2>/dev/null)"
 printf '%s' "${out_raw}" | grep -q '^```json' \
   && fail "LLM_TEAM_FAKE_WRAP_FENCED=0 should not produce fenced output (got=${out_raw})"
 printf '%s' "${out_raw}" | grep -q '"output_kind":"spec_proposal"' \
@@ -176,7 +176,7 @@ printf '%s' "${out_raw}" | grep -q '"output_kind":"spec_proposal"' \
 # ----------------------------------------------------------------------------
 # (8) 빈 prompt → 비0 (port invariant I2)
 # ----------------------------------------------------------------------------
-lr_invoke "" 2>/dev/null && fail "lr_invoke '' should fail (port invariant I2)"
+printf '' | lr_invoke 2>/dev/null && fail "lr_invoke '' should fail (port invariant I2)"
 
 if [ "${failures}" -gt 0 ]; then
   echo "FAIL: ${failures} fake llm_runner check(s) failed" >&2

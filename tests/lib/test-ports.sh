@@ -118,9 +118,9 @@ for fn in \
 done
 
 # ----------------------------------------------------------------------------
-# (8) lr_invoke 는 빈 prompt 에서 비0 반환 (적합성 smoke)
+# (8) lr_invoke 는 빈 prompt 에서 비0 반환 (적합성 smoke, port I2/I3)
 # ----------------------------------------------------------------------------
-if lr_invoke "" 2>/dev/null; then
+if printf '' | lr_invoke 2>/dev/null; then
   fail "lr_invoke should fail for empty prompt"
 fi
 

@@ -5,14 +5,17 @@
 # 환경변수:
 #   LLM_TEAM_CLAUDE_CMD   기본: 'claude -p --output-format text'.
 #                         테스트 시 fake binary 로 교체할 수 있다.
-
-# lr_invoke <prompt_string>
-#   stdin: 사용 안 함 (prompt 는 매개변수)
-#   stdout: claude 의 응답 본문
-#   stderr: claude 의 진단/에러 + adapter 자체 로그
-#   return: claude 의 exit code, 또는 64 (empty prompt) / 127 (cmd not found)
+#
+# 시그니처(#ARC-CALL-SEMANTICS, port I3): prompt 는 stdin 으로 들어온다.
+#
+# Exit codes (#ARC-EXIT-CLASSES via lr_classify_exit):
+#   0       ok                     claude 정상 종료
+#   64      transport_error        빈 prompt (port I2)
+#   127     adapter_unavailable    claude 바이너리 미발견
+#   기타     transport_error        claude 의 raw exit code (caller 흡수)
 lr_invoke() {
-  local prompt="$1"
+  local prompt
+  prompt="$(cat)"
   if [ -z "${prompt}" ]; then
     log_error "lr_invoke: empty prompt"
     return 64
