@@ -140,6 +140,7 @@ write_po_fixture() {
     --arg ms "${ms_num}" \
     --arg pin "${pin}" \
     --arg idem "${idem_key}" \
+    --arg repo "${REPO}" \
     '{
        output_kind: "spec_proposal",
        agent_role: "PO",
@@ -147,7 +148,8 @@ write_po_fixture() {
        object_id: $ms,
        manifest_id: "__MANIFEST_ID__",
        input_revision_pins: [
-         { object_kind: "milestone", object_id: $ms, revision_pin: $pin }
+         { object_kind: "milestone", object_id: $ms, revision_pin: $pin },
+         { object_kind: "code_tree", object_id: $repo, revision_pin: ("__PIN_" + $repo + "__") }
        ],
        idempotency_key: $idem,
        summary: "PO compose result",

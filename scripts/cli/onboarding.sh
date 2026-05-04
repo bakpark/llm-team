@@ -71,13 +71,9 @@ onboarding_status_run() {
 
 _onb_print_table() {
   local target="$1" body="$2"
-  local schema sh
+  local schema
   schema="$(yq -r '.onboarding.preset // .onboarding.schema // "github-pipeline/v1"' \
     "$(cli_target_file "${target}")")"
-  sh="$(yq -r '.onboarding.self_hosting // false' \
-    "$(cli_target_file "${target}")")"
-
-  printf '[%s] target=%s  self_hosting=%s\n\n' "${schema}" "${target}" "${sh}"
 
   local total=0 pass=0 fail=0 warn=0 skip=0
   local status id severity message remediation color reset
@@ -104,23 +100,19 @@ _onb_print_table() {
 
 _onb_to_json() {
   local target="$1" body="$2" rc="$3"
-  local schema sh
+  local schema
   schema="$(yq -r '.onboarding.preset // .onboarding.schema // "github-pipeline/v1"' \
-    "$(cli_target_file "${target}")")"
-  sh="$(yq -r '.onboarding.self_hosting // false' \
     "$(cli_target_file "${target}")")"
 
   jq -n \
     --arg target "${target}" \
     --arg schema "${schema}" \
-    --argjson self_hosting "$([ "${sh}" = "true" ] && echo true || echo false)" \
     --argjson exit_code "${rc}" \
     --rawfile body <(printf '%s' "${body}") \
     '
     {
       target: $target,
       schema: $schema,
-      self_hosting: $self_hosting,
       exit_code: $exit_code,
       items: ($body | split("\n") | map(select(length > 0)) | map(
         split("\t") | {
@@ -173,7 +165,7 @@ onboarding_ack_run() {
   local schema
   schema="$(yq -r '.onboarding.preset // .onboarding.schema // "github-pipeline/v1"' "${file}")"
   if onboarding_preset_load "${schema}" 2>/dev/null; then
-    if ! preset_items | awk -F'\t' -v k="${ack_key}" '$6==k {found=1} END{exit !found}' \
+    if ! preset_items | awk -F'\t' -v k="${ack_key}" '$5==k {found=1} END{exit !found}' \
         ; then
       cli_warn "ack_key '${ack_key}' is not declared in preset ${schema} (saved anyway)"
     fi
@@ -200,7 +192,7 @@ onboarding_list_schemas_run() {
     printf '%s\n' "${schema}"
     if onboarding_preset_load "${schema}" 2>/dev/null; then
       preset_items | awk -F'\t' '{
-        printf "  - %-36s kind=%s severity=%s sh_only=%s\n", $1, $2, $3, $4
+        printf "  - %-36s kind=%s severity=%s auto_fn=%s ack_key=%s\n", $1, $2, $3, $4, $5
       }'
     fi
   done < <(onboarding_list_schemas)
@@ -228,8 +220,8 @@ onboarding_wizard_run() {
 
   # preset items 의 kind/ack_key 를 lookup 테이블로.
   declare -A KIND ACK_KEY
-  local id kind severity sh_only auto_fn ack_key summary
-  while IFS=$'\t' read -r id kind severity sh_only auto_fn ack_key summary; do
+  local id kind severity auto_fn ack_key summary
+  while IFS=$'\t' read -r id kind severity auto_fn ack_key summary; do
     [ -n "${id}" ] || continue
     [ "${ack_key}" = "-" ] && ack_key=""
     KIND[$id]="${kind}"

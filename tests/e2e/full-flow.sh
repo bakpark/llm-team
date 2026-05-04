@@ -217,8 +217,9 @@ ms_num="$(it_milestone_list_in_state "${REPO}" PO_DRAFT | head -n 1)"
 [ -n "${ms_num}" ] || { fail "step1: no PO_DRAFT milestone after promotion"; exit 1; }
 ok "milestone #${ms_num} promoted to PO_DRAFT"
 
-pins_json="$(jq -nc --arg ms "${ms_num}" \
-  '[{object_kind:"milestone", object_id:$ms, revision_pin:"__PIN__"}]')"
+pins_json="$(jq -nc --arg ms "${ms_num}" --arg repo "${REPO}" \
+  '[{object_kind:"milestone", object_id:$ms, revision_pin:"__PIN__"},
+    {object_kind:"code_tree", object_id:$repo, revision_pin:("__PIN_" + $repo + "__")}]')"
 artifacts="$(jq -nc \
   --arg body "PO drafted body for milestone ${ms_num}" \
   '{ milestone_body: $body, cp_artifact_ref: ("spec/po-" + (now|tostring)) }')"
@@ -254,8 +255,9 @@ ok "PO Spec CP merged: $(basename "${po_cp_path}")"
 # Step 3: PM runner → milestone PM_GATE
 # ============================================================================
 step "3: PM runner → milestone PM_GATE"
-pins_json="$(jq -nc --arg ms "${ms_num}" \
-  '[{object_kind:"milestone", object_id:$ms, revision_pin:"__PIN__"}]')"
+pins_json="$(jq -nc --arg ms "${ms_num}" --arg repo "${REPO}" \
+  '[{object_kind:"milestone", object_id:$ms, revision_pin:"__PIN__"},
+    {object_kind:"code_tree", object_id:$repo, revision_pin:("__PIN_" + $repo + "__")}]')"
 artifacts="$(jq -nc \
   --arg body "PM drafted scenarios + AC for milestone ${ms_num}" \
   '{ milestone_body: $body, cp_artifact_ref: "spec/pm-1.md" }')"
@@ -289,8 +291,9 @@ ok "PM Spec CP merged: $(basename "${pm_cp_path}")"
 # Step 5: Planner runner → IMPLEMENTING with 1 task
 # ============================================================================
 step "5: Planner runner → IMPLEMENTING + 1 task"
-pins_json="$(jq -nc --arg ms "${ms_num}" \
-  '[{object_kind:"milestone", object_id:$ms, revision_pin:"__PIN__"}]')"
+pins_json="$(jq -nc --arg ms "${ms_num}" --arg repo "${REPO}" \
+  '[{object_kind:"milestone", object_id:$ms, revision_pin:"__PIN__"},
+    {object_kind:"code_tree", object_id:$repo, revision_pin:("__PIN_" + $repo + "__")}]')"
 artifacts="$(jq -nc \
   '{ tasks: [
        { slug: "t1", title: "implement login", body: "Implement login endpoint" }

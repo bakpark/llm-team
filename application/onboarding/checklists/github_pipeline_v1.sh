@@ -5,7 +5,7 @@
 #
 # Source: .human/draft/github-pipeline-onboarding.md
 #
-# preset_items: TSV (id\tkind\tseverity\tself_hosting_only\tauto_fn\tack_key\tsummary)
+# preset_items: TSV (id\tkind\tseverity\tauto_fn\tack_key\tsummary)
 # _check_<id>:  PASS=exit 0 (메시지를 stdout). FAIL=non-zero (실패 사유 stdout).
 # preset_remediation <id>: FAIL 시 안내 1 줄.
 
@@ -16,27 +16,26 @@ if [ -z "${LLM_TEAM_LABELS_LOADED:-}" ]; then
   LLM_TEAM_LABELS_LOADED=1
 fi
 
-# preset_items 가 TSV 를 emit. 칼럼은 항상 7 개. 빈 칼럼은 '-' 로 표기 (engine 이
+# preset_items 가 TSV 를 emit. 칼럼은 항상 6 개. 빈 칼럼은 '-' 로 표기 (engine 이
 # '-' 를 빈 문자열로 변환). bash read 는 IFS=$'\t' 에서도 공백류 IFS 의 연속을
 # 한 delimiter 로 collapse 하므로 빈 칼럼을 그대로 두면 칼럼이 밀린다.
 preset_items() {
   cat <<'EOF'
-github_repo_reachable	auto	block	0	_check_github_repo_reachable	-	gh api repos/{owner}/{repo}
-gh_token_scopes_sufficient	auto	block	0	_check_gh_token_scopes	-	gh token scope (repo)
-gh_token_workflow_scope	ack	warn	0	-	gh_token_workflow_scope	gh token has workflow scope
-canonical_clone_present	auto	block	0	_check_canonical_clone	-	canonical clone is a git repo
-no_clone_path_collision	auto	block	0	_check_no_clone_path_collision	-	clone_path uniqueness across targets
-target_init_scaffold	auto	block	0	_check_target_init_scaffold	-	workdir scaffold + agent-cwd
-doctor_dependencies	auto	block	0	_check_doctor_dependencies	-	bash/jq/yq/git/gh/claude available
-daemon_lockdir_writable	auto	block	0	_check_daemon_lockdir_writable	-	workdir writable
-labels_bootstrap_done	auto	block	0	_check_labels_bootstrap_done	-	contract labels exist on repo
-integration_branch_present	auto_or_ack	block	0	_check_integration_branch	use_default_branch_as_integration	integration branch exists on origin
-branch_protection_policy_decided	ack	block	0	-	branch_protection_policy_decided	push/review policy on main/integration decided
-notifier_channel_decided	auto_or_ack	block	0	_check_notifier_channel	intentionally_silent	notifier.channel set or silent ack
-inputs_dir_seeded	auto_or_ack	warn	0	_check_inputs_dir_seeded	use_github_issues_only	inputs/<target>/ has at least one file or ack
-dev_concurrency_reviewed	ack	warn	0	-	dev_concurrency_reviewed	dev_concurrency value reviewed
-amendment_policy_acknowledged	ack	block	1	-	amendment_policy_acknowledged	self-hosting amendment gate policy acked
-ci_workflow_loop_guard	auto_or_ack	block	1	_check_ci_workflow_loop_guard	ci_workflow_loop_guard_decided	self-hosting CI loop guard
+github_repo_reachable	auto	block	_check_github_repo_reachable	-	gh api repos/{owner}/{repo}
+gh_token_scopes_sufficient	auto	block	_check_gh_token_scopes	-	gh token scope (repo)
+gh_token_workflow_scope	ack	warn	-	gh_token_workflow_scope	gh token has workflow scope
+canonical_clone_present	auto	block	_check_canonical_clone	-	canonical clone is a git repo
+no_clone_path_collision	auto	block	_check_no_clone_path_collision	-	clone_path uniqueness across targets
+target_init_scaffold	auto	block	_check_target_init_scaffold	-	workdir scaffold + agent-cwd
+doctor_dependencies	auto	block	_check_doctor_dependencies	-	bash/jq/yq/git/gh/claude available
+daemon_lockdir_writable	auto	block	_check_daemon_lockdir_writable	-	workdir writable
+labels_bootstrap_done	auto	block	_check_labels_bootstrap_done	-	contract labels exist on repo
+integration_branch_present	auto_or_ack	block	_check_integration_branch	use_default_branch_as_integration	integration branch exists on origin
+branch_protection_policy_decided	ack	block	-	branch_protection_policy_decided	push/review policy on main/integration decided
+notifier_channel_decided	auto_or_ack	block	_check_notifier_channel	intentionally_silent	notifier.channel set or silent ack
+inputs_dir_seeded	auto_or_ack	warn	_check_inputs_dir_seeded	use_github_issues_only	inputs/<target>/ has at least one file or ack
+dev_concurrency_reviewed	ack	warn	-	dev_concurrency_reviewed	dev_concurrency value reviewed
+ci_workflow_loop_guard	auto_or_ack	block	_check_ci_workflow_loop_guard	ci_workflow_loop_guard_decided	CI workflow loop guard
 EOF
 }
 
@@ -87,9 +86,6 @@ preset_remediation() {
       ;;
     dev_concurrency_reviewed)
       printf 'llm-team onboarding ack %s dev_concurrency_reviewed' "${TARGET_NAME}"
-      ;;
-    amendment_policy_acknowledged)
-      printf 'llm-team onboarding ack %s amendment_policy_acknowledged --note "..."' "${TARGET_NAME}"
       ;;
     ci_workflow_loop_guard)
       printf '.github/workflows/ trigger 정책 결정 후 llm-team onboarding ack %s ci_workflow_loop_guard_decided' \
@@ -295,12 +291,9 @@ _check_ci_workflow_loop_guard() {
     printf '.github/workflows is empty'
     return 0
   fi
-  # 위험 트리거: pull_request_target / workflow_run / repository_dispatch.
-  # 0 건이면 자동 PASS, 1+ 면 ack 강제. yaml 풀 파싱은 별도 PR 보류 — 현 구현은
-  # `on: <trigger>:` 또는 `on:` 매핑 키 위치의 라인을 grep 으로 휴리스틱 매칭.
   if grep -REq '^[[:space:]]*(pull_request_target|workflow_run|repository_dispatch)[[:space:]]*:' \
        "${wf}" 2>/dev/null; then
-    printf 'workflows contain risky triggers — loop guard ack required'
+    printf 'workflows contain risky triggers; loop guard ack required'
     return 1
   fi
   printf 'workflows have only safe triggers'

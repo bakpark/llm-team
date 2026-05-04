@@ -48,9 +48,9 @@ context_manifest_add_entry() {
     return 1
   fi
   case "${fetch_scope}" in
-    metadata|body|body+comments) ;;
+    metadata|body|body+comments|tree) ;;
     *)
-      log_error "context_manifest_add_entry: invalid fetch_scope '${fetch_scope}' (must be metadata|body|body+comments)"
+      log_error "context_manifest_add_entry: invalid fetch_scope '${fetch_scope}' (must be metadata|body|body+comments|tree)"
       return 1
       ;;
   esac
@@ -95,7 +95,7 @@ context_manifest_validate() {
     all(.entries[];
       (.object_kind | type == "string" and length > 0) and
       (.object_id | type == "string" and length > 0) and
-      (.fetch_scope | IN("metadata", "body", "body+comments")) and
+      (.fetch_scope | IN("metadata", "body", "body+comments", "tree")) and
       (.revision_pin | type == "string" and length > 0) and
       (.required | type == "boolean") and
       (.purpose | type == "string" and length > 0) and

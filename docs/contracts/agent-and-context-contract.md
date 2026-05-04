@@ -65,10 +65,10 @@ Context Manifest는 Caller가 Agent 호출 전에 생성하는 읽기 대상 목
 
 | 필드 | 의미 |
 |---|---|
-| `object_kind` | milestone, task, change_proposal, spec_doc, verification_log 등 |
+| `object_kind` | milestone, task, change_proposal, spec_doc, verification_log, code_tree 등 |
 | `object_id` | 영속 저장소의 객체 식별자 |
-| `fetch_scope` | Agent가 읽을 수 있는 범위. 본 문서의 fetch scope enum 중 하나 |
-| `revision_pin` | revision/hash/HEAD/updated_at 등 가장 강한 버전 식별자 |
+| `fetch_scope` | Agent가 읽을 수 있는 범위. 본 문서의 fetch scope enum 중 하나. `tree` 는 cwd mount 의미 |
+| `revision_pin` | revision/hash/HEAD/updated_at 등 가장 강한 버전 식별자. `code_tree` 진입 시 branch HEAD commit SHA |
 | `required` | true면 fetch 실패 시 Agent는 실패 산출을 반환해야 한다 |
 | `purpose` | 이 객체를 읽는 이유 |
 
@@ -78,12 +78,13 @@ Caller는 Agent 산출을 영속화하기 직전에 모든 required entry의 rev
 
 ### Fetch Scope Enum
 
-`fetch_scope`는 Agent가 entry에서 읽을 수 있는 정보의 깊이를 한정한다. 다음 셋 중 하나여야 한다.
+`fetch_scope`는 Agent가 entry에서 읽을 수 있는 정보의 깊이를 한정한다. 다음 값 중 하나여야 한다.
 
 | 값 | 허용 범위 |
 |---|---|
 | `metadata` | 식별자, 상태, 라벨, 마커 등 본문을 제외한 메타데이터 |
 | `body` | metadata + 객체 본문 |
+| `tree` | 트리 전체 read-only 시야 (cwd 비치). entry 본문은 비어 있으며, Agent는 코드베이스에서 자력 탐색. `revision_pin`은 branch HEAD commit SHA를 의미 |
 | `body+comments` | body + 객체에 누적된 코멘트/이력 |
 
 좁은 scope에 충분한 정보가 있는데도 더 넓은 scope을 사용하면 manifest 크기가 불필요하게 커지고, 후속 호출의 입력 결정성이 떨어진다.

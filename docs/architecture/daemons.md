@@ -116,4 +116,3 @@ Stale recovery는 runner loop마다 수행할 수 있다. recovery 대상과 전
 - **부분 기동 차단**: 다중 역할을 함께 기동할 때 모든 lockdir 가 점유 가능한지 *사전 점검* 한 뒤에만 fork 한다. 한 역할이라도 점유에 실패하면 이미 기동된 sibling 을 종료시키고 전체 기동을 실패로 종결한다.
 - **종료 신호**: SIGTERM 수신 시 `SHUTDOWN` 플래그를 셋팅하고 *현재 cycle 종료 후* loop 를 빠져나간다. 진행 중인 lease 는 정상 release 된다. 강제 종료(SIGKILL) 의 잔여물은 [`#RGC-LEASE`](../contracts/reliability-and-gate-contract.md#RGC-LEASE) 의 TTL 만료에 의존한다.
 
-self-hosting target 의 추가 가드는 [`self-hosting.md`](self-hosting.md) 를 참조한다.

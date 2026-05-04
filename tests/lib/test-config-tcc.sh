@@ -64,7 +64,6 @@ verification:
 enabled: true
 onboarding:
   preset: github-pipeline/v1
-  self_hosting: false
   skip_flags: []
   acks: {}
 EOF
@@ -141,7 +140,6 @@ verification:
 enabled: true
 onboarding:
   schema: github-pipeline/v1
-  self_hosting: false
   acks: {}
 EOF
 

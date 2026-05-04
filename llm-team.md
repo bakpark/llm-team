@@ -80,6 +80,7 @@ Layer 간 직접 통신은 제한된다. Agent 간 직접 통신은 금지된다
 - **Deterministic verification by Caller**: 빌드·테스트·린트·타입체크·정적 분석은 Caller가 실행하고, Agent는 로그를 해석한다.
 - **Human gate blocking**: 게이트 진입 객체는 사람의 governance/input signal 전까지 다음 큐로 진행하지 않는다. Caller 프로세스는 다른 큐 처리를 계속한다.
 - **Finite retry**: 자동 재시도는 유한하다. 한도를 넘으면 ESCALATED 상태로 사람에게 넘긴다.
+- **Self-fetch mount**: Context Manifest entry로 명시된 read-only mount(예: code_tree)는 Agent의 self-fetch 범위로 간주하며, invariant 위반이 아니다. manifest 밖 객체를 임의로 읽는 것과 구별한다.
 - **Knowledge accumulation**: 스펙, 결정, 거부된 대안, Context Summary는 누적되어 다음 마일스톤의 1급 입력이 된다.
 
 ---

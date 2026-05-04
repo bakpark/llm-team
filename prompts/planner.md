@@ -26,6 +26,7 @@ integration branch, creates Task objects, and performs state transitions.
 디렉토리 안에 `.llm-team-readonly` 마커가 있다.
 
 - 이 디렉토리 외부의 절대경로(`/...`, `~/...`, `../...`) 를 사용해 파일을 만들거나 수정하지 않는다.
+- `./repo/` 경로에 target 저장소의 read-only mount 가 제공된다. 이 디렉토리 안의 코드를 읽어서 코드-grounded 판단을 할 수 있다. `./repo/` 내 파일은 수정하지 마시오 (read-only).
 - 프레임워크 저장소(`LLM_TEAM_ROOT`) 와 target repository 의 작업 트리는 caller 가 dispatch
   단계에서만 수정한다.
 - output 은 envelope JSON 으로만 돌려보낸다. 외부 mutation 은 결과로 반영되지 않으며
@@ -45,6 +46,7 @@ fenced block 이 두 개 이상이면 invalid 로 거부된다.
 - `object_id`: 대상 milestone id
 - `manifest_id`: 입력 Context Manifest id
 - `input_revision_pins`: `[{"object_kind": "...", "object_id": "...", "revision_pin": "..."}, ...]`
+  - manifest 의 `required: true` entry 는 모두 같은 `object_kind`, `object_id`, `revision_pin` 으로 그대로 echo 한다. `code_tree` entry 가 있으면 반드시 포함한다.
 - `idempotency_key`: 입력 revision 기준 안정 키
 - `summary`: 한 줄 요약
 - `artifacts`: 역할별 자유 영역 (아래 권장 키 참조)
@@ -71,7 +73,8 @@ artifacts 권장 키 (planner):
   "object_id": "milestone:42",
   "manifest_id": "manifest:planner:42:r1",
   "input_revision_pins": [
-    {"object_kind": "milestone", "object_id": "42", "revision_pin": "rev-..."}
+    {"object_kind": "milestone", "object_id": "42", "revision_pin": "rev-..."},
+    {"object_kind": "code_tree", "object_id": "owner/repo", "revision_pin": "sha-..."}
   ],
   "idempotency_key": "planner:42:r1",
   "summary": "Decompose milestone 42 into N tasks",

@@ -82,7 +82,6 @@ stale_threshold_minutes: 60
 enabled: true
 onboarding:
   schema: github-pipeline/v1
-  self_hosting: false
   acks: {}
 EOF
 
@@ -177,10 +176,12 @@ json="$("${CLI}" onboarding status "${TARGET}" --json 2>&1)"
 set -e
 echo "${json}" | jq -e '.exit_code == 2' >/dev/null \
   || fail "status --json: exit_code != 2"
-echo "${json}" | jq -e '.items | length >= 16' >/dev/null \
-  || fail "status --json: items length < 16"
+echo "${json}" | jq -e '.items | length >= 15' >/dev/null \
+  || fail "status --json: items length < 15"
 echo "${json}" | jq -e '.items[] | select(.id == "branch_protection_policy_decided")' >/dev/null \
   || fail "status --json: missing branch_protection_policy_decided item"
+echo "${json}" | jq -e '.items[] | select(.id == "ci_workflow_loop_guard")' >/dev/null \
+  || fail "status --json: missing ci_workflow_loop_guard item"
 pass "status --json"
 
 # ---------------------------------------------------------------------------
@@ -197,14 +198,12 @@ pass "status --quiet"
 # ---------------------------------------------------------------------------
 # (7) target add 에 onboarding 섹션이 자동 생성되는지.
 # ---------------------------------------------------------------------------
-"${CLI}" target add cli-onb-add --repo example/cli-onb-add --self-hosting --disabled --force >/dev/null \
-  || fail "target add --self-hosting failed"
+"${CLI}" target add cli-onb-add --repo example/cli-onb-add --disabled --force >/dev/null \
+  || fail "target add failed"
 # P1-8: target add now writes the contract-named field `onboarding.preset`
 # (legacy `onboarding.schema` was renamed to match TCC-ONBOARDING).
 [ "$(yq -r '.onboarding.preset' "${SANDBOX}/targets/cli-onb-add.yaml")" = "github-pipeline/v1" ] \
   || fail "target add: onboarding.preset not set"
-[ "$(yq -r '.onboarding.self_hosting' "${SANDBOX}/targets/cli-onb-add.yaml")" = "true" ] \
-  || fail "target add --self-hosting: self_hosting != true"
 [ "$(yq -r '.onboarding.acks | length' "${SANDBOX}/targets/cli-onb-add.yaml")" = "0" ] \
   || fail "target add: onboarding.acks should be empty map"
 # P2-5: skip_flags 배열 자리잡음.

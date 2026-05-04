@@ -24,6 +24,8 @@ PORT_WORKSPACE_REQUIRED_FUNCTIONS=(
   ws_list             # target                            → echo unit_ids
   ws_get_branch_head  # repo branch                       → echo sha
   ws_get_branch_base  # repo branch                       → echo sha (분기 base; integration 기준)
+  ws_ensure_ro_tree   # target                          → echo ro_path (read-only code tree)
+  ws_ro_tree_revision_pin # target                          → echo sha (current RO tree pin)
 )
 
 PORT_WORKSPACE_INVARIANTS=(

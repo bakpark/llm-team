@@ -386,3 +386,77 @@ ws_get_branch_base() {
   fi
   cat "${bdir}/base"
 }
+
+# ws_ensure_ro_tree <target>  → echo ro_path
+# in-memory 어댑터: repo-ro 디렉토리 생성 + 쓰기 권한 제거 흉내.
+# 결정적 seed SHA 로 pin 제공.
+ws_ensure_ro_tree() {
+  local target
+  target="$(_in_memory_ws_resolve_target "${1:-}")" || {
+    log_error "ws_ensure_ro_tree: target name is required (arg or TARGET_NAME)"
+    return 1
+  }
+  local td ro_path source_sha
+  td="$(_in_memory_ws_target_dir "${target}")" || return 1
+  ro_path="${td}/repo-ro"
+
+  # canonical clone 존재 확인
+  local clone_dir
+  clone_dir="$(_in_memory_ws_clone_dir "")" || return 1
+  if [ ! -d "${clone_dir}" ]; then
+    log_error "ws_ensure_ro_tree: canonical clone missing; call ws_ensure_clone first"
+    return 1
+  fi
+
+  # source SHA 결정 (default branch head)
+  source_sha="$(ws_get_branch_head "${target}" "${TARGET_DEFAULT_BRANCH:-main}" 2>/dev/null)" || {
+    # default branch 가 없으면 integration 브랜치 사용
+    source_sha="$(ws_get_branch_head "${target}" "${LLM_TEAM_INTEGRATION_BRANCH:-integration}" 2>/dev/null)" || {
+      log_error "ws_ensure_ro_tree: no reference branch found for target '${target}'"
+      return 1
+    }
+  }
+
+  # idempotent: 이미 repo-ro 가 있고 SHA 가 같으면 재사용
+  if [ -d "${ro_path}" ]; then
+    local current_sha_file="${ro_path}/.ro-pin"
+    if [ -f "${current_sha_file}" ]; then
+      local current_sha
+      current_sha="$(cat "${current_sha_file}")"
+      if [ "${current_sha}" = "${source_sha}" ]; then
+        printf '%s\n' "${ro_path}"
+        return 0
+      fi
+    fi
+    # stale: 제거 후 재생성
+    rm -rf "${ro_path}" 2>/dev/null || true
+  fi
+
+  mkdir -p "${ro_path}" || return 1
+  printf '%s' "${source_sha}" >"${ro_path}/.ro-pin"
+
+  printf '%s\n' "${ro_path}"
+}
+
+# ws_ro_tree_revision_pin <target>  → echo sha
+# in-memory 어댑터: repo-ro/.ro-pin 파일에서 SHA 반환.
+ws_ro_tree_revision_pin() {
+  local target
+  target="$(_in_memory_ws_resolve_target "${1:-}")" || {
+    log_error "ws_ro_tree_revision_pin: target name is required (arg or TARGET_NAME)"
+    return 1
+  }
+  # TARGET_RO_TREE_PATH 가 설정되어 있으면 직접 사용 (runner context).
+  local ro_path="${TARGET_RO_TREE_PATH:-}"
+  if [ -z "${ro_path}" ]; then
+    local td
+    td="$(_in_memory_ws_target_dir "${target}")" || return 1
+    ro_path="${td}/repo-ro"
+  fi
+
+  if [ ! -d "${ro_path}" ] || [ ! -f "${ro_path}/.ro-pin" ]; then
+    log_error "ws_ro_tree_revision_pin: repo-ro not found at ${ro_path}; call ws_ensure_ro_tree first"
+    return 1
+  fi
+  cat "${ro_path}/.ro-pin"
+}

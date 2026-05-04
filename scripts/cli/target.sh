@@ -12,7 +12,7 @@ usage() {
 Usage:
   llm-team target list
   llm-team target show <name>
-  llm-team target add [name] --repo owner/repo|github-url [--branch main] [--clone-path path] [--label-prefix prefix] [--notifier none] [--webhook-ref KEY] [--self-hosting] [--disabled] [--force]
+  llm-team target add [name] --repo owner/repo|github-url [--branch main] [--clone-path path] [--label-prefix prefix] [--notifier none] [--webhook-ref KEY] [--disabled] [--force]
   llm-team target add [name] --url github-url [options]
   llm-team target add [name] --from-current [--path checkout] [--separate-clone] [options]
   llm-team target init <name> [--dry-run] [--skip-labels]
@@ -151,7 +151,7 @@ _target_clone_path_collision() {
 
 target_add() {
   local name="" repo="" branch="main" clone_path="" label_prefix="" notifier="none" webhook_ref="" enabled="true" force=0
-  local from_current=0 checkout_path="." separate_clone=0 self_hosting="false"
+  local from_current=0 checkout_path="." separate_clone=0
   if [ "${1:-}" != "" ] && [ "${1#-}" = "${1}" ]; then
     name="$1"
     shift || true
@@ -169,7 +169,6 @@ target_add() {
       --label-prefix) label_prefix="${2:-}"; shift 2 ;;
       --notifier) notifier="${2:-}"; shift 2 ;;
       --webhook-ref) webhook_ref="${2:-}"; shift 2 ;;
-      --self-hosting) self_hosting="true"; shift ;;
       --disabled) enabled="false"; shift ;;
       --force) force=1; shift ;;
       -h|--help) usage; exit 0 ;;
@@ -260,7 +259,6 @@ agent_runner:
 enabled: ${enabled}
 onboarding:
   preset: github-pipeline/v1
-  self_hosting: ${self_hosting}
   skip_flags: []
   acks: {}
 EOF

@@ -68,6 +68,39 @@ agent_workspace_for() {
 caller 에게 envelope output 으로만 결과를 돌려주세요.
 MARKER
       fi
+      # code_tree: RO tree symlink (plan §Step 4)
+      # 상대경로 symlink 사용 — workdir 이동 시 깨지지 않도록 함.
+      local ro_tree="${TARGET_RO_TREE_PATH:-${LLM_TEAM_ROOT}/workdir/${TARGET_NAME}/repo-ro}"
+      if [ -n "${TARGET_RO_TREE_PATH:-}" ] || [ -d "${ro_tree}" ]; then
+        if [ ! -d "${ro_tree}" ]; then
+          log_error "agent_workspace_for: RO tree missing: ${ro_tree}"
+          return 1
+        fi
+        local rel_target
+        if [ -z "${TARGET_RO_TREE_PATH:-}" ]; then
+          # path = workdir/<target>/agent-cwd/<role>, ro_tree = workdir/<target>/repo-ro.
+          # ln -s resolves relative targets from the symlink directory (${path}).
+          rel_target="../../repo-ro"
+        elif command -v python3 >/dev/null 2>&1; then
+          rel_target="$(python3 -c 'import os.path, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' \
+            "${ro_tree}" "${path}" 2>/dev/null)" || rel_target="${ro_tree}"
+        else
+          rel_target="${ro_tree}"
+        fi
+        if [ -L "${path}/repo" ]; then
+          local current
+          current="$(readlink "${path}/repo")"
+          if [ "${current}" != "${rel_target}" ]; then
+            rm -f "${path}/repo"
+            ln -s "${rel_target}" "${path}/repo"
+          fi
+        elif [ ! -e "${path}/repo" ]; then
+          ln -s "${rel_target}" "${path}/repo"
+        else
+          log_error "agent_workspace_for: ${path}/repo exists and is not managed symlink"
+          return 1
+        fi
+      fi
       printf '%s\n' "${path}"
       ;;
     *)

@@ -268,6 +268,36 @@ if agent_output_validate_extended "${po_envelope}" coder 2>/dev/null; then
   fail "PO envelope should fail when validated as coder"
 fi
 
+# Required code_tree entries must be echoed in input_revision_pins.
+code_tree_manifest="$(context_manifest_create "${TEST_TARGET}" Compose-PO milestone M-code-tree)"
+context_manifest_add_entry "${code_tree_manifest}" issue 42 body rev-issue true "primary issue"
+context_manifest_add_entry "${code_tree_manifest}" code_tree acme/widgets tree rev-code true "read-only codebase"
+context_manifest_validate "${code_tree_manifest}" || fail "code_tree manifest must validate"
+code_tree_manifest_id="$(context_manifest_id "${code_tree_manifest}")"
+
+po_missing_code_tree_pin="$(jq -n --arg mid "${code_tree_manifest_id}" '
+  {
+    output_kind: "spec_proposal",
+    agent_role: "PO",
+    operation: "Compose-PO",
+    object_id: "M-code-tree",
+    manifest_id: $mid,
+    input_revision_pins: [{"object_kind":"issue","object_id":"42","revision_pin":"rev-issue"}],
+    idempotency_key: "po:M-code-tree",
+    summary: "PO spec",
+    artifacts: {}
+  }
+')"
+if agent_output_validate_extended "${po_missing_code_tree_pin}" po 2>/dev/null; then
+  fail "PO envelope missing required code_tree pin should be rejected"
+fi
+
+po_with_code_tree_pin="$(printf '%s' "${po_missing_code_tree_pin}" | jq '
+  .input_revision_pins += [{"object_kind":"code_tree","object_id":"acme/widgets","revision_pin":"rev-code"}]
+')"
+agent_output_validate_extended "${po_with_code_tree_pin}" po \
+  || fail "PO envelope echoing required code_tree pin should pass"
+
 # ----------------------------------------------------------------------------
 # (3.x) KAC-TRACEABILITY (P1-6): Planner ac_id_to_task + QA ac_results gate
 # ----------------------------------------------------------------------------
@@ -408,6 +438,72 @@ env_no_pin_arr=$(jq -n --arg mid "${manifest_id}" '
 revision_pin_revalidate "${env_no_pin_arr}" "${repo}" \
   || fail "revision_pin_revalidate with empty pins should pass"
 
+
+# ----------------------------------------------------------------------------
+export LLM_TEAM_INMEM_WS_DIR="${TEST_INMEM_ROOT}/ws"
+
+# (4b) code_tree revision_pin_revalidate — RO tree pin 일치/불일치
+# ----------------------------------------------------------------------------
+# in_memory workspace 어댑터가 ws_ensure_ro_tree/ws_ro_tree_revision_pin 을
+# 제공하므로 code_tree pin 검증이 가능함.
+#
+# revision_pin_revalidate 는 code_tree object_id 를 repo 와 대조하고,
+# RO tree pin 은 TARGET_NAME target context 에서 조회한다.
+
+# fixture: canonical clone + default branch seed 필요
+registry_load_adapter workspace in_memory >/dev/null 2>&1 || true
+
+# target yaml 설정 (in_memory workspace 가 필요)
+CODE_TREE_TARGET="${TEST_TARGET}-code-tree"
+export TARGET_NAME="${CODE_TREE_TARGET}"
+export TARGET_DEFAULT_BRANCH="main"
+export LLM_TEAM_INTEGRATION_BRANCH="integration"
+unset TARGET_RO_TREE_PATH
+
+# ws_ensure_clone 시뮬레이션: in_memory adapter 는 ws_ensure_clone 호출로 seed
+ws_ensure_clone "${CODE_TREE_TARGET}" >/dev/null 2>&1 || true
+
+# RO tree 생성 (seed SHA 기반)
+RO_TREE_PATH="$(ws_ensure_ro_tree "${CODE_TREE_TARGET}" 2>/dev/null)" || \
+  fail "code_tree: ws_ensure_ro_tree failed"
+CODE_TREE_PIN="$(ws_ro_tree_revision_pin "${CODE_TREE_TARGET}" 2>/dev/null)" || \
+  fail "code_tree: ws_ro_tree_revision_pin failed"
+
+# matching pin → PASS
+env_code_tree_ok="$(jq -n \
+  --arg id "${repo}" \
+  --arg pin "${CODE_TREE_PIN}" \
+  '{
+    manifest_id: "m-1", role: "PO", operation: "create",
+    input_revision_pins: [{object_kind: "code_tree", object_id: $id, revision_pin: $pin}],
+    idempotency_key: "x", summary: "y", artifacts: {}
+  }')"
+printf '%s\n' "${env_code_tree_ok}" >"${TEST_INMEM_ROOT}/env-code-tree-ok.json"
+revision_pin_revalidate "${TEST_INMEM_ROOT}/env-code-tree-ok.json" "${repo}" \
+  || fail "code_tree: matching pin should pass"
+
+# stale pin (다른 SHA) → FAIL
+env_code_tree_stale="$(jq -n \
+  --arg id "${repo}" \
+  '{
+    manifest_id: "m-1", role: "PO", operation: "create",
+    input_revision_pins: [{object_kind: "code_tree", object_id: $id, revision_pin: "deadbeef00000000000000000000000000000000"}],
+    idempotency_key: "x", summary: "y", artifacts: {}
+  }')"
+printf '%s\n' "${env_code_tree_stale}" >"${TEST_INMEM_ROOT}/env-code-tree-stale.json"
+if revision_pin_revalidate "${TEST_INMEM_ROOT}/env-code-tree-stale.json" "${repo}" 2>/dev/null; then
+  fail "code_tree: stale pin should fail"
+fi
+
+# object_id 가 repo 인자와 다르면 실패.
+env_code_tree_wrong_repo="$(printf '%s' "${env_code_tree_ok}" \
+  | jq '.input_revision_pins[0].object_id = "evil/widgets"')"
+printf '%s\n' "${env_code_tree_wrong_repo}" >"${TEST_INMEM_ROOT}/env-code-tree-wrong-repo.json"
+if revision_pin_revalidate "${TEST_INMEM_ROOT}/env-code-tree-wrong-repo.json" "${repo}" 2>/dev/null; then
+  fail "code_tree: mismatched object_id should fail"
+fi
+
+# ----------------------------------------------------------------------------
 # ----------------------------------------------------------------------------
 # (5) AGC-CALL-BOUNDARY: agent_io.sh has no direct gh/git/curl/claude calls
 # ----------------------------------------------------------------------------
