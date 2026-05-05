@@ -42,10 +42,40 @@ cb_get_path() {
   [ -n "${handle}" ] && [ -d "${handle}" ] && printf '%s' "${handle}"
 }
 
-# 나머지 함수는 후속 task 에서 구현 (현 단계는 stub 유지).
-cb_capture_blob_text() { :; }
-cb_capture_blob_file() { :; }
-cb_capture_blob_stdin() { :; }
+# 내부: atomic write 헬퍼 (I4). target 디렉토리 자동 생성.
+_cb_inmem_atomic_write() {
+  local handle="$1" name="$2" src="$3"   # src 는 파일 경로 또는 '-' (stdin)
+  [ -n "${handle}" ] || return 0
+  [ -d "${handle}" ] || return 0
+  local dst="${handle}/${name}"
+  mkdir -p "$(dirname "${dst}")" 2>/dev/null
+  local tmp="${dst}.tmp.$$"
+  if [ "${src}" = "-" ]; then
+    cat > "${tmp}" || { rm -f "${tmp}"; return 1; }
+  else
+    cp "${src}" "${tmp}" 2>/dev/null || { rm -f "${tmp}"; return 1; }
+  fi
+  mv "${tmp}" "${dst}"
+}
+
+cb_capture_blob_text() {
+  local handle="$1" name="$2" text="${3:-}"
+  [ -n "${handle}" ] || return 0
+  printf '%s' "${text}" | _cb_inmem_atomic_write "${handle}" "${name}" "-"
+}
+
+cb_capture_blob_file() {
+  local handle="$1" name="$2" path="$3"
+  [ -n "${handle}" ] || return 0
+  [ -f "${path}" ] || return 0
+  _cb_inmem_atomic_write "${handle}" "${name}" "${path}"
+}
+
+cb_capture_blob_stdin() {
+  local handle="$1" name="$2"
+  [ -n "${handle}" ] || { cat >/dev/null; return 0; }
+  _cb_inmem_atomic_write "${handle}" "${name}" "-"
+}
 cb_capture_attempt() { :; }
 cb_promote_to_full() { :; }
 cb_finalize() { :; }
