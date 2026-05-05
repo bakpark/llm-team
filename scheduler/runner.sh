@@ -674,6 +674,15 @@ while :; do
   LR_ERROR_REASON="$(printf '%s' "${LR_META}" | jq -r '.error_reason // ""')"
   log_info "runner: lr_call exit_status=${LR_EXIT_STATUS} reason=${LR_ERROR_REASON:-none} attempt=$((LR_ATTEMPT+1))/${LR_MAX_ATTEMPTS}"
 
+  # Cycle bundle: per-attempt capture + promote on lr fail (E).
+  if [ -n "${CB_HANDLE:-}" ]; then
+    cb_capture_attempt "${CB_HANDLE}" "$((LR_ATTEMPT+1))" \
+      "${LR_ENVELOPE_REF}" "${LR_DIAGNOSTICS_REF}" "${LR_META}"
+    if [ "${LR_EXIT_STATUS}" != "ok" ]; then
+      cb_promote_to_full "${CB_HANDLE}" "lr:${LR_EXIT_STATUS}:${LR_ERROR_REASON:-}"
+    fi
+  fi
+
   if [ "${LR_EXIT_STATUS}" = "ok" ]; then
     break
   fi
@@ -697,6 +706,23 @@ while :; do
   esac
 done
 _runner_cleanup_prompt
+
+# Cycle bundle: 마지막 attempt 의 envelope/diagnostics/meta 를 cycle 루트로 승격.
+if [ -n "${CB_HANDLE:-}" ]; then
+  if [ -f "${LR_ENVELOPE_REF}" ]; then
+    cb_capture_blob_file "${CB_HANDLE}" "envelope.json" "${LR_ENVELOPE_REF}"
+  fi
+  if [ -f "${LR_DIAGNOSTICS_REF}" ]; then
+    cb_capture_blob_file "${CB_HANDLE}" "diagnostics.txt" "${LR_DIAGNOSTICS_REF}"
+  fi
+  cb_capture_blob_text "${CB_HANDLE}" "lr_meta.json" "${LR_META}"
+fi
+
+# Cycle bundle: after-lr.dirty.diff (F).
+if [ -n "${CB_HANDLE:-}" ] && declare -F ws_diff_head >/dev/null 2>&1; then
+  ws_diff_head "task-${TARGET_OBJECT_ID}" \
+    | cb_capture_blob_stdin "${CB_HANDLE}" "diff/after-lr.dirty.diff"
+fi
 
 if [ "${LR_EXIT_STATUS}" != "ok" ]; then
   log_error "runner: lr_invoke final failure (${LR_EXIT_STATUS}/${LR_ERROR_REASON:-none}); diagnostics=${LR_DIAGNOSTICS_REF}"
