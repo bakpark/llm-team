@@ -46,7 +46,7 @@ target 은 lease TTL 을 다음 키로 표현한다.
 
 legacy `lease.ttl_by_role` 키는 본 contract 에서 폐기되었다. 환산은 `docs/contracts/README.md#CONTRACT-MIGRATION-NOTES` 참조.
 
-`lease.ttl_default`, `lease.ttl_by_agent_profile`, `lease.ttl_by_phase` 의 조합에 대한 해석 규칙과 환경 변수 우선순위는 `docs/contracts/reliability-and-gate-contract.md#RGC-LEASE` 가 정의한다.
+`lease.ttl_default`, `lease.ttl_by_agent_profile`, `lease.ttl_by_phase` 의 조합에 대한 해석 규칙과 환경 변수 우선순위는 `docs/contracts/reliability-and-gate-contract.md#RGC-PHASE-LEASE` 의 "Lease TTL 정책" 절이 정의한다.
 
 <a id="TCC-ONBOARDING"></a>
 ## TCC-ONBOARDING: Onboarding Gate
@@ -92,14 +92,40 @@ target 은 각 phase 의 lead / reviewers / required_reviewers / quorum / timeou
 | `phase_policies.<phase>.quorum.threshold` | `rule=min_approvals` 일 때 필요한 approve 카운트 (정수) |
 | `phase_policies.<phase>.quorum.request_changes_blocks` | boolean. `true` 면 contribution 중 1건이라도 `request-changes` 가 있으면 phase 종착이 차단됨 |
 | `phase_policies.<phase>.timeout` | PhaseRun 1회의 시간 한도. `lease.ttl_by_phase` 로 fallback 가능 |
+| `phase_policies.<phase>.fetch_scope_overrides` (optional) | contribution_kind 별 기본 fetch_scope 를 phase 별로 override. 키는 `contribution_kind`, 값은 `metadata`/`body`/`tree`/`body+comments`. `docs/contracts/agent-and-context-contract.md#AGC-CONTEXT-MANIFEST` 의 contribution_kind default 보다 우선 |
+| `phase_policies.<phase>.max_attempts` (optional) | 같은 PhaseRun 안에서 lead contribution 의 누적 재시도 한도. 초과 시 PhaseRun 을 ESCALATED 로 전이 (`docs/contracts/reliability-and-gate-contract.md#RGC-FAILURE`) |
 
 `<phase>` 는 `Discovery`, `Specification`, `Planning`, `Implementation`, `CodeReview`, `Integration`, `Validation` 중 하나다 (`docs/contracts/agent-and-context-contract.md#AGC-PHASES`).
 
-### Phase default 가이드
+### required_reviewers ⊆ 의미 규칙
 
-본 contract 는 phase 별 *추천 default* 를 강제하지 않으나, Planning phase pilot 의 default 는 다음과 같다.
+`required_reviewers[]` 항목 중 `human` 은 `reviewers[]` 에 포함되지 않는다. `human` AgentProfile 은 일반 worker daemon slot 을 점유하지 않으며 (`docs/contracts/reliability-and-gate-contract.md#RGC-PHASE-LEASE`), 외부 신호 변환 path 로만 contribution 을 만들기 때문이다. 다른 모든 `required_reviewers[]` 항목은 `reviewers[]` 의 부분집합이어야 한다 — 검증 위치는 본 contract 의 schema validator 다.
+
+`required_reviewers[]` 가 빈 배열이면 *명시적으로 사람 또는 특정 reviewer 가 필수가 아님* 으로 해석한다 (`#TCC-PRECEDENCE`). 누락(키 자체가 없음) 과는 다르다 — 누락 시 시스템 default 가 적용된다.
+
+### Phase default
+
+target operator 가 `phase_policies.<phase>` 키를 명시하지 않으면 다음 시스템 기본값이 적용된다. 본 default 는 `#TCC-PRECEDENCE` 의 시스템 기본값 layer 에 속하며, target 단위 또는 worker 환경에서 override 가능하다.
 
 ```text
+phase_policies.Discovery:
+  lead: atlas
+  reviewers: [sentinel]
+  required_reviewers: [human]
+  quorum:
+    rule: min_approvals
+    threshold: 1                    # sentinel 1 approve 면 충족 (human 은 별도 required)
+    request_changes_blocks: true
+
+phase_policies.Specification:
+  lead: atlas
+  reviewers: [forge, sentinel]
+  required_reviewers: [human]
+  quorum:
+    rule: min_approvals
+    threshold: 2
+    request_changes_blocks: true
+
 phase_policies.Planning:
   lead: atlas
   reviewers: [forge, sentinel]
@@ -108,9 +134,48 @@ phase_policies.Planning:
     rule: min_approvals
     threshold: 2
     request_changes_blocks: true
+
+phase_policies.Implementation:
+  lead: forge
+  reviewers: []
+  required_reviewers: []
+  quorum:
+    rule: lead_only                 # patch 자체가 다음 phase 의 입력 (`SOC-OPERATIONS#Implementation`)
+    request_changes_blocks: false
+
+phase_policies.CodeReview:
+  lead: sentinel
+  reviewers: [atlas, forge]
+  required_reviewers: []
+  quorum:
+    rule: any_request_changes_blocks  # lead 의 verdict + reviewer 의 request-changes 1건이 차단
+    request_changes_blocks: true
+
+phase_policies.Integration:
+  lead: sentinel
+  reviewers: [scout, atlas]
+  required_reviewers: []
+  quorum:
+    rule: lead_only                 # 결정적 검증 + sentinel verdict 가 phase 종착의 1차 결정자
+    request_changes_blocks: true
+
+phase_policies.Validation:
+  lead: sentinel
+  reviewers: [scout, atlas]
+  required_reviewers: []
+  quorum:
+    rule: lead_only
+    request_changes_blocks: true
 ```
 
-Discovery / Specification 의 default 는 `required_reviewers: [human]` 을 포함해 사람 승인을 phase 종착의 조건으로 둔다. 다른 phase 의 default 는 후속 PR 에서 결정하며, target operator 가 본 키를 명시하지 않으면 시스템 기본값이 적용된다.
+Default `quorum.rule` 의 의미:
+
+- `lead_only`: lead contribution 1건 submit 시 즉시 quorum_reached. reviewer contribution 은 evidence 또는 보조 정보로만 ledger 에 기록된다.
+- `min_approvals`: lead 1건 + reviewer 의 `verdict.result=approve` 가 `threshold` 값 이상 도착 시 quorum_reached. `required_reviewers[]` 의 contribution 은 별도로 모두 도착해야 한다.
+- `all_reviewers`: `reviewers[]` 의 모든 profile 이 approve 했을 때 quorum_reached.
+- `any_request_changes_blocks`: `request_changes_blocks=true` 와 동의어. 1건이라도 request-changes 면 phase 종착 차단. (별도 enum 으로 둔 이유는 reviewer 의 verdict 가 모두 도착하지 않았더라도 즉시 차단 분기로 가도록 dispatching helper 가 구분하기 위함이다.)
+
+`required_reviewers[]` 가 비어 있지 않으면 quorum.rule 과 무관하게 해당 profile 의 contribution 이 모두 도착하기 전까지 quorum_reached 가 되지 않는다. `human` 의 `verdict.result=reject` 는 항상 phase 종착을 차단하며, agent quorum 이 이를 압도하지 않는다 (`docs/contracts/reliability-and-gate-contract.md#RGC-HUMAN-CONTRIBUTION`).
 
 <a id="TCC-PRECEDENCE"></a>
 ## TCC-PRECEDENCE: Configuration Precedence

@@ -135,7 +135,7 @@ Caller는 Agent 산출을 영속화하기 직전에 모든 required entry의 rev
 | `summary` | `body+comments` | Validation 단계의 누적 코멘트 흡수 |
 | `human_approval` | `body` | 사람 검토 시점의 본문이 1차 입력 (사람은 외부 도구 자유 활용) |
 
-리뷰성 contribution 이 `body+comments` 를 기본으로 갖는 이유는 결정적 검증 결과와 직전 contribution 코멘트가 판단의 1급 입력이기 때문이다. phase 별로 다른 기본값이 필요하면 `phase_policies.<phase>.fetch_scope_overrides` 가 우선한다.
+리뷰성 contribution 이 `body+comments` 를 기본으로 갖는 이유는 결정적 검증 결과와 직전 contribution 코멘트가 판단의 1급 입력이기 때문이다. phase 별로 다른 기본값이 필요하면 `phase_policies.<phase>.fetch_scope_overrides` (`docs/contracts/target-config-contract.md#TCC-PHASE-POLICIES`) 가 우선한다.
 
 ### 절단(Truncation) 책임
 
