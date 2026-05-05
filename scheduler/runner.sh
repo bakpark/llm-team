@@ -810,6 +810,7 @@ fi
 # caller_apply_output: state transitions + CP transitions + ledger applied row
 # ============================================================================
 
+export CYCLE_BUNDLE_REF="${CB_HANDLE:-}"
 if ! caller_apply_output "${TARGET_REPO}" "${ROLE}" "${ENVELOPE_FILE}" "${MANIFEST_FILE}"; then
   log_error "runner: caller_apply_output failed"
   _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true

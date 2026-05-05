@@ -106,6 +106,7 @@ _caller_ledger_write() {
     --arg manifest_id "${manifest_id}" \
     --arg timestamp "$(_caller_now)" \
     --arg lease_token "${lease_token}" \
+    --arg cycle_bundle_ref "${CYCLE_BUNDLE_REF:-}" \
     "{
        transition_id: \$transition_id,
        target_id: \$target_id,
@@ -119,6 +120,7 @@ _caller_ledger_write() {
        manifest_id: \$manifest_id,
        timestamp: \$timestamp,
        lease_token: (if \$lease_token == \"\" then null else \$lease_token end),
+       cycle_bundle_ref: (if \$cycle_bundle_ref == \"\" then null else \$cycle_bundle_ref end),
        result: \"applied\",
        duplicate: false
      } | ${extra_program}" >"${tmp}" || {
