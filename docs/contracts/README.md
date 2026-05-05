@@ -306,4 +306,151 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 
 `CONTRACT-STATUS=Active` 는 contract set 이 권위 있는 규약이라는 뜻이다. 각 anchor 가 현재 구현에서 어느 정도 보장되는지는 본 matrix 가 따로 정의한다.
 
-본 matrix 의 metadata 4 field 와 신규 anchor 정합성은 commit F (Stage 1) 가 갱신한다. 본 commit (E) 시점에는 commit B 가 도입한 신규 anchor 가 모두 `spec-only` 로 등재되며, 폐기 anchor (`SOC-PHASE-RUN`, `RGC-PHASE-LEASE`, `TCC-PHASE-POLICIES`) 는 `deprecated` 로 표시된다. 상세 matrix 는 commit F 에서.
+### Metadata Field 정의
+
+본 matrix 는 anchor 마다 다음 4 field 를 기록한다.
+
+| Field | 의미 | Enum / Format |
+|---|---|---|
+| `status` | 현재 구현 / 문서 권위 상태 | `active` / `partial` / `spec-only` / `deprecated` |
+| `implementation_surface` | anchor 를 보장하는 구현 / 검증 표면 (path, helper 이름, 또는 `contract prose` 단독) | 자유 식별자 |
+| `enforcement` | 위반 시 invariant_enforcement 분류. `TCC-ENFORCEMENT` 의 always_hard / stage_graded list 와 정합 | `always_hard` / `stage_graded:<name>=warn\|block` / `n/a` |
+| `active_since` | 본 anchor 가 (현재 형태로) active 상태에 진입한 시점. amendment id 또는 `original` | `2026-05-05-loop` / `phase-pivot` / `original` |
+
+`status` enum 의미:
+
+| Status | 의미 |
+|---|---|
+| `active` | 현재 production path 또는 문서 권위 구조가 해당 anchor 를 보장한다 |
+| `partial` | 일부 production path 만 보장하거나 알려진 미구현 path 가 남아 있다 |
+| `spec-only` | contract/helper/문서 정의는 있으나 production binding 이 없다 |
+| `deprecated` | 더 이상 새 구현이 의존하면 안 되는 anchor 다. 신규 row 사용 금지, historical reader / fixture / migration tooling 은 예외 |
+
+### Contract README
+
+| Anchor | Status | Implementation Surface | Enforcement | Active Since |
+|---|---|---|---|---|
+| `CONTRACT-AUTHORITY` | active | contract authority | n/a | original |
+| `CONTRACT-STRUCTURE` | active | repository layout | n/a | original |
+| `CONTRACT-REFERENCE` | active | markdown anchors | n/a | original |
+| `CONTRACT-ARCHITECTURE-MAPPING` | active | this README | n/a | phase-pivot (anchor refresh 2026-05-05-loop) |
+| `CONTRACT-GLOSSARY` | active | this README | n/a | 2026-05-05-loop (loop-based 어휘 전면 갱신) |
+| `CONTRACT-MIGRATION-NOTES` | active | this README | n/a | 2026-05-05-loop (legacy phase model → loop-based 환산표) |
+| `CONTRACT-CHANGE` | active | review checklist | n/a | original |
+| `CONTRACT-STATUS` | active | contract prose | n/a | original |
+| `CONTRACT-CONFORMANCE` | active | this matrix | n/a | phase-pivot (4-field metadata 확장 2026-05-05-loop) |
+
+### Agent and Context
+
+| Anchor | Status | Implementation Surface | Enforcement | Active Since |
+|---|---|---|---|---|
+| `AGC-SCOPE` | active | contract authority | n/a | original |
+| `AGC-PHASES` | spec-only | contract prose | always_hard (enum 검증) | 2026-05-05-loop (4 phase 로 격하) |
+| `AGC-AGENT-PROFILES` | spec-only | contract prose | always_hard (enum 검증) | phase-pivot |
+| `AGC-CONTRIBUTION` | spec-only | contract prose | always_hard (enum 검증) | 2026-05-05-loop (enum 정정) |
+| `AGC-CALL-BOUNDARY` | partial | `application/agent_io.sh`, `lib/ports/*` | always_hard (caller_only_operational_write) | 2026-05-05-loop (turn 단위로 재정의) |
+| `AGC-SESSION-INPUT` ★ | spec-only | contract prose | always_hard (manifest_external_read_write) | 2026-05-05-loop |
+| `AGC-NEXT-ACTION-REQUEST` ★ | spec-only | contract prose | always_hard (direct_invocation_forbidden) | 2026-05-05-loop |
+| `AGC-CONTEXT-MANIFEST` | partial | `lib/context.sh`, `scheduler/runner.sh` | always_hard (manifest_external_read_write) | 2026-05-05-loop (turn manifest 추가) |
+| `AGC-OUTPUT` | spec-only | contract prose. legacy helper(`lib/output.sh`)는 후속 PR 에서 catch-up | always_hard (enum + envelope shape) | 2026-05-05-loop (envelope schema 전면 교체) |
+| `AGC-OUTPUT-RUNTIME-ENRICH` | spec-only | contract prose | always_hard | 2026-05-05-loop (3-scope idempotency 매핑) |
+| `AGC-CONTRIBUTION-OUTPUTS` | spec-only | contract prose | always_hard (output_kind 매트릭스 검증) | 2026-05-05-loop |
+| `AGC-WORKSPACE` | partial | `adapters/workspace/*`, `application/caller_dispatch.sh` | stage_graded:scope_violation=warn (Stage 3b block) | 2026-05-05-loop (inner scope enforcement) |
+| `AGC-ISSUE-BODY` | spec-only | `docs/architecture/agent-output-format-mapping.md` | n/a (rendering 규약) | original |
+| `AGC-INVALID` | partial | `application/agent_io.sh`, `lib/output.sh` | always_hard | 2026-05-05-loop (TDD strict / session_id 충돌 추가) |
+
+### State and Operation
+
+| Anchor | Status | Implementation Surface | Enforcement | Active Since |
+|---|---|---|---|---|
+| `SOC-SCOPE` | active | contract authority | n/a | original |
+| `SOC-OBJECTS` | spec-only | contract prose. legacy `lib/state.sh` 는 milestone/task/CP 만 — Stage 2 rewrite | always_hard | 2026-05-05-loop (Slice/DialogueSession/SessionTurn/SliceMerge 신설) |
+| `SOC-LOOPS` ★ | spec-only | contract prose | always_hard (loop_kind 분류) | 2026-05-05-loop |
+| `SOC-MILESTONE-DUAL-SLOT` ★ | spec-only | `lib/dual_track_scheduler.sh` (Stage 4) | stage_graded:dual_slot_fairness=warn (Stage 5 block) | 2026-05-05-loop |
+| `SOC-SLICE-LIFECYCLE` ★ | spec-only | `lib/slice.sh` (Stage 2) | always_hard (state machine) | 2026-05-05-loop |
+| `SOC-SLICE-DEPENDENCIES` ★ | spec-only | `lib/slice.sh` + Planning lead artifact validation (Stage 2) | always_hard (cycle detection) | 2026-05-05-loop |
+| `SOC-SLICE-CLASS` ★ | spec-only | `lib/slice.sh` + escalation rule lookup (Stage 4) | always_hard (escalation 평가) | 2026-05-05-loop |
+| `SOC-SESSION-LIFECYCLE` ★ | spec-only | `lib/session.sh`, `dialogue_coordinator.sh` (Stage 2) | always_hard (state machine) | 2026-05-05-loop |
+| `SOC-SESSION-TERMINATION` ★ | spec-only | `dialogue_coordinator.sh` (Stage 2) | stage_graded:required_evidence_unmet=warn (Stage 3b block) | 2026-05-05-loop |
+| `SOC-SLICE-MERGE` ★ | spec-only | `lib/slice_merge.sh` (Stage 2) | always_hard (state machine) | 2026-05-05-loop |
+| `SOC-DUAL-MILESTONE-BRANCH` ★ | spec-only | trunk 정책 (`SOC-MERGE-POLICY` 와 결합) | always_hard | 2026-05-05-loop |
+| `SOC-CROSS-MILESTONE-REFERENCE` ★ | spec-only | `application/dialogue_coordinator.sh` 의 cross-slot stale 감지 (Stage 4) | stage_graded:telemetry_enrichment_missing=warn | 2026-05-05-loop |
+| `SOC-INTAKE` | active | `application/feature_request.sh` | always_hard (idempotency_key) | 2026-05-05-loop (M_INTAKE_QUEUED 도입) |
+| `SOC-OPERATIONS` | spec-only | contract prose. dispatch helper 는 `caller_dispatch.sh` (Stage 2) | always_hard | 2026-05-05-loop (loop·purpose 기반 재구성) |
+| `SOC-DISPATCH-MATRIX` | spec-only | contract prose + `caller_dispatch.sh` | always_hard | 2026-05-05-loop ((state, final_verdict) tuple 분기) |
+| `SOC-RECOVERY-OPERATION` | partial | `application/recovery.sh` | always_hard | 2026-05-05-loop (session-stale / inner-no-progress / slice-merge-stale trigger 추가) |
+| `SOC-MERGE-POLICY` | spec-only | `lib/slice_merge.sh` (Stage 2) | always_hard (first-merger-wins) | 2026-05-05-loop (SliceMerge first-merger-wins) |
+| `SOC-IDEMPOTENCY` | partial | `application/caller_dispatch.sh`, `lib/ledger.sh` | always_hard | 2026-05-05-loop (3-scope 분리) |
+| `SOC-PHASE-RUN` ✕ | deprecated | `docs/history/legacy-phase-model/contracts/state-and-operation-contract.md` | stage_graded:legacy_writer=warn (Stage 5 block) | (deprecated 2026-05-05-loop) |
+
+### Reliability and Gate
+
+| Anchor | Status | Implementation Surface | Enforcement | Active Since |
+|---|---|---|---|---|
+| `RGC-SCOPE` | active | contract authority | n/a | original |
+| `RGC-WRITES` | active | `application/caller_dispatch.sh`, `application/human_signal.sh`, `lib/ports/*` | always_hard (caller_only_operational_write) | original |
+| `RGC-SIGNALS` | spec-only | `application/human_signal.sh` (legacy-only catch-up needed) | always_hard (envelope 검증) | 2026-05-05-loop (cross_milestone_amendment 등 신규 signal) |
+| `RGC-LEASE-KINDS` ★ | spec-only | `lib/lease.sh` rewrite (Stage 2) | always_hard (lease_acquisition_order, always_hard list) | 2026-05-05-loop |
+| `RGC-SLOT-LOCK` ★ | spec-only | `lib/lease.sh` + `dual_track_scheduler.sh` (Stage 4) | always_hard (short transaction) | 2026-05-05-loop |
+| `RGC-PROMOTION-GUARD` ★ | spec-only | `dual_track_scheduler.sh` (Stage 4) | always_hard | 2026-05-05-loop |
+| `RGC-CROSS-SLOT-STALE` ★ | spec-only | `dialogue_coordinator.sh` (Stage 4) | stage_graded:telemetry_enrichment_missing=warn | 2026-05-05-loop |
+| `RGC-CROSS-SLOT-FAIRNESS` ★ | spec-only | `lib/lease.sh`, `scheduler/runner.sh` (Stage 4) | stage_graded:dual_slot_fairness=warn (Stage 5 block) | 2026-05-05-loop |
+| `RGC-DUAL-GATE-QUEUE` ★ | spec-only | `dual_track_scheduler.sh` (Stage 4) | always_hard (FIFO + idempotency) | 2026-05-05-loop |
+| `RGC-RECOVERY` | spec-only | `application/recovery.sh` (legacy-only catch-up needed) | always_hard | 2026-05-05-loop (loop-aware trigger) |
+| `RGC-FAILURE` | partial | `application/recovery.sh`, `scripts/cli/daemon.sh` | always_hard | 2026-05-05-loop (retry/escalation 운영 정책 매핑) |
+| `RGC-VERIFICATION` | active | `application/verification_runner.sh` + (Stage 2) `metric_run` 추가 | always_hard (deterministic_verification_authority) | 2026-05-05-loop (VerificationRun + MetricRun + required_evidence) |
+| `RGC-HUMAN-CONTRIBUTION` | spec-only | `application/human_signal.sh` (legacy-only catch-up needed) | always_hard (required human contribution) | 2026-05-05-loop (feature slice 한정 scope) |
+| `RGC-LEDGER` | spec-only | `lib/ledger.sh` rewrite (Stage 2). append-compatible: legacy row immutable, new row new schema, parser union read | always_hard (필수 필드) | 2026-05-05-loop (slice/session/turn/loop_kind/action_kind/final_verdict 추가) |
+| `RGC-PAUSE` | active | `lib/signals.sh`, `scripts/cli/control.sh`, `application/human_signal.sh` | always_hard | original |
+| `RGC-NOTIFICATION` | partial | `lib/notifier.sh`, `adapters/notifier/*` | n/a (push-only) | original |
+| `RGC-FAIRNESS` | partial | `application/ready_object.sh`, `scheduler/runner.sh` | stage_graded:fairness_violation=warn | 2026-05-05-loop (within-scope vs cross-slot 분리) |
+| `RGC-DAEMON-STARTUP` | partial | `scripts/cli/daemon.sh` + acquisition order CI (Stage 2) | always_hard (atomic startup) | 2026-05-05-loop (acquisition order CI startup gate) |
+| `RGC-PHASE-LEASE` ✕ | deprecated | `docs/history/legacy-phase-model/contracts/reliability-and-gate-contract.md` | stage_graded:legacy_writer=warn | (deprecated 2026-05-05-loop, 대체: RGC-LEASE-KINDS) |
+
+### Knowledge
+
+| Anchor | Status | Implementation Surface | Enforcement | Active Since |
+|---|---|---|---|---|
+| `KAC-SCOPE` | active | contract authority | n/a | original |
+| `KAC-ACCUMULATION` | partial | `application/knowledge.sh`, `scheduler/runner.sh` | always_hard (knowledge accumulation) | 2026-05-05-loop (live telemetry 절 추가) |
+| `KAC-MANIFEST` | partial | `lib/context.sh`, `application/knowledge.sh` | always_hard | 2026-05-05-loop (audit_hash 정책 추가) |
+| `KAC-MANIFEST-FROM-KNOWLEDGE` | partial | `scheduler/runner.sh` | always_hard | 2026-05-05-loop (turn manifest + slice telemetry inject) |
+| `KAC-DECISION-LOG` | active | `application/knowledge.sh`, tests | always_hard | 2026-05-05-loop (decision_kind enum 확장) |
+| `KAC-CONTEXT-SUMMARY` | partial | `application/knowledge.sh`, `scheduler/runner.sh` | always_hard | 2026-05-05-loop (slice telemetry 요약 포함) |
+| `KAC-TRACEABILITY` | partial | `application/agent_io.sh`, tests | always_hard (AC mapping 검증) | 2026-05-05-loop (AC → Slice → SliceMerge → VerificationRun) |
+| `KAC-CONFLICTS` | spec-only | contract prose | n/a (resolver 없음) | original |
+| `KAC-EQUIVALENCE` | spec-only | contract prose | n/a (enforcer 없음) | 2026-05-05-loop (feature/internal 비대칭) |
+| `KAC-SESSION-LOG-STORAGE` ★ | spec-only | `lib/session.sh` storage layout (Stage 2) | stage_graded:turn_log_compaction_delay=warn | 2026-05-05-loop |
+| `KAC-TURN-LOG-COMPACTION` ★ | spec-only | `application/knowledge.sh` + `dialogue_coordinator.sh` (Stage 2) | stage_graded:turn_log_compaction_delay=warn | 2026-05-05-loop |
+| `KAC-REFACTOR-BACKLOG` ★ | spec-only | `lib/refactor_backlog.sh` (Stage 2) + scout 정기 scan (Stage 4) | stage_graded:refactor_metric_missing=warn | 2026-05-05-loop |
+| `KAC-SLICE-TELEMETRY` ★ | spec-only | `application/knowledge.sh` + `dual_track_scheduler.sh` (Stage 4) | stage_graded:telemetry_enrichment_missing=warn | 2026-05-05-loop |
+
+### Target Configuration
+
+| Anchor | Status | Implementation Surface | Enforcement | Active Since |
+|---|---|---|---|---|
+| `TCC-SCOPE` | active | contract authority | n/a | 2026-05-05-loop (scope 확장) |
+| `TCC-IDENTITY` | active | `scripts/cli/target.sh`, `lib/ledger.sh` | always_hard (target_id 변경 invariant) | original |
+| `TCC-LEASE-CONFIG` | spec-only | `lib/config.sh` rewrite (Stage 2) | always_hard (TTL > 0) | 2026-05-05-loop (4 lease kind 분기) |
+| `TCC-ONBOARDING` | partial | `scripts/cli/target.sh`, `application/onboarding/*` | always_hard | 2026-05-05-loop (required_lib startup gate 추가) |
+| `TCC-AGENT-PROFILES` | spec-only | `lib/config.sh` rewrite (Stage 2) | always_hard (agent_profile abstraction) | phase-pivot |
+| `TCC-LOOP-POLICIES` ★ | spec-only | `lib/config.sh` rewrite + `dialogue_coordinator.sh` (Stage 2) | always_hard | 2026-05-05-loop |
+| `TCC-SLICE-CLASS-RULES` ★ | spec-only | escalation rule lookup (Stage 4) | always_hard (escalation 평가) | 2026-05-05-loop |
+| `TCC-DUAL-TRACK` ★ | spec-only | `dual_track_scheduler.sh` config (Stage 4) | stage_graded:dual_slot_fairness=warn | 2026-05-05-loop |
+| `TCC-REFACTOR-METRICS` ★ | spec-only | `application/knowledge.sh` + scout scan (Stage 4) | stage_graded:refactor_metric_missing=warn | 2026-05-05-loop |
+| `TCC-ENFORCEMENT` ★ | spec-only | invariant enforcement lookup (Stage 2 가 always_hard, Stage 5 가 모든 stage_graded → block) | always_hard (값 자체의 schema) | 2026-05-05-loop |
+| `TCC-PRECEDENCE` | partial | `lib/config.sh`, env loading | always_hard | original |
+| `TCC-CHANGE-RULES` | spec-only | contract prose. ledger helper (Stage 2) | always_hard (변경 ledger 기록) | 2026-05-05-loop (invariant_enforcement 변경 ledger 추가) |
+| `TCC-PHASE-POLICIES` ✕ | deprecated | `docs/history/legacy-phase-model/contracts/target-config-contract.md` | stage_graded:legacy_writer=warn | (deprecated 2026-05-05-loop, 대체: TCC-LOOP-POLICIES) |
+
+### Agent Runner Port
+
+| Anchor | Status | Implementation Surface | Enforcement | Active Since |
+|---|---|---|---|---|
+| `ARC-SCOPE` | active | contract authority | n/a | 2026-05-05-loop (AGC vs ARC 책임 분리 추가) |
+| `ARC-PORT-SIGNATURE` | spec-only | `lib/ports/llm_runner.sh` rewrite (Stage 2). legacy signature 기준 → loop-based | always_hard (signature shape) | 2026-05-05-loop (session_id/turn_index/parent_loop/agent_role_in_session/session_context_ref 필수) |
+| `ARC-CALL-SEMANTICS` | active | `scheduler/runner.sh`, `adapters/llm_runner/*` | always_hard (stateless per call) | 2026-05-05-loop (turn 단위 strict + session state 미보유) |
+| `ARC-EXIT-CLASSES` | active | `lib/ports/llm_runner.sh` `lr_classify_exit` | n/a (분류) | original |
+| `ARC-IDEMPOTENCY` | spec-only | `application/caller_dispatch.sh` + ledger (Stage 2) | always_hard | 2026-05-05-loop (3-scope per-turn / per-session-outcome / per-merge) |
+| `ARC-ADAPTER-SUBSTITUTION` | spec-only | `TCC-AGENT-PROFILES` binding (Stage 2) | always_hard (agent_profile_id 기반) | phase-pivot |
+| `ARC-FAILURE-MODES` | active | `lib/ports/llm_runner.sh`, `scheduler/runner.sh` | n/a (분류) | original |
