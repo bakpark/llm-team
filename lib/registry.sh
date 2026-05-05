@@ -23,7 +23,7 @@
 # ----------------------------------------------------------------------------
 registry_source_ports() {
   local p
-  for p in issue_tracker notifier llm_runner workspace persistent_store; do
+  for p in issue_tracker notifier llm_runner workspace persistent_store cycle_bundle; do
     # shellcheck disable=SC1090
     . "${LLM_TEAM_ROOT}/lib/ports/${p}.sh"
   done
@@ -43,6 +43,7 @@ registry_verify_port() {
     llm_runner)        arr_name="PORT_LLM_RUNNER_REQUIRED_FUNCTIONS" ;;
     workspace)         arr_name="PORT_WORKSPACE_REQUIRED_FUNCTIONS" ;;
     persistent_store)  arr_name="PORT_PERSISTENT_STORE_REQUIRED_FUNCTIONS" ;;
+    cycle_bundle)      arr_name="PORT_CYCLE_BUNDLE_REQUIRED_FUNCTIONS" ;;
     *)
       log_error "registry_verify_port: unknown port '${port}'"
       return 2
@@ -112,6 +113,7 @@ registry_load_default() {
   registry_load_adapter llm_runner        "${LLM_TEAM_ADAPTER_LLM_RUNNER:-claude_code}"        || rc=1
   registry_load_adapter workspace         "${LLM_TEAM_ADAPTER_WORKSPACE:-git_worktree}"        || rc=1
   registry_load_adapter persistent_store  "${LLM_TEAM_ADAPTER_PERSISTENT_STORE:-filesystem}"   || rc=1
+  registry_load_adapter cycle_bundle      "${LLM_TEAM_ADAPTER_CYCLE_BUNDLE:-filesystem}"       || rc=1
   return "${rc}"
 }
 
@@ -124,6 +126,7 @@ registry_active_adapters() {
   printf 'llm_runner=%s\n' "${LLM_TEAM_ACTIVE_LLM_RUNNER_ADAPTER:-<not loaded>}"
   printf 'workspace=%s\n' "${LLM_TEAM_ACTIVE_WORKSPACE_ADAPTER:-<not loaded>}"
   printf 'persistent_store=%s\n' "${LLM_TEAM_ACTIVE_PERSISTENT_STORE_ADAPTER:-<not loaded>}"
+  printf 'cycle_bundle=%s\n' "${LLM_TEAM_ACTIVE_CYCLE_BUNDLE_ADAPTER:-<not loaded>}"
 }
 
 # ----------------------------------------------------------------------------
