@@ -57,11 +57,55 @@ cb_get_path() {
   [ -n "${handle}" ] && [ -d "${handle}" ] && printf '%s' "${handle}"
 }
 
+_cb_fs_atomic_write() {
+  local handle="$1" name="$2" src="$3"
+  [ -n "${handle}" ] || return 0
+  [ -d "${handle}" ] || return 0
+  local dst="${handle}/${name}"
+  ( umask 077 && mkdir -p "$(dirname "${dst}")" ) 2>/dev/null
+  local tmp="${dst}.tmp.$$"
+  if [ "${src}" = "-" ]; then
+    cat > "${tmp}" || { rm -f "${tmp}"; return 1; }
+  else
+    cp "${src}" "${tmp}" 2>/dev/null || { rm -f "${tmp}"; return 1; }
+  fi
+  chmod 0600 "${tmp}" 2>/dev/null || true
+  mv "${tmp}" "${dst}"
+}
+
+cb_capture_blob_text() {
+  local handle="$1" name="$2" text="${3:-}"
+  [ -n "${handle}" ] || return 0
+  printf '%s' "${text}" | _cb_fs_atomic_write "${handle}" "${name}" "-"
+}
+
+cb_capture_blob_file() {
+  local handle="$1" name="$2" path="$3"
+  [ -n "${handle}" ] || return 0
+  [ -f "${path}" ] || return 0
+  _cb_fs_atomic_write "${handle}" "${name}" "${path}"
+}
+
+cb_capture_blob_stdin() {
+  local handle="$1" name="$2"
+  [ -n "${handle}" ] || { cat >/dev/null; return 0; }
+  _cb_fs_atomic_write "${handle}" "${name}" "-"
+}
+
+cb_capture_attempt() {
+  local handle="$1" idx="$2" envelope_ref="$3" diagnostics_ref="$4" meta_json="$5"
+  [ -n "${handle}" ] || return 0
+  [ -d "${handle}" ] || return 0
+  if [ -f "${envelope_ref}" ]; then
+    cb_capture_blob_file "${handle}" "attempts/${idx}/envelope.json" "${envelope_ref}"
+  fi
+  if [ -f "${diagnostics_ref}" ]; then
+    cb_capture_blob_file "${handle}" "attempts/${idx}/diagnostics.txt" "${diagnostics_ref}"
+  fi
+  cb_capture_blob_text "${handle}" "attempts/${idx}/lr_meta.json" "${meta_json}"
+}
+
 # 나머지는 후속 task.
-cb_capture_blob_text() { :; }
-cb_capture_blob_file() { :; }
-cb_capture_blob_stdin() { :; }
-cb_capture_attempt() { :; }
 cb_promote_to_full() { :; }
 cb_finalize() { :; }
 cb_collect_abandoned() { :; }
