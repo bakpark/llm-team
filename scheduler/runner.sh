@@ -809,6 +809,21 @@ if ! caller_apply_output "${TARGET_REPO}" "${ROLE}" "${ENVELOPE_FILE}" "${MANIFE
   exit 1
 fi
 
+# Cycle bundle: applied.diff + post.head + post.dirty.diff (G).
+if [ -n "${CB_HANDLE:-}" ] && declare -F ws_head_sha >/dev/null 2>&1; then
+  _post_head="$(ws_head_sha "task-${TARGET_OBJECT_ID}")"
+  printf '%s' "${_post_head}" \
+    | cb_capture_blob_stdin "${CB_HANDLE}" "diff/post.head"
+  _pre_head="$(cat "${CB_HANDLE}/diff/pre.head" 2>/dev/null)"
+  if [ -n "${_pre_head}" ] && [ -n "${_post_head}" ]; then
+    ws_diff_range "task-${TARGET_OBJECT_ID}" "${_pre_head}" "${_post_head}" \
+      | cb_capture_blob_stdin "${CB_HANDLE}" "diff/applied.diff"
+  fi
+  ws_diff_head "task-${TARGET_OBJECT_ID}" \
+    | cb_capture_blob_stdin "${CB_HANDLE}" "diff/post.dirty.diff"
+  _runner_cycle_result="ok"
+fi
+
 # Success: trap releases lease and removes envelope file.
 log_info "runner: applied envelope for ${ROLE} ${TARGET_OBJECT_KIND}/${TARGET_OBJECT_ID}"
 exit 0
