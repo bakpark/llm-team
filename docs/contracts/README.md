@@ -236,15 +236,17 @@ Status enum:
 | Anchor | Status | 구현 / 검증 표면 | 비고 |
 |---|---|---|---|
 | `AGC-SCOPE` | active | contract authority | 문서 scope anchor |
-| `AGC-ROLES` | active | `lib/roles.sh`, `prompts/*.md` | role enum 과 기본 산출 kind 매핑 |
+| `AGC-PHASES` | spec-only | contract prose | 7-phase enum. 구현 (`lib/phases.sh`) 은 후속 PR |
+| `AGC-AGENT-PROFILES` | spec-only | contract prose | 5-profile enum (atlas/forge/sentinel/scout/human). 구현 (`lib/profiles.sh`) 과 prompts 전환은 후속 PR |
+| `AGC-CONTRIBUTION` | spec-only | contract prose | contribution_kind enum + persistent first-class 정책. SOC-PHASE-RUN 과 함께 후속 PR |
 | `AGC-CALL-BOUNDARY` | partial | `application/agent_io.sh`, `lib/ports/*` | port 경계는 있으나 모든 adapter side-effect surface 자동 검증은 아님 |
-| `AGC-CONTEXT-MANIFEST` | active | `lib/context.sh`, `scheduler/runner.sh` | manifest 생성·검증·첨부 path |
-| `AGC-OUTPUT` | partial | `lib/output.sh`, `application/agent_io.sh` | role↔kind 검증은 active. Caller-enriched idempotency key 분리는 구현 catch-up 필요 |
-| `AGC-OUTPUT-RUNTIME-ENRICH` | spec-only | contract prose | runtime metadata/idempotency enrichment 순서가 production helper 에 완전히 분리되지 않음 |
-| `AGC-ROLE-OUTPUTS` | active | `lib/roles.sh` `role_output_kind` | role × output_kind × verdict matrix 가 contract 정본 |
-| `AGC-WORKSPACE` | partial | `adapters/workspace/*`, `application/caller_dispatch.sh` | Coder worktree path 검증은 있으나 모든 cleanup/recovery path 는 부분 구현 |
+| `AGC-CONTEXT-MANIFEST` | partial | `lib/context.sh`, `scheduler/runner.sh` | manifest 생성·검증·첨부 path 구현. contribution_kind 별 fetch_scope 기본값은 spec-only |
+| `AGC-OUTPUT` | spec-only | contract prose | envelope schema 가 phase / agent_profile / contribution_kind / phase_run_id 로 전환됨. 기존 helper(`lib/output.sh`, `application/agent_io.sh`) 는 legacy envelope 기준이므로 후속 PR 에서 catch-up |
+| `AGC-OUTPUT-RUNTIME-ENRICH` | spec-only | contract prose | runtime metadata / idempotency enrichment 순서. 합성 항에 phase_run_id / agent_profile / contribution_kind 포함 |
+| `AGC-CONTRIBUTION-OUTPUTS` | spec-only | contract prose | phase × contribution_kind × output_kind × verdict matrix 가 contract 정본 |
+| `AGC-WORKSPACE` | partial | `adapters/workspace/*`, `application/caller_dispatch.sh` | Implementation phase 의 forge contribution 격리 worktree path 검증은 있으나 cleanup/recovery path 는 부분 구현 |
 | `AGC-ISSUE-BODY` | spec-only | `docs/architecture/agent-output-format-mapping.md` | rendering 규약은 있으나 parser/enforcer 없음 |
-| `AGC-INVALID` | partial | `application/agent_io.sh`, `lib/output.sh` | manifest 외 참조·secret·path 검증은 있음. body layer 검증은 없음 |
+| `AGC-INVALID` | partial | `application/agent_io.sh`, `lib/output.sh` | manifest 외 참조·secret·path 검증은 있음. phase / contribution_kind enum 검증과 body layer 검증은 spec-only |
 
 ### State and Operation
 
