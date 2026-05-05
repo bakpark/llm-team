@@ -97,4 +97,23 @@ cb_finalize "${h}" "ok" '{}'
 cb_finalize "${h}" "error" '{}' 2>/dev/null  # 두 번째는 no-op
 [ "$(jq -r .result "${h}/summary.json")" = "ok" ] || { echo "FAIL: I7 second finalize must be no-op"; exit 1; }
 
+# Abandoned: pidfile 의 pid 가 죽었고 lease 미등록 → abandoned stamp.
+h="$(cb_open "Aban-task-1-eeeeeeeeeeee" "tgt" "Coder" "m:aban1" "")"
+# 죽은 pid 로 pidfile 강제 교체 (PID 1 은 macOS launchd, 항상 살아있음 → 99999 사용).
+jq -n --arg pid "99999999" --arg manifest_id "m:aban1" \
+   '{pid:$pid, hostname:"x", started_at:"2020-01-01T00:00:00Z", manifest_id:$manifest_id, lease_token:null}' \
+   > "${h}/pidfile.json"
+# finalize 미호출 → summary.json 없음.
+cb_collect_abandoned "tgt"
+[ -f "${h}/summary.json" ] || { echo "FAIL: abandoned should write summary"; exit 1; }
+[ "$(jq -r .result "${h}/summary.json")" = "abandoned" ] || { echo "FAIL: result=abandoned"; exit 1; }
+
+# Abandoned: alive pid 는 보호 (현재 프로세스 pid 사용).
+h="$(cb_open "Aban-task-2-ffffffffffff" "tgt" "Coder" "m:aban2" "")"
+jq -n --arg pid "$$" --arg manifest_id "m:aban2" \
+   '{pid:$pid, hostname:"x", started_at:"2020-01-01T00:00:00Z", manifest_id:$manifest_id, lease_token:null}' \
+   > "${h}/pidfile.json"
+cb_collect_abandoned "tgt"
+[ ! -f "${h}/summary.json" ] || { echo "FAIL: alive pid must NOT be stamped abandoned"; exit 1; }
+
 echo "PASS: cb_open + cb_get_path"

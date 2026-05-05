@@ -135,4 +135,23 @@ cb_finalize() {
   rm -f "${handle}/pidfile.json" 2>/dev/null
 }
 
-cb_collect_abandoned() { :; }
+cb_collect_abandoned() {
+  local target="$1"
+  [ -n "${target}" ] || return 0
+  local root cycles_dir
+  root="$(_cb_inmem_root)"
+  cycles_dir="${root}/${target}/cycles"
+  [ -d "${cycles_dir}" ] || return 0
+  local d pid
+  for d in "${cycles_dir}"/*/; do
+    [ -d "${d}" ] || continue
+    [ -f "${d}/summary.json" ] && continue   # already finalized
+    [ -f "${d}/pidfile.json" ] || continue
+    pid="$(jq -r '.pid // empty' "${d}/pidfile.json" 2>/dev/null)"
+    if [ -z "${pid}" ] || ! kill -0 "${pid}" 2>/dev/null; then
+      # pid 죽었음 — abandoned stamp.
+      cb_finalize "${d%/}" "abandoned" "$(jq -n '{abandoned_detected_at: now | todateiso8601}')"
+    fi
+    # alive pid 는 보호 (no-op).
+  done
+}
