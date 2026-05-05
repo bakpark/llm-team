@@ -67,7 +67,7 @@ OUTER  (milestone, dual-slot)
 - `Task` (→ `Slice`, 책임 확장: 코드 → 가치)
 - `PhaseRun` (→ `DialogueSession`, turn-based 추가)
 - `Code CP` / `Integration CP` (→ `SliceMerge`, lifecycle 7-state 흡수)
-- `Contribution` 단독 객체 (→ DialogueSession 안의 SessionTurn 산출물 + session_outcome)
+- 독립 lifecycle 객체로서의 `Contribution` (→ DialogueSession 안의 SessionTurn 산출물 + session_outcome). envelope 내 1급 필드로서의 contribution 은 `docs/contracts/agent-and-context-contract.md#AGC-CONTRIBUTION` 가 정의 — 객체 lifecycle 만 폐기되고 envelope payload 표현은 보존된다
 
 `Spec CP` 와 `Milestone CP` 는 보존된다 (`Appendix A`) — outer loop 산출물로서 trunk 코드 병합 대상이 아니므로 SliceMerge lifecycle 과 의미가 다르다.
 
@@ -456,8 +456,8 @@ Discovery N+1 은 Delivery N 의 영속 객체를 **read-only** 만 참조한다
 ### Resource Sharing
 
 - AgentProfile worker slot 은 milestone-agnostic. atlas 1 worker 가 N+1 Discovery + N Planning 을 번갈아 servicing.
-- `target.dual_track_priority` ∈ {`delivery_first`, `balanced`, `discovery_first`} (TCC-DUAL-TRACK).
-- WIP limit per profile: `loop_policies.<phase>.concurrent_sessions`.
+- `target.dual_track.priority` ∈ {`delivery_first`, `balanced`, `discovery_first`} (TCC-DUAL-TRACK).
+- WIP limit per profile: `loop_policies.<loop>.<phase|purpose>.concurrent_sessions`.
 
 <a id="SOC-INTAKE"></a>
 ## SOC-INTAKE: Milestone Intake
