@@ -90,6 +90,49 @@ cb_capture_attempt() {
   fi
   cb_capture_blob_text "${handle}" "attempts/${idx}/lr_meta.json" "${meta_json}"
 }
-cb_promote_to_full() { :; }
-cb_finalize() { :; }
+# Internal: promote 상태를 disk 마커로 표현 (in_memory 도 결국 fs 백엔드).
+_cb_inmem_promoted() { [ -f "$1/.promoted" ]; }
+
+cb_promote_to_full() {
+  local handle="$1" reason="${2:-}"
+  [ -n "${handle}" ] || return 0
+  [ -d "${handle}" ] || return 0
+  : > "${handle}/.promoted" 2>/dev/null
+  # reason 누적 — JSON Lines 로 파일에 append (finalize 시 array 로 변환).
+  if [ -n "${reason}" ]; then
+    printf '%s\n' "${reason}" >> "${handle}/.failure_reasons"
+  fi
+}
+
+cb_finalize() {
+  local handle="$1" result="${2:-error}" extra_json="${3:-{\}}"
+  [ -n "${handle}" ] || return 0
+  [ -d "${handle}" ] || return 0
+  if [ -f "${handle}/.finalized" ]; then
+    log_warn "cb_finalize: already finalized at ${handle} (I7)"
+    return 0
+  fi
+  # Slim tier: ok 결과 + promote 이력 없음 → diagnostics.txt 삭제.
+  if [ "${result}" = "ok" ] && ! _cb_inmem_promoted "${handle}"; then
+    rm -f "${handle}/diagnostics.txt" 2>/dev/null
+    rm -f "${handle}/diff/pre.dirty.diff" 2>/dev/null
+  fi
+  # failure_reasons 배열 구성.
+  local reasons_json='[]'
+  if [ -f "${handle}/.failure_reasons" ]; then
+    reasons_json="$(jq -R . "${handle}/.failure_reasons" | jq -s .)"
+  fi
+  jq -cn \
+    --arg result "${result}" \
+    --arg finalized_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson failure_reasons "${reasons_json}" \
+    --argjson extra "${extra_json}" \
+    '$extra + {result:$result, finalized_at:$finalized_at, failure_reasons:$failure_reasons}' \
+    > "${handle}/summary.json.tmp" \
+    && mv "${handle}/summary.json.tmp" "${handle}/summary.json"
+  # 마감 표식.
+  : > "${handle}/.finalized"
+  rm -f "${handle}/pidfile.json" 2>/dev/null
+}
+
 cb_collect_abandoned() { :; }
