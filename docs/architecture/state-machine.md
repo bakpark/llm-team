@@ -27,36 +27,38 @@ GitHub Milestone은 native label을 지원하지 않으므로 description의 hid
 
 | Contract state | GitHub marker value | 의미 |
 |---|---|---|
-| `PO_DRAFT` | `PO_DRAFT` | PO 산출 대기 또는 PO 회수 상태 |
-| `PO_GATE` | `PO_GATE` | PO Spec CP에 대한 human gate |
-| `PM_DRAFT` | `PM_DRAFT` | PM 산출 대기 |
-| `PM_GATE` | `PM_GATE` | PM Spec CP에 대한 human gate |
-| `DECOMPOSE_READY` | `DECOMPOSE_READY` | Planner claim 대기 |
-| `DECOMPOSE_IN_PROGRESS` | `DECOMPOSE_IN_PROGRESS` | Planner lease 보유 |
-| `IMPLEMENTING` | `IMPLEMENTING` | 자식 Task 진행 중 |
-| `REFACTOR_READY` | `REFACTOR_READY` | Integrator claim 대기 |
-| `REFACTOR_IN_PROGRESS` | `REFACTOR_IN_PROGRESS` | Integrator lease 보유 |
-| `VALIDATE_READY` | `VALIDATE_READY` | QA claim 대기 |
-| `VALIDATE_IN_PROGRESS` | `VALIDATE_IN_PROGRESS` | QA lease 보유 |
+| `DISCOVERY_DRAFT` | `DISCOVERY_DRAFT` | Discovery phase 산출 대기 또는 회수 상태 |
+| `DISCOVERY_AWAITING_HUMAN` | `DISCOVERY_AWAITING_HUMAN` | Discovery phase quorum 의 `human_approval` 대기 (legacy `PO_GATE` 의미를 흡수) |
+| `SPECIFICATION_DRAFT` | `SPECIFICATION_DRAFT` | Specification phase 산출 대기 |
+| `SPECIFICATION_AWAITING_HUMAN` | `SPECIFICATION_AWAITING_HUMAN` | Specification phase quorum 의 `human_approval` 대기 |
+| `PLANNING_READY` | `PLANNING_READY` | Planning phase claim 대기 |
+| `PLANNING_IN_PROGRESS` | `PLANNING_IN_PROGRESS` | Planning phase lead lease 보유 |
+| `IMPLEMENTATION_IN_PROGRESS` | `IMPLEMENTATION_IN_PROGRESS` | 자식 Task 진행 중 |
+| `INTEGRATION_READY` | `INTEGRATION_READY` | Integration phase claim 대기 |
+| `INTEGRATION_IN_PROGRESS` | `INTEGRATION_IN_PROGRESS` | Integration phase lead lease 보유 |
+| `VALIDATION_READY` | `VALIDATION_READY` | Validation phase claim 대기 |
+| `VALIDATION_IN_PROGRESS` | `VALIDATION_IN_PROGRESS` | Validation phase lead lease 보유 |
 | `DONE` | `DONE` | 마일스톤 완료 |
-| `ESCALATED` | `ESCALATED` | human gate 큐 |
+| `ESCALATED` | `ESCALATED` | governance 큐 (사람 개입 필요) |
 
-이전 구현의 `po:in-progress`, `needs-scenarios`, `release:ready` 같은 label 이름은 legacy alias로만 취급한다. 새 구현은 contract state 값을 그대로 marker에 기록하는 방식을 우선한다.
+이전 구현의 `po:in-progress`, `needs-scenarios`, `release:ready`, `PO_DRAFT`, `PM_GATE` 같은 label/marker 이름은 legacy alias 로만 취급한다. 새 구현은 contract state 값을 그대로 marker 에 기록하는 방식을 우선한다.
+
+`*_AWAITING_HUMAN` 은 phase 의 quorum sub-state 다. 별도 governance gate state 가 아니라 `phase_policies.<phase>.required_reviewers=[human]` 인 phase 의 quorum 평가 도중 사람 contribution 을 기다리는 상태다 (`docs/contracts/reliability-and-gate-contract.md#RGC-HUMAN-CONTRIBUTION`).
 
 ## Task State Mapping
 
-Task는 GitHub Issue label로 상태를 표현한다.
+Task 는 GitHub Issue label 로 상태를 표현한다.
 
 | Contract state | GitHub label | 의미 |
 |---|---|---|
 | `TASK_PENDING` | `task:pending` | dependency 대기 |
-| `TASK_READY` | `task:ready` | Coder claim 대기 |
-| `TASK_IN_PROGRESS` | `task:in-progress` | Coder lease 보유 |
-| `TASK_REVIEW_READY` | `task:review-ready` | Reviewer claim 대기 |
-| `TASK_REVIEW_IN_PROGRESS` | `task:review-in-progress` | Reviewer lease 보유 |
-| `TASK_INTEGRATED` | `task:integrated` | Code CP가 통합 브랜치에 병합됨 |
+| `TASK_READY` | `task:ready` | Implementation phase (forge) claim 대기 |
+| `TASK_IN_PROGRESS` | `task:in-progress` | Implementation phase forge lease 보유 |
+| `TASK_REVIEW_READY` | `task:review-ready` | CodeReview phase (sentinel) claim 대기 |
+| `TASK_REVIEW_IN_PROGRESS` | `task:review-in-progress` | CodeReview phase lead lease 보유 |
+| `TASK_INTEGRATED` | `task:integrated` | Code CP 가 통합 브랜치에 병합됨 |
 | `TASK_REJECTED` | `task:rejected` | request-changes 후 회수 직전 상태 |
-| `ESCALATED` | `task:escalated` | human gate 큐 |
+| `ESCALATED` | `task:escalated` | governance 큐 |
 
 Dependency는 Issue body의 marker로 표현할 수 있다.
 
@@ -78,23 +80,24 @@ Change Proposal은 GitHub PR, branch, commit set, 또는 spec patch PR로 표현
 | Contract state | Marker value |
 |---|---|
 | `CP_DRAFT` | `CP_DRAFT` |
-| `CP_READY_FOR_HUMAN_GATE` | `CP_READY_FOR_HUMAN_GATE` |
-| `CP_READY_FOR_REVIEW` | `CP_READY_FOR_REVIEW` |
-| `CP_READY_FOR_VERIFICATION` | `CP_READY_FOR_VERIFICATION` |
-| `CP_HUMAN_APPROVED` | `CP_HUMAN_APPROVED` |
+| `CP_AWAITING_QUORUM` | `CP_AWAITING_QUORUM` (Spec CP 가 Discovery / Specification phase 의 quorum 대기) |
+| `CP_READY_FOR_REVIEW` | `CP_READY_FOR_REVIEW` (Code CP 가 CodeReview phase 의 quorum 대기) |
+| `CP_READY_FOR_VERIFICATION` | `CP_READY_FOR_VERIFICATION` (Integration / Milestone CP 가 phase 의 quorum 대기) |
 | `CP_APPROVED` | `CP_APPROVED` |
 | `CP_MERGED` | `CP_MERGED` |
 | `CP_REQUEST_CHANGES` | `CP_REQUEST_CHANGES` |
 | `CP_CLOSED` | `CP_CLOSED` |
 | `CP_STALE` | `CP_STALE` |
 
-Spec CP는 human gate signal 후 Caller가 `CP_READY_FOR_HUMAN_GATE -> CP_HUMAN_APPROVED -> CP_MERGED`로 집행한다. Code CP는 Reviewer verdict 후 Caller가 `CP_READY_FOR_REVIEW -> CP_APPROVED -> CP_MERGED` 또는 `CP_READY_FOR_REVIEW -> CP_REQUEST_CHANGES -> CP_CLOSED`로 집행한다.
+legacy `CP_READY_FOR_HUMAN_GATE` / `CP_HUMAN_APPROVED` 는 본 매핑에서 폐기되었다 — Spec CP 의 사람 승인은 Discovery / Specification phase 의 quorum 안의 `human_approval` contribution 으로 흡수된다.
+
+Spec CP 는 phase coordinator 의 quorum_reached 후 Caller 가 `CP_AWAITING_QUORUM -> CP_APPROVED -> CP_MERGED` 로 집행한다 (사람 reject 시 `CP_REQUEST_CHANGES -> CP_CLOSED`). Code CP 는 CodeReview phase 의 quorum_reached 후 Caller 가 `CP_READY_FOR_REVIEW -> CP_APPROVED -> CP_MERGED` 또는 `CP_READY_FOR_REVIEW -> CP_REQUEST_CHANGES -> CP_CLOSED` 로 집행한다.
 
 ## Lease Encoding
 
 Lease는 label만으로 표현하지 않는다. Caller는 lease record를 별도 artifact로 남긴다.
 
-필수 필드는 [`RGC-LEASE`](../contracts/reliability-and-gate-contract.md#RGC-LEASE)를 따른다. GitHub-only 구현에서는 Issue/PR/Milestone comment 또는 hidden marker를 lease store로 사용할 수 있으나, compare-and-set 성격을 보장해야 한다.
+필수 필드는 [`RGC-PHASE-LEASE`](../contracts/reliability-and-gate-contract.md#RGC-PHASE-LEASE) 를 따른다 (contribution lease 와 phase coordinator lease 두 종류). GitHub-only 구현에서는 Issue/PR/Milestone comment 또는 hidden marker 를 lease store 로 사용할 수 있으나, compare-and-set 성격을 보장해야 한다.
 
 ```text
 <!-- llm-team:lease:<lease-id> -->
