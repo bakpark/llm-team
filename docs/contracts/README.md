@@ -253,15 +253,16 @@ Status enum:
 | Anchor | Status | 구현 / 검증 표면 | 비고 |
 |---|---|---|---|
 | `SOC-SCOPE` | active | contract authority | 문서 scope anchor |
-| `SOC-OBJECTS` | active | `lib/state.sh`, `lib/labels.sh`, issue tracker adapters | workflow object/state label 매핑 |
-| `SOC-STATES` | active | `application/caller_dispatch.sh`, `application/human_signal.sh` | 주요 상태 전이 path 구현 |
-| `SOC-DEPENDENCIES` | partial | `application/ready_object.sh`, `application/caller_dispatch.sh` | dependency 대기는 구현. cycle/edge 전수 검증은 Decompose path 에 의존 |
-| `SOC-INTAKE` | active | `application/feature_request.sh` | feature request promote path |
-| `SOC-OPERATIONS` | partial | `scheduler/runner.sh`, `application/caller_dispatch.sh` | 주요 operation 구현. 일부 gate/amendment edge 는 human_signal path 에 의존 |
-| `SOC-RECOVERY-OPERATION` | partial | `application/recovery.sh` | stale/lease-expiry 회수는 구현. generic partial-fail rollback 은 미구현 |
-| `SOC-DISPATCH-MATRIX` | partial | `application/caller_dispatch.sh` | 정상/FAIL/STALE path 구현. matrix 전체 자동 검증은 없음 |
+| `SOC-OBJECTS` | spec-only | contract prose | PhaseRun / Contribution 객체가 추가됨. legacy `lib/state.sh` 는 milestone/task/CP 만 다룸 |
+| `SOC-PHASE-RUN` | spec-only | contract prose | PhaseRun + Contribution lifecycle (CONTRIB_PENDING..CONTRIB_CONSIDERED). 영속화 helper 는 후속 PR |
+| `SOC-STATES` | spec-only | contract prose | state label 이 phase-based 로 전환됨 (DISCOVERY_*, SPECIFICATION_*, PLANNING_*, IMPLEMENTATION_*, INTEGRATION_*, VALIDATION_*). 기존 helper(`application/caller_dispatch.sh`, `application/human_signal.sh`) 는 legacy label 기준이므로 후속 PR 에서 catch-up |
+| `SOC-DEPENDENCIES` | partial | `application/ready_object.sh`, `application/caller_dispatch.sh` | dependency 대기 path 구현. cycle/edge 전수 검증은 Planning lead path 에 의존 |
+| `SOC-INTAKE` | active | `application/feature_request.sh` | feature request promote path. 진입 to_state 만 `DISCOVERY_DRAFT` 로 rename 필요 |
+| `SOC-OPERATIONS` | spec-only | contract prose | 7-phase operation set (Intake, Discovery, Specification, Planning, Implementation, CodeReview, Integration, Validation, Recover) 으로 재구성. quorum 평가는 phase_coordinator.sh (후속 PR) |
+| `SOC-RECOVERY-OPERATION` | partial | `application/recovery.sh` | stale / lease-expiry 회수 구현. contribution-stale / contribution-timeout / coordinator-failure trigger 는 spec-only |
+| `SOC-DISPATCH-MATRIX` | spec-only | contract prose | phase × contribution_kind × output_kind 기반으로 재구성. 기존 helper 는 legacy operation 기준 |
 | `SOC-MERGE-POLICY` | spec-only | contract prose | adapter-neutral merge policy. deterministic merge/rebase helper 없음 |
-| `SOC-IDEMPOTENCY` | active | `application/caller_dispatch.sh`, `lib/ledger.sh` | `applied`/`duplicate` ledger 기반 |
+| `SOC-IDEMPOTENCY` | partial | `application/caller_dispatch.sh`, `lib/ledger.sh` | `applied`/`duplicate` ledger 는 active. 합성 항에 phase_run_id / agent_profile / contribution_kind 추가는 spec-only |
 
 ### Reliability and Gate
 
