@@ -1,6 +1,6 @@
 # Lease and Recovery
 
-본 문서는 [`docs/contracts/reliability-and-gate-contract.md#RGC-LEASE`](../contracts/reliability-and-gate-contract.md#RGC-LEASE), [`#RGC-RECOVERY`](../contracts/reliability-and-gate-contract.md#RGC-RECOVERY), [`#RGC-FAILURE`](../contracts/reliability-and-gate-contract.md#RGC-FAILURE), [`#RGC-LEDGER`](../contracts/reliability-and-gate-contract.md#RGC-LEDGER) 의 구현 매핑을 기록한다. contract 본문이 정의하는 invariant 를 어디서 어떻게 적용하는지만 적고, 새로운 규약은 만들지 않는다.
+본 문서는 [`docs/contracts/reliability-and-gate-contract.md#RGC-PHASE-LEASE`](../contracts/reliability-and-gate-contract.md#RGC-PHASE-LEASE), [`#RGC-RECOVERY`](../contracts/reliability-and-gate-contract.md#RGC-RECOVERY), [`#RGC-FAILURE`](../contracts/reliability-and-gate-contract.md#RGC-FAILURE), [`#RGC-LEDGER`](../contracts/reliability-and-gate-contract.md#RGC-LEDGER) 의 구현 매핑을 기록한다. contract 본문이 정의하는 invariant 를 어디서 어떻게 적용하는지만 적고, 새로운 규약은 만들지 않는다.
 
 ## 1. Lease 구현 매핑
 
@@ -11,16 +11,18 @@
 | 만료 스캔 | `lib/lease.sh` `lease_expire_scan()` — `acquired_at + ttl` 초과 lease 를 식별 |
 | 정상 release | `lib/lease.sh` `lease_release()` — operation 종료 시 holder 가 호출 |
 
-`lease_id` 는 [`#RGC-LEASE`](../contracts/reliability-and-gate-contract.md#RGC-LEASE) 의 lease 자체 식별자(같은 객체에 시간 차로 발급된 두 lease 는 서로 다른 `lease_id` 를 가진다). `lease_token` 은 같은 객체의 lease 들 사이 *순서* 를 보증하는 split-brain 감지용 monotonic 값이다. 모든 operational write 는 `lease_token` 을 ledger 에 기록하며, 이후 같은 객체에 더 작은 token 의 write 가 도착하면 거부된다.
+`lease_id` 는 [`#RGC-PHASE-LEASE`](../contracts/reliability-and-gate-contract.md#RGC-PHASE-LEASE) 의 lease 자체 식별자(같은 객체에 시간 차로 발급된 두 lease 는 서로 다른 `lease_id` 를 가진다). `lease_token` 은 같은 객체의 lease 들 사이 *순서* 를 보증하는 split-brain 감지용 monotonic 값이다. 모든 operational write 는 `lease_token` 을 ledger 에 기록하며, 이후 같은 객체에 더 작은 token 의 write 가 도착하면 거부된다.
 
 ## 2. TTL 적용 위치
 
-[`#RGC-LEASE`](../contracts/reliability-and-gate-contract.md#RGC-LEASE) 의 우선순위(env > target > 시스템 기본값)는 [`docs/contracts/target-config-contract.md#TCC-PRECEDENCE`](../contracts/target-config-contract.md#TCC-PRECEDENCE) 에 따른다. 구현은 다음 순서로 lookup 한다.
+[`#RGC-PHASE-LEASE`](../contracts/reliability-and-gate-contract.md#RGC-PHASE-LEASE) 의 우선순위(env > target > 시스템 기본값)는 [`docs/contracts/target-config-contract.md#TCC-PRECEDENCE`](../contracts/target-config-contract.md#TCC-PRECEDENCE) 에 따른다. 구현은 다음 순서로 lookup 한다.
 
-1. worker 환경변수(`LLM_TEAM_LEASE_TTL_<ROLE>` 형태로 명시된 경우)
-2. `targets/*.yaml` 의 `lease.ttl_by_role[<role>]`
+1. worker 환경변수 (`LLM_TEAM_LEASE_TTL_<AGENT_PROFILE>` 또는 `LLM_TEAM_LEASE_TTL_PHASE_<PHASE>` 형태로 명시된 경우)
+2. `targets/*.yaml` 의 `lease.ttl_by_agent_profile.<id>` (contribution lease) 또는 `lease.ttl_by_phase.<phase>` / `phase_policies.<phase>.timeout` (coordinator lease)
 3. `targets/*.yaml` 의 `lease.ttl_default`
 4. 시스템 기본값(`lib/config.sh`)
+
+legacy `lease.ttl_by_role` lookup 은 contract 에서 폐기되었다. 구현 catch-up 은 후속 PR 의 책임이다.
 
 해석 결과는 `lease_claim()` 호출 시 `ttl` 인자로 전달된다. 동적 갱신은 contract 가 out-of-scope 로 두며, 구현도 갱신 API 를 제공하지 않는다.
 
