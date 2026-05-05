@@ -523,6 +523,37 @@ if [ ! -d "${RESOLVED}" ]; then
 fi
 
 # ----------------------------------------------------------------------------
+# Test 15: ws_head_sha + ws_diff_head + ws_diff_range
+# ----------------------------------------------------------------------------
+UNIT_DIFF="task-diffhead"
+WS_DIFF="$(ws_ensure "${UNIT_DIFF}" 2>/dev/null)" || fail "T15: ws_ensure for ${UNIT_DIFF} failed"
+
+SHA_INIT="$(ws_head_sha "${UNIT_DIFF}")"
+[ -n "${SHA_INIT}" ] || fail "T15: ws_head_sha empty on fresh worktree"
+
+DIFF_CLEAN="$(ws_diff_head "${UNIT_DIFF}")"
+[ -z "${DIFF_CLEAN}" ] || fail "T15: clean worktree should produce empty diff (got: ${DIFF_CLEAN})"
+
+# Make worktree dirty.
+echo "dirty-line" > "${WS_DIFF}/dirty-marker.txt"
+DIFF_DIRTY="$(ws_diff_head "${UNIT_DIFF}")"
+[ -n "${DIFF_DIRTY}" ] || fail "T15: dirty worktree should produce non-empty diff"
+
+# Missing unit_id → graceful empty.
+SHA_MISSING="$(ws_head_sha "task-nonexistent-unit")"
+[ -z "${SHA_MISSING}" ] || fail "T15: missing worktree should yield empty sha"
+
+DIFF_MISSING="$(ws_diff_head "task-nonexistent-unit")"
+[ -z "${DIFF_MISSING}" ] || fail "T15: missing worktree should yield empty diff"
+
+# Cleanup the dirty file so subsequent reuse is clean.
+rm -f "${WS_DIFF}/dirty-marker.txt"
+
+# ws_diff_range from..HEAD on a clean worktree where from==HEAD → empty.
+DIFF_RANGE_SAME="$(ws_diff_range "${UNIT_DIFF}" "${SHA_INIT}" "${SHA_INIT}")"
+[ -z "${DIFF_RANGE_SAME}" ] || fail "T15: ws_diff_range same..same should be empty"
+
+# ----------------------------------------------------------------------------
 # Done
 # ----------------------------------------------------------------------------
 

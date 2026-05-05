@@ -438,6 +438,10 @@ ws_ensure_ro_tree() {
   printf '%s\n' "${ro_path}"
 }
 
+ws_diff_head() { :; }       # in_memory 워크스페이스는 git 없음 → 항상 빈 출력.
+ws_head_sha() { :; }
+ws_diff_range() { :; }
+
 # ws_ro_tree_revision_pin <target>  → echo sha
 # in-memory 어댑터: repo-ro/.ro-pin 파일에서 SHA 반환.
 ws_ro_tree_revision_pin() {

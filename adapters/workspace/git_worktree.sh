@@ -519,6 +519,35 @@ ws_ensure_ro_tree() {
   printf '%s\n' "${ro_path}"
 }
 
+ws_diff_head() {
+  local unit_id="$1"
+  local wt
+  wt="$(_workspace_unit_path "${unit_id}")"
+  [ -d "${wt}/.git" ] || [ -f "${wt}/.git" ] || return 0
+  (
+    cd "${wt}" || exit 0
+    git diff HEAD 2>/dev/null
+    git ls-files --others --exclude-standard 2>/dev/null
+  ) || true
+}
+
+ws_head_sha() {
+  local unit_id="$1"
+  local wt
+  wt="$(_workspace_unit_path "${unit_id}")"
+  [ -d "${wt}/.git" ] || [ -f "${wt}/.git" ] || return 0
+  ( cd "${wt}" && git rev-parse HEAD 2>/dev/null ) || true
+}
+
+ws_diff_range() {
+  local unit_id="$1" from_sha="$2" to_sha="${3:-HEAD}"
+  local wt
+  wt="$(_workspace_unit_path "${unit_id}")"
+  [ -d "${wt}/.git" ] || [ -f "${wt}/.git" ] || return 0
+  [ -n "${from_sha}" ] || return 0
+  ( cd "${wt}" && git diff "${from_sha}" "${to_sha}" 2>/dev/null ) || true
+}
+
 # ws_ro_tree_revision_pin <target>  → echo sha
 # 현재 RO tree 가 고정한 commit SHA 반환. repo-ro 가 없으면 실패.
 ws_ro_tree_revision_pin() {
