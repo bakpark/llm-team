@@ -201,6 +201,7 @@ _runner_ledger_write() {
   local target="$1" obj_kind="$2" obj_id="$3" from_state="$4" to_state="$5"
   local operation="$6" idempotency_key="$7" manifest_id="$8" result="$9"
   local reason="${10:-}"
+  local cycle_bundle_ref="${11:-}"
   local tmp
   tmp="$(mktemp -t runner-ledger.XXXXXX)" || return 1
   local lease_token
@@ -220,6 +221,7 @@ _runner_ledger_write() {
     --arg result "${result}" \
     --arg lease_token "${lease_token}" \
     --arg reason "${reason}" \
+    --arg cycle_bundle_ref "${cycle_bundle_ref}" \
     '{
       transition_id: $transition_id,
       target_id: $target_id,
@@ -235,6 +237,7 @@ _runner_ledger_write() {
       lease_token: (if $lease_token == "" then null else $lease_token end),
       result: $result,
       reason: (if $reason == "" then null else $reason end),
+      cycle_bundle_ref: (if $cycle_bundle_ref == "" then null else $cycle_bundle_ref end),
       duplicate: false
     }' >"${tmp}" || { rm -f "${tmp}"; return 1; }
   transition_ledger_write "${target}" "${tmp}" || { rm -f "${tmp}"; return 1; }
