@@ -18,3 +18,9 @@ workdir/
 # 에이전트 로컬 작업 디렉토리
 .claude/
 .plan/
+
+# Node / TypeScript
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
