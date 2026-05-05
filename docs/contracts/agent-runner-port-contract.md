@@ -142,6 +142,27 @@ SliceMerge 의 trunk merge 의 멱등성. tuple:
 
 adapter 자체는 idempotency 보장을 하지 않는다. 3-scope idempotency 는 ledger 와 Caller 가 종합한다.
 
+<a id="ARC-ADAPTER-PROMPT-CONTRACT"></a>
+## ARC-ADAPTER-PROMPT-CONTRACT: Adapter Prompt Body Contract
+
+adapter 가 stdin 으로 받는 prompt 본문은 `docs/contracts/agent-and-context-contract.md#AGC-PROMPT-SERIALIZATION` 의 4-part canonical layout (`header` → `context` → `instruction` → `output_schema`) 을 그대로 보존해야 한다. 본 anchor 는 transport 측에서 그 invariant 를 다시 단언한다.
+
+### invariant
+
+- adapter 는 prompt 본문의 section 순서를 재정렬하지 않는다. section 사이의 delimiter 를 임의로 변경하거나 토큰을 끼워 넣지 않는다.
+- adapter 는 4 section 의 *의미* 를 변경하지 않는다. provider 가 system / user / assistant role 분리를 요구하는 경우, header 와 output_schema 를 system 영역으로, context 와 instruction 을 user 영역으로 매핑할 수 있으나 echo invariant (header 의 7 필드) 는 그대로 LLM 입력에 노출되어야 한다 (`#AGC-LLM-NEUTRALITY`).
+- adapter 는 prompt 본문에 자체 토큰 (예: provider 별 cache breakpoint 마커) 을 추가하더라도 4 section 의 텍스트 자체는 변형하지 않는다.
+- adapter 가 본 invariant 를 위반하면 envelope 검증 단계에서 invalid 로 판정된다 (`#AGC-INVALID` 의 prompt 4-part 위반 항목).
+
+### Caller 책임
+
+- prompt 본문의 4 section 합성은 Caller 의 책임이다. adapter 는 합성을 보강하지 않는다.
+- Caller 는 prompt 본문을 `prompt_ref` 가 가리키는 위치에 영속화한 뒤 본 ref 와 `session_context_ref` 를 함께 adapter 에 전달한다 (`#ARC-PORT-SIGNATURE`). adapter 는 두 ref 의 본문을 합성한 결과를 stdin 으로 받는다 (`#ARC-CALL-SEMANTICS`).
+
+### stateless 재단언
+
+본 contract 의 다른 anchor (`#ARC-CALL-SEMANTICS`) 는 호출 사이 adapter 의 상태 누적을 금지한다. 본 anchor 는 추가로 adapter 가 *prompt 본문 자체* 에 대해서도 상태를 보유하지 않음을 단언한다 — 같은 prompt 본문을 두 번 받으면 두 번 모두 동일한 형태로 LLM 에 전달된다.
+
 <a id="ARC-ADAPTER-SUBSTITUTION"></a>
 ## ARC-ADAPTER-SUBSTITUTION: Adapter Substitution
 

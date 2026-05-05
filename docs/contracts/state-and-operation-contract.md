@@ -71,6 +71,26 @@ OUTER  (milestone, dual-slot)
 
 `Spec CP` 와 `Milestone CP` 는 보존된다 (`Appendix A`) — outer loop 산출물로서 trunk 코드 병합 대상이 아니므로 SliceMerge lifecycle 과 의미가 다르다.
 
+### External References (추상 슬롯)
+
+Milestone / Slice / SliceMerge 는 외부 추적 시스템과의 mirror 관계를 표현하기 위해 다음 추상 슬롯을 가질 수 있다.
+
+```text
+external_refs[]: [{
+  provider: <opaque-id>          # 외부 시스템 식별자. enum 은 본 contract 가 고정하지 않음
+  kind: <tracker | review_surface | milestone | unknown>  # extensible
+  id: <opaque>                   # 외부 시스템에서의 식별자
+  url?: <opaque>                 # 외부 시스템에서의 영속 링크
+}]
+```
+
+invariant:
+
+- `provider` 값의 enum 은 본 contract 가 고정하지 않는다. 구체 매핑(예: 어떤 외부 시스템이 어떤 provider 식별자를 갖는가, 어떤 객체가 어떤 kind 를 가질 수 있는가) 은 architecture 한정이다.
+- `kind` enum 은 미정 값을 `unknown` 으로 표기한다 — 향후 신규 kind 는 architecture 가 추가하더라도 본 contract 의 invariant 를 깨지 않는다.
+- 동기화 방향: 내부 객체 = authoritative, `external_refs[]` 항목 = mirror. 외부 mirror 의 변경은 사람 governance signal (RGC-HUMAN-CONTRIBUTION) 또는 Caller 의 sync 작업으로만 내부 상태에 반영된다.
+- 동기화 메타 (`sync_status`, `last_synced_internal_revision`, `last_seen_external_revision` 등) 는 본 contract 가 정의하지 않으며 architecture 매핑 문서가 정의한다.
+
 <a id="SOC-MILESTONE-DUAL-SLOT"></a>
 ## SOC-MILESTONE-DUAL-SLOT: Milestone Dual-Slot
 
@@ -148,6 +168,7 @@ Slice {
   current_session_id         # 진행 중 session
   spawning_proposal_id       # internal 일 때 RefactorProposal 역참조
   abandoned_reason           # SLICE_BLOCKED 또는 abandon 시
+  external_refs[]            # 외부 추적 시스템 mirror (선택, 추상 슬롯 — §SOC-OBJECTS)
 }
 ```
 
@@ -158,7 +179,7 @@ Slice {
 1. Caller 가 input 구성 (manifest + turn_log + 직전 verification_result + role prompt — `AGC-SESSION-INPUT`).
 2. forge 호출 (stateless, but input 에 turn_log).
 3. forge → turn envelope: workspace patch + `tdd_phase: red_green | refactor` + `target_tests[]`.
-4. Caller patch 적용 → slice-local branch commit (workspace_commit SHA 기록).
+4. envelope 검증 통과 후 turn worker 가 patch 를 슬라이스-로컬 브랜치에 적용하고 commit 을 생성하여 `workspace_commit` SHA 를 SessionTurn 에 기록한다 (post-validate step). 검증 실패 시 commit 을 생성하지 않으며 그 turn 은 `#AGC-INVALID` 로 분류된다.
 5. Caller verification 실행 (acceptance + deterministic).
 6. turn_log append + progress_metric 계산.
 7. Convergence:
@@ -304,6 +325,12 @@ SessionTurn {
 | AWAITING_REVALIDATION | Caller 가 verification 재실행 후 pass | SESSION_OPEN 으로 복귀 (이어서 진행) |
 | AWAITING_REVALIDATION | verification 재실행 fail (한도 내 재시도 후 실패) | TIMEOUT |
 
+### Dispatch 책임
+
+위 state transition 의 트리거 감지와 dispatch (parent 객체의 state 전이, SliceMerge 생성, 다음 turn enqueue 등) 는 dialogue coordinator (Caller 의 session 진행 daemon) 가 단독으로 수행한다. inner CONVERGED 직후 SLICE_BUILDING → SLICE_REVIEWING 으로의 전이도 본 dispatch 의 일부로 *동기적으로* 일어나며, agent 또는 turn worker 가 직접 수행하지 않는다.
+
+같은 slice 의 inner session 과 middle session 이 동시에 SESSION_OPEN 인 상태는 invalid 다 — slice_lease (`docs/contracts/reliability-and-gate-contract.md#RGC-LEASE-KINDS`) 가 슬라이스 단위로 보호한다. inner CONVERGED → SLICE_REVIEWING 전이의 동기 dispatch 가 이 invariant 를 보존한다.
+
 <a id="SOC-SESSION-TERMINATION"></a>
 ## SOC-SESSION-TERMINATION: Session Termination Rule
 
@@ -401,6 +428,7 @@ SliceMerge {
   merged_at
   merged_by_caller_id
   lease_token
+  external_refs[]                # 외부 추적 시스템 mirror (선택, 추상 슬롯 — §SOC-OBJECTS)
 }
 ```
 

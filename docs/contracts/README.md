@@ -350,10 +350,15 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 | `AGC-CONTRIBUTION` | spec-only | contract prose | always_hard (enum 검증) | 2026-05-05-loop (enum 정정) |
 | `AGC-CALL-BOUNDARY` | partial | `application/agent_io.sh`, `lib/ports/*` | always_hard (caller_only_operational_write) | 2026-05-05-loop (turn 단위로 재정의) |
 | `AGC-SESSION-INPUT` ★ | spec-only | contract prose | always_hard (manifest_external_read_write) | 2026-05-05-loop |
-| `AGC-NEXT-ACTION-REQUEST` ★ | spec-only | contract prose | always_hard (direct_invocation_forbidden) | 2026-05-05-loop |
+| `AGC-PROMPT-SERIALIZATION` ★ | spec-only | contract prose. prompt builder catch-up (`docs/architecture/prompt-build-pipeline.md`) | always_hard (4-part layout + header echo 7 필드) | 2026-05-05-loop |
+| `AGC-NEXT-ACTION-REQUEST` ★ | spec-only | contract prose | always_hard (direct_invocation_forbidden, decision_reason 필수) | 2026-05-05-loop |
+| `AGC-TURN-ORDERING` ★ | spec-only | contract prose + `dialogue_coordinator.sh` (Stage 2) | always_hard (priority + fairness) | 2026-05-05-loop |
+| `AGC-CONFLICT-RESOLUTION` ★ | spec-only | contract prose + `dialogue_coordinator.sh` (Stage 2) | always_hard (re-dispatch / human escalation) | 2026-05-05-loop |
 | `AGC-CONTEXT-MANIFEST` | partial | `lib/context.sh`, `scheduler/runner.sh` | always_hard (manifest_external_read_write) | 2026-05-05-loop (turn manifest 추가) |
+| `AGC-CONTEXT-BUDGET` ★ | spec-only | contract prose. cap 적용은 Caller (Stage 2) | always_hard (overflow → invalid envelope) | 2026-05-05-loop |
 | `AGC-OUTPUT` | spec-only | contract prose. legacy helper(`lib/output.sh`)는 후속 PR 에서 catch-up | always_hard (enum + envelope shape) | 2026-05-05-loop (envelope schema 전면 교체) |
 | `AGC-OUTPUT-RUNTIME-ENRICH` | spec-only | contract prose | always_hard | 2026-05-05-loop (3-scope idempotency 매핑) |
+| `AGC-LLM-NEUTRALITY` ★ | spec-only | contract prose. adapter normalize 책임 (`adapters/llm_runner/*`) | always_hard (provider-native → envelope normalize) | 2026-05-05-loop |
 | `AGC-CONTRIBUTION-OUTPUTS` | spec-only | contract prose | always_hard (output_kind 매트릭스 검증) | 2026-05-05-loop |
 | `AGC-WORKSPACE` | partial | `adapters/workspace/*`, `application/caller_dispatch.sh` | stage_graded:scope_violation=warn (Stage 3b block) | 2026-05-05-loop (inner scope enforcement) |
 | `AGC-ISSUE-BODY` | spec-only | `docs/architecture/agent-output-format-mapping.md` | n/a (rendering 규약) | original |
@@ -452,5 +457,6 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 | `ARC-CALL-SEMANTICS` | active | `scheduler/runner.sh`, `adapters/llm_runner/*` | always_hard (stateless per call) | 2026-05-05-loop (turn 단위 strict + session state 미보유) |
 | `ARC-EXIT-CLASSES` | active | `lib/ports/llm_runner.sh` `lr_classify_exit` | n/a (분류) | original |
 | `ARC-IDEMPOTENCY` | spec-only | `application/caller_dispatch.sh` + ledger (Stage 2) | always_hard | 2026-05-05-loop (3-scope per-turn / per-session-outcome / per-merge) |
+| `ARC-ADAPTER-PROMPT-CONTRACT` ★ | spec-only | `adapters/llm_runner/*` catch-up (Stage 2) | always_hard (4-part layout 보존) | 2026-05-05-loop |
 | `ARC-ADAPTER-SUBSTITUTION` | spec-only | `TCC-AGENT-PROFILES` binding (Stage 2) | always_hard (agent_profile_id 기반) | phase-pivot |
 | `ARC-FAILURE-MODES` | active | `lib/ports/llm_runner.sh`, `scheduler/runner.sh` | n/a (분류) | original |

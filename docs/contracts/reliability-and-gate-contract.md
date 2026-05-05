@@ -372,6 +372,19 @@ evidence 의 권위는 agent verdict 보다 우위다 (`llm-team.md` Inv #6).
 
 검증 환경과 실행 조건은 재현 가능해야 한다. 로그는 Context Manifest entry 로 Agent 에 전달된다.
 
+### 실행 시점 (Loop 별)
+
+VerificationRun 의 실행은 loop 별로 schedule 이 다르다. dialogue coordinator 가 단일 권위로 schedule 하며, agent 가 직접 호출하지 않는다.
+
+| Loop · Phase / Purpose | 실행 시점 | 동기 / 비동기 |
+|---|---|---|
+| inner tdd_build | turn 직후 (turn worker 가 patch 적용 + commit 직후 즉시) | **동기** — 결과가 다음 turn 의 `prior_verification_result_ref` 입력이 되므로, 결과가 영속화되기 전에는 다음 turn enqueue 금지 |
+| middle review | session_outcome 응축 직전 또는 SliceMerge 전이 시점 | **비동기** — required_evidence 평가 완료 후 진행. evidence 부재 시 session 은 `AWAITING_REVALIDATION` 으로 보류 |
+| outer Validation | acceptance 평가 단계 | **비동기** — cross-slice 검증을 위해 trunk merge 이후 별도 schedule |
+| outer Discovery / Specification / Planning | (기본 미실행) | spec/ADR 산출은 결정적 검증 대상이 아님. metric run 이 evidence 로 명시된 경우에 한해 실행 |
+
+VerificationRun 의 storage path 와 ID 발급 알고리즘은 본 contract 가 정의하지 않으며 architecture 문서가 결정한다 (KAC-SESSION-LOG-STORAGE 가 session_log 와 분리됨을 명시한다 — verification 본문은 SessionTurn 의 `verification_result` 필드가 식별자만 보유한다).
+
 <a id="RGC-HUMAN-CONTRIBUTION"></a>
 ## RGC-HUMAN-CONTRIBUTION: Human Contribution
 
@@ -508,6 +521,17 @@ RUNNING | PAUSED | STOPPED
 같은 scope (slot queue, slice queue, session queue) 의 동일 우선순위 ready 객체는 oldest-ready-first 로 claim 한다. 명시적 priority 가 있는 경우에만 예외를 허용한다. priority 예외도 transition ledger 에 기록해야 한다.
 
 cross-slot fairness 는 `#RGC-CROSS-SLOT-FAIRNESS` 가 별도로 정의한다.
+
+### Concurrent Sessions Hard Default
+
+dialogue coordinator 가 동시에 SESSION_OPEN 상태로 진행하는 session 의 수는 default 로 **1 (fail-serial)** 이다. 본 default 는 session 진행의 직렬화를 보장하여 turn worker 의 race 와 ledger 충돌을 차단한다.
+
+`target.concurrent_sessions` (`docs/contracts/target-config-contract.md#TCC-LOOP-POLICIES`) 가 명시된 경우에 한해 1 보다 큰 값으로 override 할 수 있다. override 시 다음을 만족해야 한다.
+
+- slice_lease 의 acquisition order 가 보존되어야 한다 (`#RGC-LEASE-KINDS`).
+- 동일 slice 의 inner session 과 middle session 이 동시에 진행되는 상황은 어떤 override 값에서도 허용되지 않는다 (`docs/contracts/state-and-operation-contract.md#SOC-SESSION-LIFECYCLE` 의 dispatch 책임 절).
+
+override 값이 명시되지 않은 시스템은 정량 cap 1 을 적용한다.
 
 <a id="RGC-DAEMON-STARTUP"></a>
 ## RGC-DAEMON-STARTUP: Daemon Startup Atomicity
