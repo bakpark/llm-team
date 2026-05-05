@@ -549,6 +549,14 @@ case "${ROLE}" in
     ;;
 esac
 
+# Cycle bundle: pre-snapshot (RW 역할만, cb handle 있을 때만).
+if [ -n "${CB_HANDLE:-}" ] && declare -F ws_head_sha >/dev/null 2>&1; then
+  ws_head_sha "task-${TARGET_OBJECT_ID}" \
+    | cb_capture_blob_stdin "${CB_HANDLE}" "diff/pre.head"
+  ws_diff_head "task-${TARGET_OBJECT_ID}" \
+    | cb_capture_blob_stdin "${CB_HANDLE}" "diff/pre.dirty.diff"
+fi
+
 # ============================================================================
 # Agent invocation
 # ============================================================================
@@ -606,6 +614,11 @@ log_info "runner: agent_cwd=${AGENT_CWD} role=${ROLE}"
 PROMPT_REF="$(mktemp -t runner-prompt.XXXXXX)"
 printf '%s' "${PROMPT_TEXT}" >"${PROMPT_REF}"
 _runner_cleanup_prompt() { rm -f "${PROMPT_REF:-}" 2>/dev/null || true; }
+
+# Cycle bundle: prompt capture (D).
+if [ -n "${CB_HANDLE:-}" ]; then
+  cb_capture_blob_file "${CB_HANDLE}" "prompt.txt" "${PROMPT_REF}"
+fi
 
 # B-3: lr_invoke retry loop. transient transport error (5xx | network | timeout)
 # 만 같은 cycle 내 backoff 후 재시도. 4xx / malformed_output / adapter_unavailable
