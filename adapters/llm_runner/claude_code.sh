@@ -37,9 +37,16 @@ lr_invoke() {
     return 127
   fi
 
+  # Strict numeric validation (review feedback): empty/0 → no timeout. 양의
+  # 정수 → timeout 적용. 기타 값(예: 운영자 typo "30s") 은 silent skip 하지 않고
+  # 66 으로 fail-fast — "no silent timeout skip" 정책 일관성.
   local timeout_sec="${LR_TIMEOUT_SEC:-0}"
   case "${timeout_sec}" in
-    ''|*[!0-9]*) timeout_sec=0 ;;
+    ''|0) timeout_sec=0 ;;
+    *[!0-9]*)
+      log_error "lr_invoke: LR_TIMEOUT_SEC='${timeout_sec}' is not a non-negative integer (fail-fast per #ARC-ADAPTER-SUBSTITUTION)"
+      return 66
+      ;;
   esac
   if [ "${timeout_sec}" -gt 0 ]; then
     if ! command -v timeout >/dev/null 2>&1; then

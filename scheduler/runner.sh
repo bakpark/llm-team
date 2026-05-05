@@ -597,9 +597,13 @@ _runner_cleanup_lr_refs() {
   rm -f "${LR_ENVELOPE_REF:-}" "${LR_DIAGNOSTICS_REF:-}" 2>/dev/null || true
 }
 
-# Deterministic idempotency_key (#ARC-IDEMPOTENCY): 같은 (role, operation,
-# manifest_id, attempt) 호출은 같은 key. cycle 내 retry 는 attempt 가 달라
-# 자연히 다른 key 를 받는다 (재시도 방지가 아닌 *멱등성 detection 가능* 보장).
+# Deterministic idempotency_key plumbing (#ARC-IDEMPOTENCY scope, review 반영):
+# 같은 (role, operation, manifest_id, attempt) 호출은 같은 key. cycle 내 retry
+# 는 attempt 가 달라 자연히 다른 key 를 받는다 (재시도 방지가 아닌 *멱등성
+# detection 가능* 보장). 단, 본 key 는 wrapper meta 에 echo 되고 LR_* env 로만
+# 노출되며, ledger 멱등성 검증은 여전히 envelope `.idempotency_key` 기준으로
+# application/caller_dispatch.sh 가 수행한다 (lr_call key ↔ envelope key 의
+# 통합과 ledger pre-check 은 별 라운드 의제).
 _runner_lr_idem_key() {
   local attempt="$1"
   printf '%s|%s|%s|%s' \

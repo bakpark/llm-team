@@ -113,6 +113,12 @@ lr_classify_diagnostic_reason() {
 #     (wrapper 는 sourced bash function 인 lr_invoke 를 직접 wrap 할 수 없음).
 #   idempotency_key: caller 가 deterministic 하게 산출한 키. 비어있으면 적합
 #     하지 않은 호출로 간주하지 않고(테스트 호환), env 만 빈 값으로 export.
+#     **Scope (review 반영)**: 본 wrapper 는 key 의 *plumbing/echo* 만 담당.
+#     `#ARC-IDEMPOTENCY` 의 "ledger 에서 선행 호출 기록을 확인 → ok 면 envelope
+#     재사용" 까지의 멱등성 책임은 caller (application/caller_dispatch.sh) 에
+#     있으며, 현재 caller 는 envelope-derived `.idempotency_key` 로만 duplicate
+#     detection 을 수행한다. wrapper-side key 와 envelope-side key 의 통합
+#     (lr_call key 로 ledger pre-check) 은 별 라운드 의제.
 #
 #   stdout: a single-line JSON object:
 #     {"exit_status":"<enum>","envelope_ref":"<path>",

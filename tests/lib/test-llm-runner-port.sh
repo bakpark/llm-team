@@ -217,6 +217,9 @@ rm -f "${env_j}" "${diag_j}" "${prompt_j_ref}"
 # `timeout` 부재를 강제하기 위해 `command` builtin 을 함수로 shadow 한다 —
 # PATH 조작 시 jq/sh 등 다른 의존성도 함께 잃어 lr_call 자체가 망가지므로
 # 본 테스트에는 부적합. (PATH 제거는 OS-별로도 비결정적)
+# 주의: 함수 shadow 는 macOS/bash 에서 동작. POSIX 셸 (`set -o posix`) 또는
+# 다른 dash/ash 호환 셸에서는 builtin precedence 가 달라 비결정적일 수 있다.
+# 본 테스트는 본 프로젝트의 표준 실행 환경(bash on macOS/Linux) 만 검증한다.
 prompt_t_ref="$(mktemp -t lrport-prompt-t.XXXXXX)"
 printf '%s' $'# Role: po\n# Operation: Compose-PO\n# Manifest-id: m-port-10\n\nbody' >"${prompt_t_ref}"
 (
@@ -247,6 +250,34 @@ printf '%s' $'# Role: po\n# Operation: Compose-PO\n# Manifest-id: m-port-10\n\nb
 ) || failures=$((failures + 1))
 rm -f "${prompt_t_ref}"
 # Restore the fake adapter for any later cases (binding via env).
+. "${LLM_TEAM_ROOT}/adapters/llm_runner/fake.sh"
+
+# ── (10b) ARC E2: LR_TIMEOUT_SEC strict numeric (review feedback) ────────
+# 운영자 typo 예: "30s". claude_code adapter 가 silent 0-fallback 하지 않고
+# 66 fail-fast — "no silent timeout skip" 정책 일관성.
+prompt_tn_ref="$(mktemp -t lrport-prompt-tn.XXXXXX)"
+printf '%s' $'# Role: po\n# Operation: Compose-PO\n# Manifest-id: m-port-10b\n\nbody' >"${prompt_tn_ref}"
+(
+  set +u
+  unset -f lr_invoke 2>/dev/null || true
+  . "${LLM_TEAM_ROOT}/adapters/llm_runner/claude_code.sh"
+  export LLM_TEAM_CLAUDE_CMD="true"
+  meta_tn="$(lr_call "po" "Compose-PO" "m-port-10b" "${prompt_tn_ref}" "" "30s" "idem-port-10b" 2>/dev/null)"
+  exit_tn="$(printf '%s' "${meta_tn}" | jq -r '.exit_status // ""')"
+  if [ "${exit_tn}" != "adapter_unavailable" ]; then
+    echo "FAIL: (10b) non-numeric LR_TIMEOUT_SEC '30s' should fail-fast as adapter_unavailable, got '${exit_tn}'" >&2
+    exit 1
+  fi
+  diag_tn="$(printf '%s' "${meta_tn}" | jq -r '.diagnostics_ref // ""')"
+  if ! { [ -f "${diag_tn}" ] && grep -q "non-negative integer" "${diag_tn}"; }; then
+    echo "FAIL: (10b) fail-fast diagnostics missing validation message" >&2
+    exit 1
+  fi
+  env_tn="$(printf '%s' "${meta_tn}" | jq -r '.envelope_ref // ""')"
+  rm -f "${env_tn}" "${diag_tn}"
+  exit 0
+) || failures=$((failures + 1))
+rm -f "${prompt_tn_ref}"
 . "${LLM_TEAM_ROOT}/adapters/llm_runner/fake.sh"
 
 # ── (11) ARC E2: idempotency_key echo (deterministic by caller) ──────────

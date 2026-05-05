@@ -132,6 +132,12 @@ _agent_io_extract_fenced_json() {
 # • '## Manifest' + manifest JSON 본문 append.
 # • '## Envelope Schema' + 리터럴 schema 안내 append.
 # • extra_instruction 이 주어지면 '## Caller Notes' 로 그 뒤에 append.
+#
+# Coupling: prompts/<role>.md 의 첫 3 줄 헤더(`# Role:` / `# Operation:` /
+# `# Manifest-id:`) 는 lib/roles.sh `role_normalize` / `role_operation` 의
+# canonical form 과 1:1 일치해야 한다. 불일치 시 `lr_call` (lib/ports/llm_runner.sh)
+# 의 header consistency check 가 호출 직전에 `adapter_unavailable` 로 차단한다.
+# prompt template 추가/수정 시 lib/roles.sh 매핑과의 일치성 점검이 필수.
 agent_prompt_assemble() {
   local role="$1" manifest_path="$2" extra_instruction="${3:-}"
   if [ -z "${role}" ] || [ -z "${manifest_path}" ]; then
