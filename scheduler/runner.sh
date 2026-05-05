@@ -587,7 +587,8 @@ PROMPT_TEXT="$(agent_prompt_assemble "${ROLE}" "${MANIFEST_FILE}" "${EXTRA_INSTR
   _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
   _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
     "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
-    "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "error" || true
+    "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "error" \
+    "" "${CB_HANDLE:-}" || true
   exit 1
 }
 
@@ -601,7 +602,8 @@ if ! AGENT_CWD="$(agent_workspace_for "${ROLE}" "${TARGET_OBJECT_ID}" 2>/dev/nul
   _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
   _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
     "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
-    "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "error" || true
+    "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "error" \
+    "" "${CB_HANDLE:-}" || true
   exit 1
 fi
 log_info "runner: agent_cwd=${AGENT_CWD} role=${ROLE}"
@@ -662,10 +664,12 @@ while :; do
     log_error "runner: lr_call infrastructure failure"
     _runner_cleanup_prompt
     _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+    _runner_cycle_result="error"
+    [ -n "${CB_HANDLE:-}" ] && cb_promote_to_full "${CB_HANDLE}" "lr_call_infra_failure"
     _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
       "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
       "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "error" \
-      "lr_call_infra_failure" || true
+      "lr_call_infra_failure" "${CB_HANDLE:-}" || true
     exit 1
   fi
   LR_EXIT_STATUS="$(printf '%s' "${LR_META}" | jq -r '.exit_status // ""')"
@@ -728,10 +732,12 @@ if [ "${LR_EXIT_STATUS}" != "ok" ]; then
   log_error "runner: lr_invoke final failure (${LR_EXIT_STATUS}/${LR_ERROR_REASON:-none}); diagnostics=${LR_DIAGNOSTICS_REF}"
   _runner_cleanup_lr_refs
   _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+  _runner_cycle_result="error"
+  [ -n "${CB_HANDLE:-}" ] && cb_promote_to_full "${CB_HANDLE}" "lr_exhausted:${LR_EXIT_STATUS}"
   _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
     "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
     "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "error" \
-    "lr_invoke:${LR_EXIT_STATUS}:${LR_ERROR_REASON:-none}" || true
+    "lr_invoke:${LR_EXIT_STATUS}:${LR_ERROR_REASON:-none}" "${CB_HANDLE:-}" || true
   exit 1
 fi
 
@@ -742,9 +748,12 @@ ENVELOPE_JSON=""
 if ! ENVELOPE_JSON="$(agent_output_parse "${LLM_OUT}" 2>/dev/null)"; then
   log_error "runner: agent_output_parse failed"
   _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+  _runner_cycle_result="invalid"
+  [ -n "${CB_HANDLE:-}" ] && cb_promote_to_full "${CB_HANDLE}" "agent_output_parse"
   _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
     "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
-    "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "invalid" || true
+    "${OPERATION}" "" "$(context_manifest_id "${MANIFEST_FILE}")" "invalid" \
+    "" "${CB_HANDLE:-}" || true
   exit 1
 fi
 
@@ -765,12 +774,14 @@ trap '_runner_cycle_finalize_if_open; _runner_full_cleanup' EXIT
 if ! agent_output_validate_extended "${ENVELOPE_FILE}" "${ROLE}" 2>/dev/null; then
   log_error "runner: envelope failed extended validation"
   _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+  _runner_cycle_result="invalid"
+  [ -n "${CB_HANDLE:-}" ] && cb_promote_to_full "${CB_HANDLE}" "envelope_invalid_extended"
   _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
     "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
     "${OPERATION}" \
     "$(jq -r '.idempotency_key // empty' "${ENVELOPE_FILE}" 2>/dev/null)" \
     "$(jq -r '.manifest_id // empty' "${ENVELOPE_FILE}" 2>/dev/null)" \
-    "invalid" || true
+    "invalid" "" "${CB_HANDLE:-}" || true
   exit 1
 fi
 
@@ -784,12 +795,14 @@ if ! revision_pin_revalidate "${ENVELOPE_FILE}" "${TARGET_REPO}" 2>/dev/null; th
     revision_pin_revalidate "${ENVELOPE_FILE}" "${TARGET_REPO}" >&2 || true
   fi
   _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+  _runner_cycle_result="stale"
+  [ -n "${CB_HANDLE:-}" ] && cb_promote_to_full "${CB_HANDLE}" "revision_pin_stale"
   _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
     "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
     "${OPERATION}" \
     "$(jq -r '.idempotency_key // empty' "${ENVELOPE_FILE}")" \
     "$(jq -r '.manifest_id // empty' "${ENVELOPE_FILE}")" \
-    "stale" || true
+    "stale" "" "${CB_HANDLE:-}" || true
   exit 1
 fi
 
@@ -800,12 +813,14 @@ fi
 if ! caller_apply_output "${TARGET_REPO}" "${ROLE}" "${ENVELOPE_FILE}" "${MANIFEST_FILE}"; then
   log_error "runner: caller_apply_output failed"
   _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true
+  _runner_cycle_result="error"
+  [ -n "${CB_HANDLE:-}" ] && cb_promote_to_full "${CB_HANDLE}" "caller_apply_output"
   _runner_ledger_write "${TARGET}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" \
     "$(_runner_input_state_for "${ROLE}")" "$(_runner_input_state_for "${ROLE}")" \
     "${OPERATION}" \
     "$(jq -r '.idempotency_key // empty' "${ENVELOPE_FILE}")" \
     "$(jq -r '.manifest_id // empty' "${ENVELOPE_FILE}")" \
-    "error" || true
+    "error" "" "${CB_HANDLE:-}" || true
   exit 1
 fi
 
