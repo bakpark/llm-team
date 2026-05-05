@@ -53,4 +53,17 @@ cb_capture_blob_text "${h}" "summary.txt" "world"
 # 빈 handle 에 대한 capture 는 no-op rc 0.
 cb_capture_blob_text "" "x" "y" || { echo "FAIL: empty handle should be no-op"; exit 1; }
 
+# Attempt capture.
+h="$(cb_open "Att-task-1-1234567890ab" "tgt" "Coder" "m:att" "")"
+env_ref="$(mktemp)"; echo '{"output_kind":"patch"}' > "${env_ref}"
+diag_ref="$(mktemp)"; echo 'WARN something' > "${diag_ref}"
+meta_json='{"exit_status":"ok","attempts":1,"wall_ms":12}'
+cb_capture_attempt "${h}" 1 "${env_ref}" "${diag_ref}" "${meta_json}"
+[ -d "${h}/attempts/1" ] || { echo "FAIL: attempts/1 dir"; exit 1; }
+[ -f "${h}/attempts/1/envelope.json" ] || { echo "FAIL: env"; exit 1; }
+[ -f "${h}/attempts/1/diagnostics.txt" ] || { echo "FAIL: diag"; exit 1; }
+[ -f "${h}/attempts/1/lr_meta.json" ] || { echo "FAIL: meta"; exit 1; }
+[ "$(jq -r '.exit_status' "${h}/attempts/1/lr_meta.json")" = "ok" ] || { echo "FAIL: meta content"; exit 1; }
+rm -f "${env_ref}" "${diag_ref}"
+
 echo "PASS: cb_open + cb_get_path"

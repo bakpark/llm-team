@@ -76,7 +76,20 @@ cb_capture_blob_stdin() {
   [ -n "${handle}" ] || { cat >/dev/null; return 0; }
   _cb_inmem_atomic_write "${handle}" "${name}" "-"
 }
-cb_capture_attempt() { :; }
+cb_capture_attempt() {
+  local handle="$1" idx="$2" envelope_ref="$3" diagnostics_ref="$4" meta_json="$5"
+  [ -n "${handle}" ] || return 0
+  [ -d "${handle}" ] || return 0
+  local dir="${handle}/attempts/${idx}"
+  mkdir -p "${dir}" 2>/dev/null
+  if [ -f "${envelope_ref}" ]; then
+    cb_capture_blob_file "${handle}" "attempts/${idx}/envelope.json" "${envelope_ref}"
+  fi
+  if [ -f "${diagnostics_ref}" ]; then
+    cb_capture_blob_file "${handle}" "attempts/${idx}/diagnostics.txt" "${diagnostics_ref}"
+  fi
+  cb_capture_blob_text "${handle}" "attempts/${idx}/lr_meta.json" "${meta_json}"
+}
 cb_promote_to_full() { :; }
 cb_finalize() { :; }
 cb_collect_abandoned() { :; }
