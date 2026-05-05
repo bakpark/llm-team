@@ -95,9 +95,18 @@ Worker slot 은 AgentProfile 별로 독립된다. dialogue_coordinator 와 dual_
 |---|---|
 | Within-queue (intake / promotion / turn pickup) | oldest-ready-first ([`#RGC-FAIRNESS`](../contracts/reliability-and-gate-contract.md#RGC-FAIRNESS)) |
 | Cross-slot (Discovery N+1 ↔ Delivery N) | `target.dual_track.priority` ∈ {delivery_first (default), balanced, discovery_first} ([`#RGC-CROSS-SLOT-FAIRNESS`](../contracts/reliability-and-gate-contract.md#RGC-CROSS-SLOT-FAIRNESS)) |
-| WIP limit | `loop_policies.<phase>.concurrent_sessions` |
+| WIP limit | `loop_policies.<phase>.concurrent_sessions` (default = **1**, fail-serial — [`#RGC-FAIRNESS`](../contracts/reliability-and-gate-contract.md#RGC-FAIRNESS) Concurrent Sessions Hard Default 절) |
+| Turn ordering (within DialogueSession) | [`#AGC-TURN-ORDERING`](../contracts/agent-and-context-contract.md#AGC-TURN-ORDERING) 의 우선순위 (1: accepted next_action_request, 2: profile capability auto-routing, 3: LRU fallback) + `max_consecutive_per_profile` fairness cap |
 
-priority override 가 있으면 transition ledger 에 기록한다.
+priority override 와 turn_ordering 위반 (`caller_routing_decision.decision = delayed/overridden`) 은 transition ledger 에 기록한다.
+
+### slice_lease 가 다중 session 을 보호하는 절차
+
+dialogue_coordinator 가 동일 slice 의 inner 와 middle 을 동시에 SESSION_OPEN 으로 운영하는 것은 [`#SOC-SESSION-LIFECYCLE`](../contracts/state-and-operation-contract.md#SOC-SESSION-LIFECYCLE) Dispatch 책임 절에 의해 금지된다. slice_lease 가 슬라이스 단위로 보호하며, dialogue_coordinator 는 다음 순서로 invariant 를 유지한다:
+
+1. 새 session 을 SESSION_OPEN 으로 영속화하기 전에 slice_lease claim.
+2. inner CONVERGED 직후 SLICE_BUILDING → SLICE_REVIEWING 전이의 동기 dispatch 가 inner session 의 lease 해제와 middle session 의 lease claim 을 연속으로 처리.
+3. concurrent_sessions override 가 있어도 동일 slice 에 대해서는 1 session 만 허용 (override 는 서로 다른 slice 또는 milestone 사이의 병렬도만 늘린다).
 
 ## Single Instance
 

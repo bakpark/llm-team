@@ -4,6 +4,11 @@
 
 이 문서는 contract 가 아니다. Agent output 의 authoritative schema 는 [`agent-and-context-contract.md`](../contracts/agent-and-context-contract.md) 이며, 본 문서는 사람이 읽기 쉬운 markdown artifact 구조만 제안한다.
 
+cross-link:
+- 입력 (1-shot prompt 본문) 측 직렬화: [`AGC-PROMPT-SERIALIZATION`](../contracts/agent-and-context-contract.md#AGC-PROMPT-SERIALIZATION) + 구체 형식 [`prompt-build-pipeline.md`](prompt-build-pipeline.md)
+- provider-native 응답 ↔ envelope normalize: [`AGC-LLM-NEUTRALITY`](../contracts/agent-and-context-contract.md#AGC-LLM-NEUTRALITY)
+- 외부 surface (Issue / PR / Milestone) 매핑: [`external-tracking-mapping.md`](external-tracking-mapping.md)
+
 ## Common Envelope
 
 모든 Agent output 은 envelope 와 artifact 를 분리한다. 아래 YAML 은 [`AGC-OUTPUT`](../contracts/agent-and-context-contract.md#AGC-OUTPUT) 을 설명하기 위한 **non-authoritative example** 이다. 필드의 필수 여부와 의미는 contract 문서가 정의한다.

@@ -4,6 +4,11 @@
 
 GitHub 외 adapter(향후 GitLab/Forgejo 등) 가 추가되면 본 문서는 해당 adapter 영역으로 분리한다.
 
+cross-link:
+- 객체 ↔ 외부 surface 매핑 (state / label / sync 메타): [`external-tracking-mapping.md`](external-tracking-mapping.md)
+- inbound (webhook / polling) 변경 → signal 변환: [`external-tracking-mapping.md`](external-tracking-mapping.md) §6 + [`RGC-SIGNALS`](../contracts/reliability-and-gate-contract.md#RGC-SIGNALS)
+- `external_refs[]` 추상 슬롯: [`SOC-OBJECTS`](../contracts/state-and-operation-contract.md#SOC-OBJECTS)
+
 ## 1. 하나의 Operation 에서 발생하는 side-effect 시퀀스
 
 각 단계는 (caller 함수, port 진입, 외부 API) 3-tuple 을 가진다. 모든 단계는 [`#RGC-LEDGER`](../contracts/reliability-and-gate-contract.md#RGC-LEDGER) 의 `lease_token` (lease_kind ∈ {`slot_lock`, `slice_lease`, `session_lease`, `turn_lease`}) 을 함께 기록한다.

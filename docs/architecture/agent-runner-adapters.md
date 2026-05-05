@@ -45,13 +45,25 @@ legacy `phase_run_id`, `agent_role`, `operation` 입력은 폐기되었다.
 
 ## 3. session_context_ref 합성과 stdin 결합
 
-adapter 는 `prompt_ref` 와 `session_context_ref` 의 본문을 합쳐 stdin 으로 받는다. adapter 는 `session_context_ref` 를 자체적으로 fetch 하지 않으며, Caller 가 `lib/context.sh` 에서 합성한 결과를 그대로 사용한다.
+adapter 는 `prompt_ref` 와 `session_context_ref` 의 본문을 합쳐 stdin 으로 받는다. adapter 는 `session_context_ref` 를 자체적으로 fetch 하지 않으며, Caller 가 `lib/context.sh` 에서 합성한 결과를 그대로 사용한다. 합성 본문의 구체 형식은 [`prompt-build-pipeline.md`](prompt-build-pipeline.md) 가 정의한 4-part canonical layout (YAML frontmatter + sectioned markdown) 을 따른다 — adapter 는 해당 layout 을 보존한다 ([`ARC-ADAPTER-PROMPT-CONTRACT`](../contracts/agent-runner-port-contract.md#ARC-ADAPTER-PROMPT-CONTRACT)).
 
 session_context_ref 의 본문은 다음을 포함:
 
 - 직전 turn_log_snapshot ([`#KAC-TURN-LOG-COMPACTION`](../contracts/knowledge-contract.md#KAC-TURN-LOG-COMPACTION) 의 압축 결과)
 - 직전 verification_result (inner loop 한정 또는 evidence 가 직전 turn 에서 발생했을 때)
 - 누적 session artifacts (lead artifact / review_verdict / proposal — `body+turn_log` fetch_scope)
+
+### 3.1 Adapter 별 4-Part Wrap
+
+provider 별 role-splitting 처리는 [`prompt-build-pipeline.md`](prompt-build-pipeline.md) §7 의 매핑을 따른다 — header echo 7 필드 invariant ([`AGC-PROMPT-SERIALIZATION`](../contracts/agent-and-context-contract.md#AGC-PROMPT-SERIALIZATION)) 는 어떤 wrap 에서도 보존된다.
+
+| Adapter | 4-part wrap |
+|---|---|
+| `claude_code` | stdin 본문을 단일 prompt 로 forward (role 분리 없음) |
+| `codex` 류 (가정) | system: frontmatter + `# Output Schema` / user: `# Context` + `# Instruction` |
+| `fake` | frontmatter 의 7 필드 파싱 → fixture envelope echo |
+
+provider-native 응답 → AGC-OUTPUT envelope 의 normalize 매트릭스는 [`AGC-LLM-NEUTRALITY`](../contracts/agent-and-context-contract.md#AGC-LLM-NEUTRALITY) 가 단일 권위.
 
 ## 4. 종료 분류 매핑
 
