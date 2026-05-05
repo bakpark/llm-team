@@ -469,6 +469,33 @@ context_manifest_validate "${MANIFEST_FILE}" || {
 }
 
 # ============================================================================
+# Cycle bundle (RW 4 역할만): cb_open + 단일 cleanup trap.
+# ============================================================================
+
+CB_HANDLE=""
+_runner_cycle_result=""
+case "${ROLE}" in
+  Coder|Reviewer|Integrator|QA)
+    _manifest_id_full="$(context_manifest_id "${MANIFEST_FILE}")"
+    _manifest_hash12="$(printf '%s' "${_manifest_id_full}" | shasum -a 256 | cut -c1-12)"
+    _cycle_id="${ROLE}-${TARGET_OBJECT_ID}-${_manifest_hash12}"
+    if declare -F cb_open >/dev/null 2>&1; then
+      CB_HANDLE="$(cb_open "${_cycle_id}" "${TARGET}" "${ROLE}" \
+                            "${_manifest_id_full}" "${LEASE_ID:-}")"
+    fi
+    ;;
+esac
+
+_runner_cycle_finalize_if_open() {
+  if [ -n "${CB_HANDLE:-}" ] && declare -F cb_finalize >/dev/null 2>&1; then
+    cb_finalize "${CB_HANDLE}" "${_runner_cycle_result:-error}" "{}"
+  fi
+}
+
+# Early trap — envelope 단계 도달 전에 exit 해도 cb_finalize 보장.
+trap '_runner_cycle_finalize_if_open' EXIT
+
+# ============================================================================
 # Workspace pre-setup (Coder needs ws before caller_apply_output → ws_apply_patch)
 # ============================================================================
 
@@ -693,7 +720,7 @@ _runner_full_cleanup() {
   _runner_cleanup_envelope
   _runner_release_lease
 }
-trap _runner_full_cleanup EXIT
+trap '_runner_cycle_finalize_if_open; _runner_full_cleanup' EXIT
 
 # ----- envelope validation (extended) -----
 if ! agent_output_validate_extended "${ENVELOPE_FILE}" "${ROLE}" 2>/dev/null; then
