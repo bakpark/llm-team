@@ -26,6 +26,10 @@ agc-envelope-roundtrip/
   case-004-truncation-overflow/               # token budget overflow → malformed_output
 ```
 
+### Case Directory Naming Convention
+
+`case-<NNN>-<loop-or-purpose>-<scenario-slug>/` 형식. 예: `case-001-inner-tdd-build-first-turn`, `case-003-header-echo-mismatch-invalid`. `<NNN>` 은 fixture 추가 순서 (zero-padded 3 digits). invalid / overflow 같은 negative 케이스는 슬러그 끝에 의도된 분류 (`-invalid`, `-overflow` 등) 를 붙인다.
+
 각 케이스 디렉토리는 다음 3 파일을 포함한다:
 
 | 파일 | 의미 |

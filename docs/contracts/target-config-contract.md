@@ -13,9 +13,10 @@
 - target 단위 lease TTL 정책 (4-lease kind 별 + AgentProfile 별 + Phase 별)
 - target 단위 onboarding 게이트 설정
 - AgentProfile 레지스트리: id 별 모델 / runner / capabilities 매핑 (모델명은 본 contract 단일 권위)
-- Loop policy: outer/middle/inner loop 의 phase 또는 purpose 별 lead / participants / required_participants / session_termination / timeout / concurrent_sessions
+- Loop policy: outer/middle/inner loop 의 phase 또는 purpose 별 lead / participants / required_participants / session_termination / timeout / concurrent_sessions / turn_ordering / conflict
 - Slice class escalation rule (`internal_escalation_rules`)
-- Dual-track 정책 (discovery_wip, dual_track_priority, telemetry_refresh, scheduled_capacity)
+- Dual-track 정책 (`target.dual_track.{discovery_wip, priority, telemetry_refresh_interval, scheduled_capacity}`)
+- Context budget (`target.context_budget.<loop>.<step>.tokens`)
 - Refactor metric 정책 (scan interval, metric thresholds)
 - Invariant enforcement 등급 (always_hard / stage_graded)
 - 설정값 우선순위
@@ -106,11 +107,17 @@ loop_policies.<loop>.<step>.{
   }
   timeout                    # session 1회의 wall-clock 한도
   max_turns                  # session 1회의 max turn 수 (inner 한정 default 적용)
-  concurrent_sessions        # WIP limit per profile
+  concurrent_sessions        # WIP limit per profile (default = 1, fail-serial — RGC-FAIRNESS Concurrent Sessions Hard Default)
   fetch_scope_overrides      # contribution_kind 별 default fetch_scope override
   max_attempts_per_turn      # inner loop 한정 — 같은 turn 안에서 invalid 재시도 한도
   no_progress_streak         # inner 한정 — newly_green=0 누적 한도
   regression_streak          # inner 한정 — regression 누적 한도
+  turn_ordering: {
+    max_consecutive_per_profile  # AGC-TURN-ORDERING fairness cap. 동일 agent_profile_id 가 같은 session 안에서 연속 점유할 수 있는 turn 수의 상한 (default = 2)
+  }
+  conflict: {
+    max_redispatch              # AGC-CONFLICT-RESOLUTION 의 1차 re-dispatch 한도. 초과 시 사람 governance signal 요구 (default = 1)
+  }
 }
 ```
 
@@ -279,6 +286,37 @@ target.dual_track: {
 | `priority: balanced` | 두 slot 의 worker slot 을 라운드로빈 |
 | `priority: discovery_first` | Delivery N 의 진행보다 Discovery N+1 의 진행을 우선 (드물게 사용) |
 
+<a id="TCC-CONTEXT-BUDGET"></a>
+## TCC-CONTEXT-BUDGET: Context Budget
+
+`AGC-CONTEXT-BUDGET` 의 hard cap 을 (loop, step) 별로 정의한다. Caller (`lib/context.sh`) 가 manifest assemble 시 해당 cap 을 읽어 token 예산을 결정하고, 초과 시 `AGC-CONTEXT-BUDGET` 의 truncation 우선순위를 적용한다.
+
+### 키 스키마
+
+```text
+target.context_budget.<loop>.<step>.{
+  tokens                     # int. 1-shot 호출의 총 token hard cap (provider 한도 보다 낮게 설정)
+}
+```
+
+`<loop>` ∈ {`outer`, `middle`, `inner`}, `<step>` 은 `TCC-LOOP-POLICIES` 의 step enum 과 동일.
+
+### Default
+
+target operator 가 `target.context_budget.<loop>.<step>` 을 명시하지 않으면 다음 시스템 기본값이 적용된다 (architecture default; provider 한도 보다 낮게 설정).
+
+```text
+target.context_budget.outer.Discovery.tokens:    256000
+target.context_budget.outer.Specification.tokens: 256000
+target.context_budget.outer.Planning.tokens:     256000
+target.context_budget.outer.Validation.tokens:   256000
+target.context_budget.middle.review.tokens:      192000
+target.context_budget.middle.merge.tokens:       128000
+target.context_budget.inner.tdd_build.tokens:    128000
+```
+
+provider 한도 변경에 따른 cap 조정은 `TCC-CHANGE-RULES` 의 다음 cycle 적용 정책을 따른다.
+
 <a id="TCC-REFACTOR-METRICS"></a>
 ## TCC-REFACTOR-METRICS: Refactor Metrics Policy
 
@@ -357,7 +395,7 @@ Stage 5 진입 시 `target.invariant_enforcement` 의 stage_graded 모든 항목
 같은 키에 대해 여러 출처가 값을 제공할 때 우선순위는 다음과 같다.
 
 1. worker 별 환경에서 명시적으로 지정된 값
-2. target 단위 설정 (`TCC-LEASE-CONFIG`, `TCC-ONBOARDING`, `TCC-AGENT-PROFILES`, `TCC-LOOP-POLICIES`, `TCC-SLICE-CLASS-RULES`, `TCC-DUAL-TRACK`, `TCC-REFACTOR-METRICS`, `TCC-ENFORCEMENT` 등)
+2. target 단위 설정 (`TCC-LEASE-CONFIG`, `TCC-ONBOARDING`, `TCC-AGENT-PROFILES`, `TCC-LOOP-POLICIES`, `TCC-SLICE-CLASS-RULES`, `TCC-DUAL-TRACK`, `TCC-CONTEXT-BUDGET`, `TCC-REFACTOR-METRICS`, `TCC-ENFORCEMENT` 등)
 3. 시스템 기본값
 
 상위 출처가 명시적으로 빈 값을 설정하면 *제거* 가 아닌 *명시적 빈 설정* 으로 본다. `required_participants: []` 는 "사람 또는 특정 participant 가 필수가 아님" 이라는 명시적 결정으로 해석된다.
@@ -368,7 +406,7 @@ Stage 5 진입 시 `target.invariant_enforcement` 의 stage_graded 모든 항목
 target 설정의 변경은 운영 결정이며 다음을 따른다.
 
 - target 식별자 (`target_id`, `persistent_store_ref`, `label_prefix`) 는 변경 시 영속 저장소 재할당과 ledger 분리가 필요하다.
-- `lease`, `onboarding`, `agent_profiles`, `loop_policies`, `internal_escalation_rules`, `dual_track`, `refactor_metrics` 키는 다음 cycle 시작 시점부터 적용된다. 진행 중인 lease 와 DialogueSession 은 이전 설정으로 끝까지 처리된다.
+- `lease`, `onboarding`, `agent_profiles`, `loop_policies`, `internal_escalation_rules`, `dual_track`, `context_budget`, `refactor_metrics` 키는 다음 cycle 시작 시점부터 적용된다. 진행 중인 lease 와 DialogueSession 은 이전 설정으로 끝까지 처리된다.
 - `agent_profiles.<id>.model` 변경은 contract amendment 가 아닌 운영 결정이다 (`llm-team.md` AgentProfile abstraction). 단 모델 교체는 별도 governance 검토 대상이며, 변경 자체는 ledger 에 기록되어야 한다.
 - `target.invariant_enforcement.stage_graded.<name>=block` 으로의 전환은 운영자 결정이며 ledger 에 기록 + 영향 받는 invariant 의 누적 violation 을 사전 점검한다 (Stage 5 hard-fail transition 의 진입 조건).
 - 변경 자체는 `docs/contracts/reliability-and-gate-contract.md#RGC-LEDGER` 에 기록되어야 한다.

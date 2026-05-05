@@ -94,7 +94,7 @@ invariant:
 <a id="SOC-MILESTONE-DUAL-SLOT"></a>
 ## SOC-MILESTONE-DUAL-SLOT: Milestone Dual-Slot
 
-milestone 은 **Discovery slot 1 + Delivery slot 1** (default; `target.discovery_wip` 로 N 까지 확장 옵션) 으로 직렬화된다. 두 slot 은 서로 다른 milestone 에만 점유한다.
+milestone 은 **Discovery slot 1 + Delivery slot 1** (default; `target.dual_track.discovery_wip` 로 N 까지 확장 옵션) 으로 직렬화된다. 두 slot 은 서로 다른 milestone 에만 점유한다.
 
 ### Milestone State Machine
 

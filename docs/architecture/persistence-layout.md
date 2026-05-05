@@ -2,6 +2,8 @@
 
 본 문서는 contract 가 정의한 영속 객체들의 *저장 위치, ID 발급, 원자적 write, retention* 을 다룬다. 콘텐츠 의미는 contract 가 단일 권위다 — 본 문서는 architecture 한정 매핑이다.
 
+> Note. `workdir/` 는 git-ignored runtime store 로 운영한다 (`sessions/<id>/turns/*.json` 등 turn-level artifact 의 볼륨이 크고 ledger·snapshot 은 영속 저장소가 단일 권위다). repo 의 `.gitignore` 는 `workdir/` 를 제외 대상으로 등록한다.
+
 contract cross-link:
 - [`KAC-MANIFEST`](../contracts/knowledge-contract.md#KAC-MANIFEST), [`KAC-SESSION-LOG-STORAGE`](../contracts/knowledge-contract.md#KAC-SESSION-LOG-STORAGE), [`KAC-TURN-LOG-COMPACTION`](../contracts/knowledge-contract.md#KAC-TURN-LOG-COMPACTION)
 - [`RGC-VERIFICATION`](../contracts/reliability-and-gate-contract.md#RGC-VERIFICATION), [`RGC-LEDGER`](../contracts/reliability-and-gate-contract.md#RGC-LEDGER)

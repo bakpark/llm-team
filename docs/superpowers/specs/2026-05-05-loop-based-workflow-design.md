@@ -90,7 +90,7 @@
 
 ### 2-1. Outer Loop — Milestone with Dual Slot
 
-`Discovery slot 1 + Delivery slot 1` (default; `target.discovery_wip` 로 N 까지 확장 옵션). 두 slot 은 서로 다른 milestone 에만 점유. Discovery N+1 의 manifest 에 Delivery N 의 live telemetry 가 자동 inject (Discovery 가 *현실* 에 기반).
+`Discovery slot 1 + Delivery slot 1` (default; `target.dual_track.discovery_wip` 로 N 까지 확장 옵션). 두 slot 은 서로 다른 milestone 에만 점유. Discovery N+1 의 manifest 에 Delivery N 의 live telemetry 가 자동 inject (Discovery 가 *현실* 에 기반).
 
 Milestone state machine (2-stage):
 
@@ -464,7 +464,7 @@ Discovery slot 의 milestone N+1 의 manifest 에 자동 inject:
 ### 8-5. Resource Sharing
 
 - AgentProfile worker slot 은 milestone-agnostic. atlas 1 worker 가 N+1 Discovery + N Planning 번갈아 servicing.
-- `target.dual_track_priority`: `delivery_first | balanced | discovery_first`.
+- `target.dual_track.priority`: `delivery_first | balanced | discovery_first`.
 - WIP limit per profile: `loop_policies.<phase>.concurrent_sessions`.
 
 ---

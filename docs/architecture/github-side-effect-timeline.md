@@ -53,7 +53,7 @@ Turn worker cycle
 | outer Specification | `it_milestone_update()` → `it_milestone_set_state()` (`M_SPECIFICATION_*` → `M_SPEC_APPROVED`) | 위와 동일 |
 | outer Planning | `it_issue_create()` × N (Slice 영속화) → `it_issue_link_to_milestone()` × N → `it_issue_set_blocked_by()` × N (slice DAG `blocks`/`coordinates_with`) → `it_milestone_set_state()` (`M_DELIVERY_PLANNING` → `M_DELIVERY_BUILDING`) | Issue 생성과 link 사이에 외부 사용자가 milestone 을 close 할 가능성 |
 | inner tdd_build session 종료 (CONVERGED) | (worktree 작업은 §3) → SliceMerge `SM_DRAFT` → `SM_READY_FOR_REVIEW` 의 marker write | slice worktree 의 외부 push, label 충돌 |
-| middle review | SliceMerge marker write (`SM_READY_FOR_REVIEW` ↔ `SM_REWORK_REQUESTED` ↔ `SM_APPROVED`) → label 갱신 → comment | slice worktree HEAD 가 검증 시점 이후 push 로 변경됨 (pin re-check 가 흡수) |
+| middle review | SliceMerge marker write (`SM_READY_FOR_REVIEW` ↔ `SM_REQUEST_CHANGES` ↔ `SM_APPROVED`) → label 갱신 → comment | slice worktree HEAD 가 검증 시점 이후 push 로 변경됨 (pin re-check 가 흡수) |
 | middle merge (`SM_APPROVED` → `SM_MERGED`) | trunk merge/rebase → `it_issue_set_state()` (slice 종결) | trunk 의 동시 변경 (rebase 시 재검증) |
 | outer Validation | `it_milestone_set_state()` (`M_DELIVERY_VALIDATING` → `M_DONE`) → close note 또는 release 발행 | 검증 도중 slice 회귀 |
 
