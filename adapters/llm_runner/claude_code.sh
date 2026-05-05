@@ -11,8 +11,17 @@
 # Exit codes (#ARC-EXIT-CLASSES via lr_classify_exit):
 #   0       ok                     claude 정상 종료
 #   64      transport_error        빈 prompt (port I2)
+#   66      adapter_unavailable    LR_TIMEOUT_SEC>0 인데 `timeout` 부재 (fail-fast)
+#   124     timeout                LR_TIMEOUT_SEC 도달
 #   127     adapter_unavailable    claude 바이너리 미발견
 #   기타     transport_error        claude 의 raw exit code (caller 흡수)
+#
+# Timeout 정책 (#ARC-CALL-SEMANTICS / "adapter 가 timeout 도달 시 호출 중단"):
+# wrapper(`lr_call`) 가 sourced bash function 인 lr_invoke 를 외부 `timeout` 로
+# wrap 할 수 없으므로(PATH 에 없음), adapter 가 *외부 명령 호출 시점에* 자체
+# wrap 한다. LR_TIMEOUT_SEC>0 인데 `timeout` cmd 가 PATH 에 없으면 silent skip
+# 하지 않고 66(adapter_unavailable) 으로 fail-fast 한다 (#ARC-ADAPTER-SUBSTITUTION
+# 의 "동일 timeout 입력에 대해 timeout 동작이 동일" 보장).
 lr_invoke() {
   local prompt
   prompt="$(cat)"
@@ -28,6 +37,25 @@ lr_invoke() {
     return 127
   fi
 
-  # stdin pipe + word-split된 cmd 호출. eval/bash -c 회피 (인용 문제 차단).
-  printf '%s' "${prompt}" | ${cmd}
+  # Strict numeric validation (review feedback): empty/0 → no timeout. 양의
+  # 정수 → timeout 적용. 기타 값(예: 운영자 typo "30s") 은 silent skip 하지 않고
+  # 66 으로 fail-fast — "no silent timeout skip" 정책 일관성.
+  local timeout_sec="${LR_TIMEOUT_SEC:-0}"
+  case "${timeout_sec}" in
+    ''|0) timeout_sec=0 ;;
+    *[!0-9]*)
+      log_error "lr_invoke: LR_TIMEOUT_SEC='${timeout_sec}' is not a non-negative integer (fail-fast per #ARC-ADAPTER-SUBSTITUTION)"
+      return 66
+      ;;
+  esac
+  if [ "${timeout_sec}" -gt 0 ]; then
+    if ! command -v timeout >/dev/null 2>&1; then
+      log_error "lr_invoke: LR_TIMEOUT_SEC=${timeout_sec} but 'timeout' cmd not found in PATH (fail-fast per #ARC-ADAPTER-SUBSTITUTION)"
+      return 66
+    fi
+    # stdin pipe + word-split된 cmd 호출. eval/bash -c 회피 (인용 문제 차단).
+    printf '%s' "${prompt}" | timeout "${timeout_sec}" ${cmd}
+  else
+    printf '%s' "${prompt}" | ${cmd}
+  fi
 }

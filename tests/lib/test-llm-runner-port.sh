@@ -62,7 +62,7 @@ prompt_ref="$(mktemp -t lrport-prompt.XXXXXX)"
 printf '%s' $'# Role: po\n# Operation: Compose-PO\n# Manifest-id: m-port-1\n\nbody...' \
   >"${prompt_ref}"
 
-meta="$(lr_call "${prompt_ref}" 2>/dev/null)" \
+meta="$(lr_call "po" "Compose-PO" "m-port-1" "${prompt_ref}" "" "0" "idem-port-1" 2>/dev/null)" \
   || fail "lr_call should succeed for valid prompt"
 [ -n "${meta}" ] || fail "lr_call should emit JSON metadata to stdout"
 
@@ -91,7 +91,7 @@ rm -f "${envelope_ref}" "${diagnostics_ref}"
 prompt_unknown_ref="$(mktemp -t lrport-prompt-uk.XXXXXX)"
 printf '%s' $'# Role: planner\n# Operation: Decompose\n# Manifest-id: m-port-2\n' \
   >"${prompt_unknown_ref}"
-meta_uk="$(lr_call "${prompt_unknown_ref}" 2>/dev/null)" \
+meta_uk="$(lr_call "planner" "Decompose" "m-port-2" "${prompt_unknown_ref}" "" "0" "idem-port-2" 2>/dev/null)" \
   || fail "lr_call must classify non-ok exit, not propagate error"
 exit_uk="$(printf '%s' "${meta_uk}" | jq -r '.exit_status // ""')"
 [ "${exit_uk}" != "ok" ] \
@@ -110,7 +110,7 @@ env_uk="$(printf '%s' "${meta_uk}" | jq -r '.envelope_ref // ""')"
 rm -f "${env_uk}" "${diag_uk}"
 
 # ── (5) lr_call infrastructure failure on missing prompt_ref ──────────────
-if lr_call "/nonexistent/path-$$.txt" 2>/dev/null; then
+if lr_call "po" "Compose-PO" "m-x" "/nonexistent/path-$$.txt" "" "0" "idem-x" 2>/dev/null; then
   fail "lr_call should return non-zero on missing prompt_ref"
 fi
 
@@ -155,14 +155,14 @@ rm -f "${diag_tmp}"
 # 성공 시 null, 비-ok 시 enum 값이어야 한다 (port 계약 확장).
 prompt_ok_ref="$(mktemp -t lrport-prompt-ok.XXXXXX)"
 printf '%s' $'# Role: po\n# Operation: Compose-PO\n# Manifest-id: m-port-7\n\nbody' >"${prompt_ok_ref}"
-meta_ok="$(lr_call "${prompt_ok_ref}" 2>/dev/null)"
+meta_ok="$(lr_call "po" "Compose-PO" "m-port-7" "${prompt_ok_ref}" "" "0" "idem-port-7" 2>/dev/null)"
 reason_ok="$(printf '%s' "${meta_ok}" | jq -r '.error_reason')"
 [ "${reason_ok}" = "null" ] \
   || fail "(7) ok meta.error_reason should be null (json), got '${reason_ok}'"
 
 prompt_uk2_ref="$(mktemp -t lrport-prompt-uk2.XXXXXX)"
 printf '%s' $'# Role: planner\n# Operation: Decompose\n# Manifest-id: m-port-7b\n' >"${prompt_uk2_ref}"
-meta_uk2="$(lr_call "${prompt_uk2_ref}" 2>/dev/null)"
+meta_uk2="$(lr_call "planner" "Decompose" "m-port-7b" "${prompt_uk2_ref}" "" "0" "idem-port-7b" 2>/dev/null)"
 reason_uk2="$(printf '%s' "${meta_uk2}" | jq -r '.error_reason // "null"')"
 case "${reason_uk2}" in
   5xx|4xx|network|timeout|unknown) ;;
@@ -173,6 +173,129 @@ diag_uk2="$(printf '%s' "${meta_uk2}" | jq -r '.diagnostics_ref // ""')"
 env_ok="$(printf '%s' "${meta_ok}" | jq -r '.envelope_ref // ""')"
 diag_ok="$(printf '%s' "${meta_ok}" | jq -r '.diagnostics_ref // ""')"
 rm -f "${env_uk2}" "${diag_uk2}" "${env_ok}" "${diag_ok}" "${prompt_ok_ref}" "${prompt_uk2_ref}"
+
+# ── (8) ARC E2 G5: header/arg mismatch → adapter_unavailable (66 흡수) ────
+# wrapper 가 prompt 헤더와 인자가 다르면 어댑터를 호출하지 않고 즉시 분류.
+prompt_g5_ref="$(mktemp -t lrport-prompt-g5.XXXXXX)"
+printf '%s' $'# Role: po\n# Operation: Compose-PO\n# Manifest-id: m-port-g5\n' >"${prompt_g5_ref}"
+meta_g5="$(lr_call "planner" "Decompose" "m-port-g5" "${prompt_g5_ref}" "" "0" "idem-g5" 2>/dev/null)" \
+  || fail "(8) lr_call header-mismatch must return 0 with classification, not infra failure"
+exit_g5="$(printf '%s' "${meta_g5}" | jq -r '.exit_status // ""')"
+[ "${exit_g5}" = "adapter_unavailable" ] \
+  || fail "(8) header-mismatch should classify as adapter_unavailable, got '${exit_g5}'"
+diag_g5="$(printf '%s' "${meta_g5}" | jq -r '.diagnostics_ref // ""')"
+[ -f "${diag_g5}" ] && grep -q 'header/arg mismatch' "${diag_g5}" \
+  || fail "(8) header-mismatch diagnostics should record reason"
+env_g5="$(printf '%s' "${meta_g5}" | jq -r '.envelope_ref // ""')"
+rm -f "${env_g5}" "${diag_g5}" "${prompt_g5_ref}"
+
+# ── (9) ARC E2: JSON output schema (4 echo + timeout_enforced) ───────────
+prompt_j_ref="$(mktemp -t lrport-prompt-j.XXXXXX)"
+printf '%s' $'# Role: po\n# Operation: Compose-PO\n# Manifest-id: m-port-9\n\nbody' >"${prompt_j_ref}"
+meta_j="$(lr_call "po" "Compose-PO" "m-port-9" "${prompt_j_ref}" "" "0" "idem-port-9" 2>/dev/null)"
+for k in role operation manifest_id idempotency_key timeout_enforced; do
+  printf '%s' "${meta_j}" | jq -e ". | has(\"${k}\")" >/dev/null \
+    || fail "(9) JSON output missing key '${k}'"
+done
+[ "$(printf '%s' "${meta_j}" | jq -r '.role')"          = "po" ]            || fail "(9) role echo mismatch"
+[ "$(printf '%s' "${meta_j}" | jq -r '.operation')"     = "Compose-PO" ]    || fail "(9) operation echo mismatch"
+[ "$(printf '%s' "${meta_j}" | jq -r '.manifest_id')"   = "m-port-9" ]      || fail "(9) manifest_id echo mismatch"
+[ "$(printf '%s' "${meta_j}" | jq -r '.idempotency_key')" = "idem-port-9" ] || fail "(9) idempotency_key echo mismatch"
+# timeout=0 → timeout_enforced=false (boolean type, not string).
+te_j="$(printf '%s' "${meta_j}" | jq -r '.timeout_enforced')"
+[ "${te_j}" = "false" ] || fail "(9) timeout=0 should set timeout_enforced=false (got '${te_j}')"
+te_type="$(printf '%s' "${meta_j}" | jq -r '.timeout_enforced | type')"
+[ "${te_type}" = "boolean" ] || fail "(9) timeout_enforced type should be boolean (got '${te_type}')"
+env_j="$(printf '%s' "${meta_j}" | jq -r '.envelope_ref // ""')"
+diag_j="$(printf '%s' "${meta_j}" | jq -r '.diagnostics_ref // ""')"
+rm -f "${env_j}" "${diag_j}" "${prompt_j_ref}"
+
+# ── (10) ARC E2 G3: timeout>0 + cmd 부재 → adapter_unavailable fail-fast ──
+# claude_code adapter 가 LR_TIMEOUT_SEC>0 인데 PATH 에 timeout 없으면 66.
+# fake adapter 는 LR_TIMEOUT_SEC 무시 (테스트 결정성). 따라서 이 케이스는
+# claude_code adapter 로 일시 전환해 검증한다.
+# `timeout` 부재를 강제하기 위해 `command` builtin 을 함수로 shadow 한다 —
+# PATH 조작 시 jq/sh 등 다른 의존성도 함께 잃어 lr_call 자체가 망가지므로
+# 본 테스트에는 부적합. (PATH 제거는 OS-별로도 비결정적)
+# 주의: 함수 shadow 는 macOS/bash 에서 동작. POSIX 셸 (`set -o posix`) 또는
+# 다른 dash/ash 호환 셸에서는 builtin precedence 가 달라 비결정적일 수 있다.
+# 본 테스트는 본 프로젝트의 표준 실행 환경(bash on macOS/Linux) 만 검증한다.
+prompt_t_ref="$(mktemp -t lrport-prompt-t.XXXXXX)"
+printf '%s' $'# Role: po\n# Operation: Compose-PO\n# Manifest-id: m-port-10\n\nbody' >"${prompt_t_ref}"
+(
+  set +u
+  unset -f lr_invoke 2>/dev/null || true
+  . "${LLM_TEAM_ROOT}/adapters/llm_runner/claude_code.sh"
+  export LLM_TEAM_CLAUDE_CMD="true"
+  command() {
+    if [ "$1" = "-v" ] && [ "$2" = "timeout" ]; then
+      return 1
+    fi
+    builtin command "$@"
+  }
+  meta_t="$(lr_call "po" "Compose-PO" "m-port-10" "${prompt_t_ref}" "" "5" "idem-port-10" 2>/dev/null)"
+  exit_t="$(printf '%s' "${meta_t}" | jq -r '.exit_status // ""')"
+  if [ "${exit_t}" != "adapter_unavailable" ]; then
+    echo "FAIL: (10) timeout>0 + 'timeout' cmd absent should fail-fast as adapter_unavailable, got '${exit_t}'" >&2
+    exit 1
+  fi
+  diag_t="$(printf '%s' "${meta_t}" | jq -r '.diagnostics_ref // ""')"
+  if ! { [ -f "${diag_t}" ] && grep -q "'timeout' cmd not found" "${diag_t}"; }; then
+    echo "FAIL: (10) fail-fast diagnostics missing message" >&2
+    exit 1
+  fi
+  env_t="$(printf '%s' "${meta_t}" | jq -r '.envelope_ref // ""')"
+  rm -f "${env_t}" "${diag_t}"
+  exit 0
+) || failures=$((failures + 1))
+rm -f "${prompt_t_ref}"
+# Restore the fake adapter for any later cases (binding via env).
+. "${LLM_TEAM_ROOT}/adapters/llm_runner/fake.sh"
+
+# ── (10b) ARC E2: LR_TIMEOUT_SEC strict numeric (review feedback) ────────
+# 운영자 typo 예: "30s". claude_code adapter 가 silent 0-fallback 하지 않고
+# 66 fail-fast — "no silent timeout skip" 정책 일관성.
+prompt_tn_ref="$(mktemp -t lrport-prompt-tn.XXXXXX)"
+printf '%s' $'# Role: po\n# Operation: Compose-PO\n# Manifest-id: m-port-10b\n\nbody' >"${prompt_tn_ref}"
+(
+  set +u
+  unset -f lr_invoke 2>/dev/null || true
+  . "${LLM_TEAM_ROOT}/adapters/llm_runner/claude_code.sh"
+  export LLM_TEAM_CLAUDE_CMD="true"
+  meta_tn="$(lr_call "po" "Compose-PO" "m-port-10b" "${prompt_tn_ref}" "" "30s" "idem-port-10b" 2>/dev/null)"
+  exit_tn="$(printf '%s' "${meta_tn}" | jq -r '.exit_status // ""')"
+  if [ "${exit_tn}" != "adapter_unavailable" ]; then
+    echo "FAIL: (10b) non-numeric LR_TIMEOUT_SEC '30s' should fail-fast as adapter_unavailable, got '${exit_tn}'" >&2
+    exit 1
+  fi
+  diag_tn="$(printf '%s' "${meta_tn}" | jq -r '.diagnostics_ref // ""')"
+  if ! { [ -f "${diag_tn}" ] && grep -q "non-negative integer" "${diag_tn}"; }; then
+    echo "FAIL: (10b) fail-fast diagnostics missing validation message" >&2
+    exit 1
+  fi
+  env_tn="$(printf '%s' "${meta_tn}" | jq -r '.envelope_ref // ""')"
+  rm -f "${env_tn}" "${diag_tn}"
+  exit 0
+) || failures=$((failures + 1))
+rm -f "${prompt_tn_ref}"
+. "${LLM_TEAM_ROOT}/adapters/llm_runner/fake.sh"
+
+# ── (11) ARC E2: idempotency_key echo (deterministic by caller) ──────────
+# Wrapper 는 caller 가 넘긴 key 를 그대로 echo. 같은 key 두 번 호출 시 같은 key
+# 가 메타에 반영됨을 확인 (caller-side determinism 의 wrapper 측 확인).
+prompt_i_ref="$(mktemp -t lrport-prompt-i.XXXXXX)"
+printf '%s' $'# Role: po\n# Operation: Compose-PO\n# Manifest-id: m-port-11\n\nbody' >"${prompt_i_ref}"
+meta_i1="$(lr_call "po" "Compose-PO" "m-port-11" "${prompt_i_ref}" "" "0" "idem-fixed" 2>/dev/null)"
+meta_i2="$(lr_call "po" "Compose-PO" "m-port-11" "${prompt_i_ref}" "" "0" "idem-fixed" 2>/dev/null)"
+key1="$(printf '%s' "${meta_i1}" | jq -r '.idempotency_key')"
+key2="$(printf '%s' "${meta_i2}" | jq -r '.idempotency_key')"
+[ "${key1}" = "idem-fixed" ] && [ "${key2}" = "idem-fixed" ] \
+  || fail "(11) idempotency_key echo not stable: '${key1}' vs '${key2}'"
+env_i1="$(printf '%s' "${meta_i1}" | jq -r '.envelope_ref // ""')"
+diag_i1="$(printf '%s' "${meta_i1}" | jq -r '.diagnostics_ref // ""')"
+env_i2="$(printf '%s' "${meta_i2}" | jq -r '.envelope_ref // ""')"
+diag_i2="$(printf '%s' "${meta_i2}" | jq -r '.diagnostics_ref // ""')"
+rm -f "${env_i1}" "${diag_i1}" "${env_i2}" "${diag_i2}" "${prompt_i_ref}"
 
 if [ "${failures}" -gt 0 ]; then
   echo "FAIL: ${failures} llm_runner port check(s) failed" >&2

@@ -584,19 +584,38 @@ _runner_cleanup_prompt() { rm -f "${PROMPT_REF:-}" 2>/dev/null || true; }
 LR_MAX_ATTEMPTS="${LLM_TEAM_LR_MAX_ATTEMPTS:-3}"
 LR_BACKOFF_BASE="${LLM_TEAM_LR_BACKOFF_BASE:-5}"
 LR_BACKOFF_MAX="${LLM_TEAM_LR_BACKOFF_MAX:-60}"
+LR_TIMEOUT_SEC="${LLM_TEAM_LR_TIMEOUT_SEC:-0}"
 LR_ATTEMPT=0
 LR_META=""
 LR_EXIT_STATUS=""
 LR_ENVELOPE_REF=""
 LR_DIAGNOSTICS_REF=""
 LR_ERROR_REASON=""
+LR_MANIFEST_ID="$(context_manifest_id "${MANIFEST_FILE}")"
 
 _runner_cleanup_lr_refs() {
   rm -f "${LR_ENVELOPE_REF:-}" "${LR_DIAGNOSTICS_REF:-}" 2>/dev/null || true
 }
 
+# Deterministic idempotency_key plumbing (#ARC-IDEMPOTENCY scope, review 반영):
+# 같은 (role, operation, manifest_id, attempt) 호출은 같은 key. cycle 내 retry
+# 는 attempt 가 달라 자연히 다른 key 를 받는다 (재시도 방지가 아닌 *멱등성
+# detection 가능* 보장). 단, 본 key 는 wrapper meta 에 echo 되고 LR_* env 로만
+# 노출되며, ledger 멱등성 검증은 여전히 envelope `.idempotency_key` 기준으로
+# application/caller_dispatch.sh 가 수행한다 (lr_call key ↔ envelope key 의
+# 통합과 ledger pre-check 은 별 라운드 의제).
+_runner_lr_idem_key() {
+  local attempt="$1"
+  printf '%s|%s|%s|%s' \
+    "${ROLE}" "${OPERATION}" "${LR_MANIFEST_ID}" "${attempt}" \
+    | shasum -a 256 | cut -c1-16
+}
+
 while :; do
-  if ! LR_META="$(lr_call "${PROMPT_REF}" "${AGENT_CWD}" 2>/dev/null)"; then
+  LR_IDEMPOTENCY_KEY="$(_runner_lr_idem_key "${LR_ATTEMPT}")"
+  if ! LR_META="$(lr_call "${ROLE}" "${OPERATION}" "${LR_MANIFEST_ID}" \
+                          "${PROMPT_REF}" "${AGENT_CWD}" \
+                          "${LR_TIMEOUT_SEC}" "${LR_IDEMPOTENCY_KEY}" 2>/dev/null)"; then
     log_error "runner: lr_call infrastructure failure"
     _runner_cleanup_prompt
     _runner_claim_rollback "${ROLE}" "${TARGET_REPO}" "${TARGET_OBJECT_KIND}" "${TARGET_OBJECT_ID}" 2>/dev/null || true

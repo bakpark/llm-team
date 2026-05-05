@@ -29,7 +29,7 @@ adapters/
 
 | Contract 출력 | 어댑터 결과 |
 |---|---|
-| `exit_status` | 어댑터 종료 코드 → `lib/output.sh` 가 contract enum 으로 매핑 |
+| `exit_status` | 어댑터 종료 코드 → `lib/ports/llm_runner.sh` `lr_classify_exit` 가 contract enum 으로 매핑 |
 | `envelope_ref` | 어댑터가 stdout 또는 파일 경로로 반환 |
 | `diagnostics_ref` | 어댑터의 stderr 로그 파일 경로 |
 | `consumed_at` | 호출 종료 timestamp(어댑터가 기록하지 않으면 caller 가 기록) |
@@ -54,4 +54,6 @@ adapters/
 
 ## 5. role-model 매핑 흐름
 
-[`#TCC-AGENT-RUNNER-MAP`](../contracts/target-config-contract.md#TCC-AGENT-RUNNER-MAP) 의 lookup 결과를 caller 가 `lib/registry.sh` 등을 통해 어댑터 진입 함수로 분기한다. 같은 cycle 내에서 같은 role 은 항상 같은 어댑터에 매핑된다(런타임 중 매핑 변경 없음). 매핑 변경은 [`#TCC-CHANGE-RULES`](../contracts/target-config-contract.md#TCC-CHANGE-RULES) 에 따라 다음 cycle 부터 반영된다.
+**Contract intent**: [`#TCC-AGENT-RUNNER-MAP`](../contracts/target-config-contract.md#TCC-AGENT-RUNNER-MAP) 의 lookup 결과를 caller 가 어댑터 진입 함수로 분기한다. 같은 cycle 내에서 같은 role 은 항상 같은 어댑터에 매핑된다(런타임 중 매핑 변경 없음). 매핑 변경은 [`#TCC-CHANGE-RULES`](../contracts/target-config-contract.md#TCC-CHANGE-RULES) 에 따라 다음 cycle 부터 반영된다.
+
+**현재 상태 (TBD)**: active binding 은 미구현이다. `scheduler/runner.sh` 가 `config_agent_runner_for_role` 을 호출하지 않으며, 어댑터 진입은 정적으로 결정된다. 자세한 상태와 미해결 항목은 [`adapter-inventory.md`](adapter-inventory.md) §5 Open Items 를 single source of truth 로 참조한다.
