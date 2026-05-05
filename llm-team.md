@@ -13,11 +13,13 @@
 | 문서 | 역할 |
 |---|---|
 | `llm-team.md` | 최상위 Concept / Constitution. 철학, layer, 권한 경계, 핵심 invariant를 정의한다. |
-| `docs/contracts/README.md` | Contract 문서 색인, 권위 순서, reference 규칙을 정의한다. |
-| `docs/contracts/agent-and-context-contract.md` | Agent 역할, Context Manifest, revision pin, output contract를 정의한다. |
-| `docs/contracts/state-and-operation-contract.md` | Milestone / Task / Change Proposal 상태와 operation 전이를 정의한다. |
-| `docs/contracts/reliability-and-gate-contract.md` | lease, 회수, 검증, human gate, transition ledger, pause 정책을 정의한다. |
+| `docs/contracts/README.md` | Contract 문서 색인, 권위 순서, reference 규칙, 어휘 glossary, role→phase migration notes를 정의한다. |
+| `docs/contracts/agent-and-context-contract.md` | AgentProfile, Phase, Contribution, Context Manifest, revision pin, output envelope를 정의한다. |
+| `docs/contracts/state-and-operation-contract.md` | Milestone / Task / PhaseRun / Contribution 상태와 phase 별 operation 전이를 정의한다. |
+| `docs/contracts/reliability-and-gate-contract.md` | lease, 회수, 검증, 사람 contribution, transition ledger, pause 정책을 정의한다. |
 | `docs/contracts/knowledge-contract.md` | 누적 스펙, manifest, decision log, context summary, AC traceability를 정의한다. |
+| `docs/contracts/target-config-contract.md` | AgentProfile 레지스트리, phase policy, lease TTL, runner 매핑을 정의한다. |
+| `docs/contracts/agent-runner-port-contract.md` | agent runner 포트 시그니처, exit 분류, idempotency를 정의한다. |
 
 `docs/architecture/` 등 다른 문서는 구현 또는 설명 문서로 간주한다. 그 문서들은 본 문서와 contract 문서를 보완할 수 있지만, override하지 않는다.
 
@@ -28,6 +30,8 @@
 LLM에게 소프트웨어를 만들게 하는 흔한 접근은 둘 중 하나다. 단일 LLM에게 거대한 작업을 한 번에 끝까지 끌고 가게 하거나, 여러 에이전트를 직접 호출·메모리 공유로 묶어 자율적으로 협업시키는 것이다. 전자는 컨텍스트 폭주와 검증 부재로 무너지고, 후자는 race condition·책임 분산·비멱등성으로 무너진다. 사람이 모든 검토를 떠안으면 처리량이 한계가 된다.
 
 본 모델의 접근은 다르다. **에이전트는 무상태 1회 호출로 콘텐츠만 만들고, 호출자(스케줄러)는 workflow의 operational transition만 수행하며, 사람은 governance/input signal로 스펙·게이트를 정의한다.** 세 주체는 단방향 큐 위에서 협업하고, 핸드오프는 직접 호출이 아니라 영속 저장소 객체로만 일어난다.
+
+한 호출은 단일 `(phase, agent_profile)` 의 contribution 만 생산한다. 한 phase 안에는 여러 AgentProfile 의 contribution 이 병렬로 존재할 수 있고, 합산은 Caller 의 quorum 집행을 통해서만 일어난다. Agent 간 직접 합의나 공유 메모리는 없다.
 
 핵심 통찰은 한 줄이다.
 
@@ -45,7 +49,7 @@ LLM에게 소프트웨어를 만들게 하는 흔한 접근은 둘 중 하나다
    스펙 입력, 게이트 승인·거부, 회수 요청, 시스템 일시정지 요청, 본 모델 수정 승인. 사람은 영속 저장소에 governance/input write를 직접 남길 수 있다. 호출자는 그 시그널을 해석해 workflow 전이를 집행한다.
 
 2. **Agents**  
-   무상태 1회 호출로 콘텐츠만 생성한다. 콘텐츠는 마크다운, 코드 patch, 코멘트, 결정문, 요약문이다. 에이전트는 Context Manifest에 지정된 대상을 읽기 전용 self-fetch하고, 영속 저장소에 직접 쓰지 않는다.
+   무상태 1회 호출로 콘텐츠만 생성한다. 콘텐츠는 마크다운, 코드 patch, 코멘트, 결정문, 요약문이다. 에이전트는 Context Manifest에 지정된 대상을 읽기 전용 self-fetch하고, 영속 저장소에 직접 쓰지 않는다. 에이전트는 AgentProfile id 로만 식별되며 — canonical id 는 `atlas | forge | sentinel | scout | human` — 한 호출은 한 phase 의 한 contribution 만 생산한다. 같은 phase 안에서 여러 AgentProfile 이 병렬로 호출될 수 있으나 서로 직접 통신하지 않으며, 합산은 Caller 의 Quorum 집행을 통해서만 일어난다.
 
 3. **Caller**  
    에이전트를 호출하고, 결과를 검증하며, 모든 operational write를 수행한다. 상태 전이, 변경 제안 생성·병합, Issue 생성·종료, 알림, 작업 공간 lifecycle, lease, 결정적 검증, 자동 회수는 호출자의 영역이다.
@@ -76,26 +80,31 @@ Layer 간 직접 통신은 제한된다. Agent 간 직접 통신은 금지된다
 - **Caller-only operational write**: 상태 전이와 영속 workflow 변경은 Caller만 수행한다.
 - **Queue-based handoff**: 핸드오프는 직접 호출이나 공유 메모리가 아니라 영속 저장소 객체로만 일어난다.
 - **Milestone serialization**: 한 시점에 진행 중인 마일스톤은 1개다. 확장 시 마일스톤 단위 namespace 분리가 필요하다.
-- **Task parallelism by lease**: 한 마일스톤 안의 Task는 의존성을 존중하며 병렬 처리될 수 있고, 동일 객체 실행은 lease로 직렬화된다.
+- **PhaseRun and Contribution parallelism by lease**: 한 마일스톤 안의 PhaseRun 과 Contribution 은 의존성을 존중하며 병렬 처리될 수 있고, 동일 객체 실행은 lease 로 직렬화된다.
 - **Deterministic verification by Caller**: 빌드·테스트·린트·타입체크·정적 분석은 Caller가 실행하고, Agent는 로그를 해석한다.
-- **Human gate blocking**: 게이트 진입 객체는 사람의 governance/input signal 전까지 다음 큐로 진행하지 않는다. Caller 프로세스는 다른 큐 처리를 계속한다.
+- **Required human contribution**: 사람 승인은 phase quorum 의 한 형태로 표현된다. `phase_policies.<phase>.required_reviewers` 에 `human` 이 포함된 phase 는 `human` AgentProfile 의 contribution 없이 final artifact 로 응축되지 않는다. 사람 결정의 권위는 절대적이며, agent quorum 이 사람 승인을 대체할 수 없다. Caller 프로세스는 사람 contribution 을 기다리는 동안 다른 phase 처리를 계속한다.
 - **Finite retry**: 자동 재시도는 유한하다. 한도를 넘으면 ESCALATED 상태로 사람에게 넘긴다.
 - **Self-fetch mount**: Context Manifest entry로 명시된 read-only mount(예: code_tree)는 Agent의 self-fetch 범위로 간주하며, invariant 위반이 아니다. manifest 밖 객체를 임의로 읽는 것과 구별한다.
 - **Knowledge accumulation**: 스펙, 결정, 거부된 대안, Context Summary는 누적되어 다음 마일스톤의 1급 입력이 된다.
+- **Quorum-based PhaseRun finalization**: PhaseRun 의 최종 산출물은 `phase_policies.<phase>.quorum` 을 충족할 때 Caller 가 단일 final artifact 로 응축한다. Agent 간 직접 합의는 없다.
+- **AgentProfile abstraction**: 본 문서와 contract 는 AgentProfile id 만 사용한다. 모델명·엔진·런타임은 target config 의 책임이며, 모델 교체는 contract amendment 없이 가능해야 한다.
+- **Contribution as persistent first-class object**: Contribution 은 영속 저장소의 1급 객체이며, queue-based handoff 는 phase 간 뿐 아니라 contribution 간에도 적용된다. reviewer contribution 도 영속 큐를 통과해야 quorum 평가에 들어간다.
 
 ---
 
 ## Workflow Shape
 
-기본 진행 동사는 다음 순서를 따른다.
+기본 진행은 다음 phase sequence 를 따른다.
 
 ```text
-Compose → Decompose → Implement → Review → Refactor → Validate
+Discovery → Specification → Planning → Implementation → CodeReview → Integration → Validation
 ```
 
-역방향 이동은 명시적 회수로만 허용된다. Recover는 진행 동사가 아니라 회복 동사이며, stale, fail, lease 만료, 사람의 회수 요청을 처리한다.
+각 phase 는 lead AgentProfile 한 명과 (선택적으로) reviewer AgentProfile 들의 contribution 으로 구성된다. phase 안에서의 contribution 합산은 Quorum 으로, phase 간 전이는 Queue-based handoff(invariant 77) 로 일어난다. 사람 승인이 필요한 phase 는 `required_reviewers` 에 `human` 을 포함시킨다.
 
-세부 상태와 전이는 [State and Operation Contract](docs/contracts/state-and-operation-contract.md)가 정의한다.
+역방향 이동은 명시적 회수로만 허용된다. Recover 는 진행 동사가 아니라 회복 동사이며, stale, fail, lease 만료, 사람의 회수 요청, 미도착한 contribution 의 timeout 을 처리한다.
+
+세부 상태와 전이는 [State and Operation Contract](docs/contracts/state-and-operation-contract.md)가, 어휘 glossary 와 phase ↔ legacy role 환산표는 [Contract README](docs/contracts/README.md) 가 정의한다.
 
 ---
 
