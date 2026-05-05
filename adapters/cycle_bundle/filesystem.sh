@@ -105,7 +105,63 @@ cb_capture_attempt() {
   cb_capture_blob_text "${handle}" "attempts/${idx}/lr_meta.json" "${meta_json}"
 }
 
-# 나머지는 후속 task.
-cb_promote_to_full() { :; }
-cb_finalize() { :; }
-cb_collect_abandoned() { :; }
+_cb_fs_promoted() { [ -f "$1/.promoted" ]; }
+
+cb_promote_to_full() {
+  local handle="$1" reason="${2:-}"
+  [ -n "${handle}" ] || return 0
+  [ -d "${handle}" ] || return 0
+  : > "${handle}/.promoted" 2>/dev/null
+  chmod 0600 "${handle}/.promoted" 2>/dev/null || true
+  if [ -n "${reason}" ]; then
+    printf '%s\n' "${reason}" >> "${handle}/.failure_reasons"
+    chmod 0600 "${handle}/.failure_reasons" 2>/dev/null || true
+  fi
+}
+
+cb_finalize() {
+  local handle="$1" result="${2:-error}" extra_json="${3:-{\}}"
+  [ -n "${handle}" ] || return 0
+  [ -d "${handle}" ] || return 0
+  if [ -f "${handle}/.finalized" ]; then
+    log_warn "cb_finalize: already finalized at ${handle}"
+    return 0
+  fi
+  if [ "${result}" = "ok" ] && ! _cb_fs_promoted "${handle}"; then
+    rm -f "${handle}/diagnostics.txt" "${handle}/diff/pre.dirty.diff" 2>/dev/null
+  fi
+  local reasons_json='[]'
+  if [ -f "${handle}/.failure_reasons" ]; then
+    reasons_json="$(jq -R . "${handle}/.failure_reasons" | jq -s .)"
+  fi
+  local tmp="${handle}/summary.json.tmp.$$"
+  jq -cn \
+    --arg result "${result}" \
+    --arg finalized_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson failure_reasons "${reasons_json}" \
+    --argjson extra "${extra_json}" \
+    '$extra + {result:$result, finalized_at:$finalized_at, failure_reasons:$failure_reasons}' \
+    > "${tmp}" \
+    && chmod 0600 "${tmp}" \
+    && mv "${tmp}" "${handle}/summary.json"
+  : > "${handle}/.finalized"
+  rm -f "${handle}/pidfile.json" 2>/dev/null
+}
+
+cb_collect_abandoned() {
+  local target="$1"
+  [ -n "${target}" ] || return 0
+  local cycles_dir
+  cycles_dir="$(_cb_fs_cycles_dir "${target}")"
+  [ -d "${cycles_dir}" ] || return 0
+  local d pid
+  for d in "${cycles_dir}"/*/; do
+    [ -d "${d}" ] || continue
+    [ -f "${d}/summary.json" ] && continue
+    [ -f "${d}/pidfile.json" ] || continue
+    pid="$(jq -r '.pid // empty' "${d}/pidfile.json" 2>/dev/null)"
+    if [ -z "${pid}" ] || ! kill -0 "${pid}" 2>/dev/null; then
+      cb_finalize "${d%/}" "abandoned" "$(jq -n '{abandoned_detected_at: now | todateiso8601}')"
+    fi
+  done
+}
