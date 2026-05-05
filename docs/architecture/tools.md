@@ -53,7 +53,7 @@ Agent는 manifest 밖 객체를 읽지 않는다.
 | `change_proposal_set_state` | CP state marker 갱신(from_state 명시 시 전이 검증) |
 | `it_milestone_set_state` | Milestone state marker 갱신 |
 | `human_signal_drain` (`application/human_signal.sh`) | RGC-SIGNALS envelope 읽기·적용 |
-| `nf_send` (`adapters/notifier/`) | push-only 알림 |
+| `nt_send` (`adapters/notifier/`) | push-only 알림 |
 
 `gh pr review`, `gh pr merge`, `gh issue close`, label 변경은 모두 `it_*` 포트 어댑터를 통해서만 실행한다.
 

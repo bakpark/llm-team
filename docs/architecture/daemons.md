@@ -109,10 +109,16 @@ Stale recovery는 runner loop마다 수행할 수 있다. recovery 대상과 전
 
 ## Daemon Lifecycle
 
-[`RGC-DAEMON-STARTUP`](../contracts/reliability-and-gate-contract.md#RGC-DAEMON-STARTUP) 의 atomic 시작 invariant 는 `scheduler/daemon.sh` 가 적용한다.
+[`RGC-DAEMON-STARTUP`](../contracts/reliability-and-gate-contract.md#RGC-DAEMON-STARTUP) 의 atomic 시작 invariant 는 두 계층이 분담한다. 단일 프로세스의 lock 점유·신호 처리는 `scheduler/daemon.sh` 가, 다중 역할의 atomic 기동·sibling 회수·system-scoped ledger 는 `scripts/cli/daemon.sh` 가 담당한다.
 
-- **PID lockdir**: `workdir/<target>/daemon/<role>.lock/` 디렉토리 형식. `mkdir` 의 atomic 성질로 동일 역할의 중복 기동을 차단한다.
+### Per-process (`scheduler/daemon.sh`)
+
+- **PID lockdir**: `workdir/<target>/daemon/<role>.lock/` 디렉토리 형식. `mkdir` 의 atomic 성질로 동일 역할의 중복 기동을 차단한다. 점유는 `_acquire_daemon_lock` 이 수행한다.
 - **stale-pid 회수**: 기동 시 lockdir 의 기록된 pid 가 살아있지 않은 경우(`kill -0` 실패) 자동 회수한다. 회수는 stale 한 pid 를 제거하고 새 lockdir 를 만든 뒤 진행한다.
-- **부분 기동 차단**: 다중 역할을 함께 기동할 때 모든 lockdir 가 점유 가능한지 *사전 점검* 한 뒤에만 fork 한다. 한 역할이라도 점유에 실패하면 이미 기동된 sibling 을 종료시키고 전체 기동을 실패로 종결한다.
 - **종료 신호**: SIGTERM 수신 시 `SHUTDOWN` 플래그를 셋팅하고 *현재 cycle 종료 후* loop 를 빠져나간다. 진행 중인 lease 는 정상 release 된다. 강제 종료(SIGKILL) 의 잔여물은 [`#RGC-LEASE`](../contracts/reliability-and-gate-contract.md#RGC-LEASE) 의 TTL 만료에 의존한다.
+
+### Atomic multi-role startup (`scripts/cli/daemon.sh`)
+
+- **부분 기동 차단**: 다중 역할을 함께 기동할 때 모든 lockdir 가 점유 가능한지 *사전 점검* 한 뒤에만 fork 한다. `daemon_start_preflight` 가 사전 점검을, `daemon_start_atomic` 이 fork·sibling 회수·결과 집계를 담당한다. 한 역할이라도 점유에 실패하면 이미 기동된 sibling 을 종료시키고 전체 기동을 실패로 종결한다.
+- **System-scoped ledger**: atomic 기동·실패의 흔적은 `_daemon_atomic_ledger` 가 system scope ledger 에 기록한다.
 
