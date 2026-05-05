@@ -1,165 +1,176 @@
 # Pipeline End-to-End
 
-본 문서는 Caller 단일 cycle 의 단계와 책임을 contract 에 매핑한다. 본 문서는 contract 를 override 하지 않는다. 권위는 다음 순으로 우선한다.
+본 문서는 Caller 가 운영하는 cycle 들을 contract 의 anchor 에 매핑한다. 본 문서는 contract 를 override 하지 않는다. 권위는 다음 순으로 우선한다.
 
 1. [`llm-team.md`](../../llm-team.md)
-2. [`docs/contracts/state-and-operation-contract.md#SOC-OPERATIONS`](../contracts/state-and-operation-contract.md#SOC-OPERATIONS), [`#SOC-PHASE-RUN`](../contracts/state-and-operation-contract.md#SOC-PHASE-RUN)
-3. [`docs/contracts/agent-and-context-contract.md#AGC-OUTPUT`](../contracts/agent-and-context-contract.md#AGC-OUTPUT) / [`#AGC-OUTPUT-RUNTIME-ENRICH`](../contracts/agent-and-context-contract.md#AGC-OUTPUT-RUNTIME-ENRICH)
-4. [`docs/contracts/reliability-and-gate-contract.md#RGC-PHASE-LEASE`](../contracts/reliability-and-gate-contract.md#RGC-PHASE-LEASE) / [`#RGC-LEDGER`](../contracts/reliability-and-gate-contract.md#RGC-LEDGER) / [`#RGC-RECOVERY`](../contracts/reliability-and-gate-contract.md#RGC-RECOVERY)
-5. [`docs/contracts/target-config-contract.md#TCC-PHASE-POLICIES`](../contracts/target-config-contract.md#TCC-PHASE-POLICIES)
+2. [`docs/contracts/state-and-operation-contract.md`](../contracts/state-and-operation-contract.md) — 특히 [`#SOC-LOOPS`](../contracts/state-and-operation-contract.md#SOC-LOOPS), [`#SOC-OPERATIONS`](../contracts/state-and-operation-contract.md#SOC-OPERATIONS), [`#SOC-DISPATCH-MATRIX`](../contracts/state-and-operation-contract.md#SOC-DISPATCH-MATRIX)
+3. [`docs/contracts/agent-and-context-contract.md#AGC-OUTPUT`](../contracts/agent-and-context-contract.md#AGC-OUTPUT) / [`#AGC-SESSION-INPUT`](../contracts/agent-and-context-contract.md#AGC-SESSION-INPUT) / [`#AGC-OUTPUT-RUNTIME-ENRICH`](../contracts/agent-and-context-contract.md#AGC-OUTPUT-RUNTIME-ENRICH)
+4. [`docs/contracts/reliability-and-gate-contract.md#RGC-LEASE-KINDS`](../contracts/reliability-and-gate-contract.md#RGC-LEASE-KINDS) / [`#RGC-LEDGER`](../contracts/reliability-and-gate-contract.md#RGC-LEDGER) / [`#RGC-RECOVERY`](../contracts/reliability-and-gate-contract.md#RGC-RECOVERY)
+5. [`docs/contracts/target-config-contract.md#TCC-LOOP-POLICIES`](../contracts/target-config-contract.md#TCC-LOOP-POLICIES)
 
 ## Cycle 개요
 
-Caller 는 두 종류의 cycle 을 가진다.
+Caller 는 다음 4 cycle 을 가진다.
 
-1. **Contribution cycle**: AgentProfile worker 가 `(phase, contribution_kind, target)` 단위로 ready unit 을 pickup 하여 contribution 을 submit 까지 끌고 가는 6단계.
-2. **Phase coordinator cycle**: `application/phase_coordinator.sh` 가 `(phase_run_id, target)` 단위로 `CONTRIB_SUBMITTED` 들을 모아 quorum 평가 후 final artifact 를 dispatch 하는 4단계.
+1. **Dual-track scheduler cycle** — `application/dual_track_scheduler.sh` 가 milestone 의 dual-slot (Discovery + Delivery) promotion 과 intake_queue / delivery_promotion_queue dispatch 를 담당. slot_lock 의 short transaction 만 보유.
+2. **Dialogue coordinator cycle** — `application/dialogue_coordinator.sh` 가 DialogueSession 의 turn coordination, finalization 평가, session_outcome 응축, dispatch 를 담당. session_lease 보유.
+3. **Turn worker cycle** — AgentProfile 별 daemon 이 ready turn 을 pickup 하여 LLM 호출, envelope 검증, SessionTurn 영속화까지 끌고 가는 6 단계. session_lease 와 turn_lease (또는 turn_index CAS) 를 사용.
+4. **Verification cycle** — turn 직후 또는 SliceMerge 단계에서 결정적 검증 (VerificationRun + MetricRun) 을 실행하고 required_evidence 평가의 입력을 영속화.
 
-### Contribution Cycle (6 단계)
+```text
+                    ┌─────────────────────────────┐
+                    │ Dual-track scheduler        │
+                    │  intake/promotion (slot_lock)│
+                    └──────┬──────────────────────┘
+                           │
+                ┌──────────▼──────────────┐
+                │ Dialogue coordinator    │
+                │ session lifecycle +     │
+                │ finalization evaluation │
+                └──┬─────────────────┬────┘
+                   │ dispatch turn   │ dispatch session_outcome
+                   ▼                 ▼
+        ┌──────────────────┐  ┌────────────────────┐
+        │ Turn worker      │  │ Caller dispatch    │
+        │ (per AgentProfile)│ │ (slice/merge state)│
+        └──────┬───────────┘  └─────┬──────────────┘
+               │ verification        │ trunk merge
+               ▼                     ▼
+        ┌──────────────┐       ┌──────────────┐
+        │ Verification │       │ Trunk        │
+        │ + Metric     │       │ (SliceMerge) │
+        └──────────────┘       └──────────────┘
+```
+
+각 cycle 은 contract 의 책임을 하나씩 *적용* 만 한다. cycle 사이에서는 envelope · session_log · ledger · 4-lease 가 인터페이스다.
+
+## Dual-Track Scheduler Cycle
+
+### A. Queue Pickup
+
+`dual_track_scheduler` 는 다음 두 큐 를 polling 한다 ([`#RGC-DUAL-GATE-QUEUE`](../contracts/reliability-and-gate-contract.md#RGC-DUAL-GATE-QUEUE)).
+
+| Queue | head 후보 | dispatch 조건 |
+|---|---|---|
+| `intake_queue` | `M_INTAKE_QUEUED` milestone | Discovery slot 이 비어 있음 + slot_lock 획득 |
+| `delivery_promotion_queue` | `M_SPEC_APPROVED` milestone | Delivery slot 이 비어 있음 + promotion guard 통과 + slot_lock 획득 |
+
+### B. Slot Lock + Promotion
+
+[`#RGC-SLOT-LOCK`](../contracts/reliability-and-gate-contract.md#RGC-SLOT-LOCK) 의 atomic 4 단계를 따른다 — slot_lock 보유 중에는 LLM 호출 / verification / 사람 입력 대기 금지.
+
+### C. Ledger + Release
+
+slot_lock 해제 + ledger 한 줄 (`object_kind=milestone`, `loop_kind=outer`, `slot_kind=discovery|delivery`, `action_kind=slot_promotion`).
+
+## Dialogue Coordinator Cycle
+
+### A. Session Pickup
+
+dialogue_coordinator 는 다음을 ready 로 본다.
+
+| Loop · Phase / Purpose | Ready 조건 |
+|---|---|
+| outer Discovery / Specification | milestone state ∈ {`M_DISCOVERY_DRAFT`, `M_DISCOVERY_AWAITING_HUMAN`, `M_SPECIFICATION_DRAFT`, `M_SPECIFICATION_AWAITING_HUMAN`} 이고 진행 session 이 없거나 직전 session 이 종료됨 |
+| outer Planning | milestone `M_DELIVERY_PLANNING` |
+| outer Validation | milestone `M_DELIVERY_VALIDATING` |
+| middle review | slice `SLICE_REVIEWING` + SliceMerge `SM_READY_FOR_REVIEW` |
+| inner tdd_build | slice `SLICE_BUILDING` 진입 직후 또는 `SLICE_BUILDING` + 직전 turn 의 verification 결과 도착 |
+
+### B. Session Lease + Turn Coordination
+
+session_lease 를 atomic claim. session 이 없으면 새 SESSION_OPEN 영속화. 직전 turn 종료 시점이면 다음 turn 의 routing 결정 (`AGC-NEXT-ACTION-REQUEST` 의 `caller_routing_decision`):
+
+- `accepted` → `next_action_request.addressed_to` 를 다음 turn 의 호출 대상으로 enqueue
+- `overridden` → coordinator 가 다른 participant 결정
+- `dropped` → finalization 평가로 진입
+
+### C. Finalization 평가
+
+[`#SOC-SESSION-TERMINATION`](../contracts/state-and-operation-contract.md#SOC-SESSION-TERMINATION) 의 (finalization_rule × required_evidence × composite_rule) 평가.
+
+- 충족 → SESSION_OPEN → CONVERGED + final_verdict 결정. session_outcome contribution 응축.
+- 미충족 → 다음 turn 호출 enqueue 또는 max_turns 도달 시 TIMEOUT.
+
+### D. Dispatch + Ledger + Lease Release
+
+CONVERGED 후 [`#SOC-DISPATCH-MATRIX`](../contracts/state-and-operation-contract.md#SOC-DISPATCH-MATRIX) 의 (state, final_verdict) tuple 분기로 caller_dispatch 호출. ledger row append (`action_kind=session_finalize`, `final_verdict` 필드 채움).
+
+## Turn Worker Cycle (6 단계)
 
 ```text
 ┌─────────────┐   ┌─────────────┐   ┌──────────────────┐
 │ 1. Pickup   │──▶│ 2. Lease    │──▶│ 3. Manifest +    │
-│ (ready unit)│   │ (atomic     │   │    Workspace +   │
-│             │   │  claim +    │   │    Prompt        │
-│             │   │  recovery)  │   │                  │
+│ (ready turn)│   │ (turn_index │   │    Workspace +   │
+│             │   │  CAS)       │   │    Prompt        │
 └─────────────┘   └─────────────┘   └──────────────────┘
                                             │
                                             ▼
 ┌─────────────┐   ┌────────────────┐   ┌──────────────────┐
-│ 6. Cleanup  │◀──│ 5. Submit      │◀──│ 4. Invoke +      │
-│  + Ledger   │   │ contribution   │   │    Validate +    │
-│             │   │ (CONTRIB_      │   │    Pin recheck   │
-│             │   │  SUBMITTED)    │   │                  │
+│ 6. Cleanup  │◀──│ 5. SessionTurn │◀──│ 4. Invoke +      │
+│  + Ledger   │   │ persist        │   │    Validate +    │
+│             │   │                │   │    Pin recheck   │
 └─────────────┘   └────────────────┘   └──────────────────┘
 ```
 
-contribution cycle 과 phase coordinator cycle 의 dispatch 경계는 다음과 같다.
+### 1. Pickup
 
-- **contribution cycle 책임**: CP 생성 (`CP_DRAFT -> CP_AWAITING_QUORUM` / `CP_READY_FOR_REVIEW` / `CP_READY_FOR_VERIFICATION`), milestone 의 `*_AWAITING_*` 진입, Task 의 `TASK_REVIEW_READY` 진입. 모두 contribution submit 시점의 영속 객체 준비 작업이며 quorum 평가가 필요하지 않다.
-- **phase coordinator cycle 책임**: quorum 평가 후의 *phase 종착* 전이 — CP 병합 (`CP_APPROVED -> CP_MERGED`) 또는 종료 (`CP_REQUEST_CHANGES -> CP_CLOSED`), milestone 의 다음 phase `*_READY` 진입, 자식 Task 종료, Context Summary 영속화.
-- **`quorum.rule=lead_only` phase (예: Implementation)**: lead submit 시 contribution cycle 이 만든 객체 자체가 phase 종착물 (Code CP at `CP_READY_FOR_REVIEW` + Task at `TASK_REVIEW_READY`) 이다. phase_coordinator 는 다음 cycle 에서 trivial quorum_reached 만 ledger 에 기록하고 추가 dispatch 는 수행하지 않는다.
+AgentProfile 별 worker 는 `dialogue_coordinator` 가 enqueue 한 다음 turn 후보 중 본 profile 이 책임지는 항목 1개를 pickup. 정렬은 oldest-ready-first ([`#RGC-FAIRNESS`](../contracts/reliability-and-gate-contract.md#RGC-FAIRNESS)).
 
-각 단계는 contract 의 책임을 하나씩 *적용* 만 한다. 단계 사이에서는 envelope · ledger · lease 가 인터페이스다.
+### 2. Lease
 
-## Contribution Cycle 단계별 책임
-
-### 1. Pickup (oldest-ready-first)
-
-Caller 는 `(agent_profile, target)` worker daemon 단위로 1개의 ready contribution unit 만 선점한다. ready unit 은 `(phase, phase_run_id, contribution_kind)` 셋으로 식별되며, 선택 기준은 PhaseRun 의 phase_state 와 dependency join 이다.
-
-| Phase × contribution_kind | ready unit 후보 | 정렬 / 선택 기준 |
-|---|---|---|
-| Discovery lead_draft | `feature-request` 라벨 + 미연결 issue, 또는 `DISCOVERY_DRAFT` milestone (PhaseRun 미생성) | createdAt asc (입수 흐름은 [feature-request-intake.md](feature-request-intake.md)) |
-| Specification lead_draft | `SPECIFICATION_DRAFT` milestone (PhaseRun 미생성) | createdAt asc |
-| Planning lead_draft | `PLANNING_READY` milestone | createdAt asc |
-| Implementation lead_draft / rework_patch | `TASK_READY` task 중 모든 blocker 가 `TASK_INTEGRATED` | createdAt asc |
-| CodeReview review_verdict | `TASK_REVIEW_READY` task 의 PhaseRun 에서 reviewer profile 의 미submit slot | createdAt asc |
-| Integration lead_draft | `INTEGRATION_READY` milestone | createdAt asc |
-| Validation lead_draft / summary | `VALIDATION_READY` milestone | createdAt asc |
-| (any) review_verdict / evidence (parallel) | 진행 중 PhaseRun 의 `phase_policies.<phase>.reviewers[]` slot | phase_run createdAt asc |
-
-Pickup 단계는 *읽기 전용* 이다. 상태 전이는 단계 2 에서 수행된다.
-
-### 2. Lease + Recovery
-
-Pickup 직후 Caller 는 atomic contribution lease(`RGC-PHASE-LEASE`) 를 시도한다. 성공하면 contribution 을 `CONTRIB_PENDING -> CONTRIB_IN_PROGRESS` 로 전이하고, 실패하면 cycle 을 *no-op* 으로 종료한다. PhaseRun 자체의 milestone-level state 전이 (`*_IN_PROGRESS`) 는 PhaseRun 의 첫 lead contribution 이 시작될 때 phase coordinator 가 수행한다.
-
-매 cycle 시작 시 `recovery_scan`(SOC `Recover` operation, `RGC-RECOVERY`) 이 만료된 lease 를 스윕한다. contribution 단위 stale 은 PhaseRun 을 보존하면서 해당 contribution 만 `CONTRIB_STALE` 로 전이하고, PhaseRun 단위 stale 은 직전 `*_READY` 로 회수한다.
+session_lease 가 이미 dialogue_coordinator 에 의해 보유된 상태이므로 worker 는 turn_index CAS 만 수행 (separate turn_lease 객체 두지 않음 — [`#RGC-LEASE-KINDS`](../contracts/reliability-and-gate-contract.md#RGC-LEASE-KINDS)).
 
 ### 3. Manifest + Workspace + Prompt
 
-Caller 는 `AGC-CONTEXT-MANIFEST` 에 따라 manifest 를 생성하고, 필요 시 격리 작업 공간(`AGC-WORKSPACE`)을 준비한 뒤, `(phase, contribution_kind, agent_profile)` 별 system/user prompt 와 manifest 를 합쳐 LLM 입력을 구성한다.
+[`#AGC-SESSION-INPUT`](../contracts/agent-and-context-contract.md#AGC-SESSION-INPUT) 의 합성 규약을 따라 input 을 만든다 — manifest + prior_turn_log_snapshot + prior_verification_result + workspace_revision_pin + role prompt. inner loop 한정으로 격리 작업 공간 ([`#AGC-WORKSPACE`](../contracts/agent-and-context-contract.md#AGC-WORKSPACE)) 준비.
 
-| Phase × contribution_kind | 작업 공간 |
+| Loop · Purpose | 작업 공간 |
 |---|---|
-| Discovery / Specification / Planning lead_draft | 읽기 전용 marker 디렉토리 (작업 공간 불필요) |
-| Implementation lead_draft / rework_patch | target 의 worktree (forge 격리 작업 공간) |
-| CodeReview / Integration / Validation lead_draft | 통합 브랜치 clone |
-| review_verdict / evidence / summary (병렬 reviewer) | 읽기 전용 marker 또는 통합 브랜치 clone (read-only) |
-| human_approval | (worker daemon 점유 없음 — 외부 신호 변환 path) |
-
-prompt 는 *콘텐츠 필드만* LLM 에게 요구한다. runtime metadata 는 `AGC-OUTPUT-RUNTIME-ENRICH` 에 따라 Caller 가 후주입한다. fetch_scope 기본값은 contribution_kind 별 default (`AGC-CONTEXT-MANIFEST`).
+| outer 모든 phase | 읽기 전용 marker 디렉토리 |
+| middle review | SliceMerge 기반 read-only checkout |
+| inner tdd_build | slice-local worktree (forge 격리) |
 
 ### 4. Invoke + Validate + Pin Recheck
 
-Caller 는 LLM 어댑터(`claude_code`, `fake`, `github_human_signal` 등) 를 통해 호출하고, 응답에서 fenced JSON envelope 을 추출한다. 추출 직후 다음 순서를 따른다.
+agent runner 어댑터 호출 ([`#ARC-PORT-SIGNATURE`](../contracts/agent-runner-port-contract.md#ARC-PORT-SIGNATURE)). 응답 후:
 
-1. **Enrichment** (`AGC-OUTPUT-RUNTIME-ENRICH`): `phase_run_id`, `agent_profile`, `contribution_kind`, runtime metadata 후주입.
-2. **Envelope validation** (`AGC-OUTPUT`, `AGC-INVALID`): 필수 필드, `(phase, contribution_kind)` 매트릭스 일치, manifest 포함 여부, 비밀 grep, 작업 공간 외 파일 변경 검사.
-3. **Pin recheck**: 모든 `required` manifest entry 의 revision pin 이 호출 직전과 동일한지 재검증. 변경 시 `stale`.
+1. **Enrichment** ([`#AGC-OUTPUT-RUNTIME-ENRICH`](../contracts/agent-and-context-contract.md#AGC-OUTPUT-RUNTIME-ENRICH)) — runtime metadata + idempotency_key 후주입.
+2. **Envelope validation** ([`#AGC-OUTPUT`](../contracts/agent-and-context-contract.md#AGC-OUTPUT), [`#AGC-INVALID`](../contracts/agent-and-context-contract.md#AGC-INVALID)) — 필수 필드, (parent_loop, contribution_kind, output_kind) 매트릭스, scope enforcement (inner), TDD orthodoxy (옵션).
+3. **Pin recheck** — manifest required entry 의 revision pin 재검증.
 
-이 단계의 결과는 다음 중 하나로 ledger result 에 매핑된다: `applied` 후속 단계 진행 / `invalid` / `stale` / `error` / `claim_failed` / `duplicate`.
+### 5. SessionTurn Persist
 
-### 5. Submit Contribution
+SessionTurn 영속화 — envelope_ref + caller_routing_decision (다음 cycle 에서 coordinator 가 결정) + workspace_commit (inner 한정) + verification_result (단계 4 의 결과 또는 별도 verification cycle 결과). 같은 SessionTurn 의 envelope 은 immutable.
 
-contribution 을 `CONTRIB_IN_PROGRESS -> CONTRIB_SUBMITTED` 로 전이하고 envelope 을 영속 큐에 enqueue 한다. lead contribution 이 첫 submit 되면 contribution cycle 이 동시에 다음을 수행한다 (`SOC-OPERATIONS` 의 phase 별 "Caller action on lead submit" 행).
-
-- 해당 phase 의 CP 생성 (`CP_DRAFT -> CP_AWAITING_QUORUM` / `CP_READY_FOR_REVIEW` / `CP_READY_FOR_VERIFICATION`)
-- milestone 또는 task 의 sub-state 진입 (`*_AWAITING_QUORUM`, `*_AWAITING_HUMAN`, `TASK_REVIEW_READY` 등)
-
-위 객체 준비는 quorum 평가가 필요하지 않으므로 contribution cycle 이 직접 수행한다. *phase 종착* 전이 (CP 병합/종료, 다음 phase `*_READY` 진입, 자식 객체 종료) 만 phase coordinator cycle 이 quorum_reached 후에 dispatch 한다.
-
-`output_kind=failure` 인 envelope 은 contribution 을 `CONTRIB_FAILED` 로 전이하고 `result_detail` 에 사유를 기록한다.
+`output_kind=failure` 면 turn 만 invalid 처리하고 ledger `result=invalid` 또는 `error`. session 자체는 유지 — coordinator 가 다음 cycle 에서 재시도 또는 ABANDONED 결정.
 
 ### 6. Cleanup + Ledger
 
-Caller 는 contribution lease 를 release 하고 임시 작업 공간을 정리하며, `RGC-LEDGER` 한 줄을 append 한다 (`idempotency_key` 기준 중복 시 부작용 없이 동일 결과 반환). ledger 의 `phase`, `phase_run_id`, `agent_profile`, `contribution_kind`, `lease_kind=contribution` 필드가 채워진다.
+작업 공간 정리 (inner). ledger row append (`action_kind=session_progress`, `loop_kind` / `phase` / `slice_id` / `slice_kind` / `session_id` / `turn_index` / `agent_profile_id` / `contribution_kind` / lease_kind=`turn_lease` 또는 null if CAS).
 
-## Phase Coordinator Cycle (4 단계)
+## Verification Cycle
 
-```text
-┌──────────────────┐   ┌──────────────────┐
-│ A. Phase pickup  │──▶│ B. Coordinator   │
-│ (PhaseRun in     │   │    lease + recov │
-│  *_AWAITING_*)   │   │                  │
-└──────────────────┘   └──────────────────┘
-                              │
-                              ▼
-┌──────────────────┐   ┌──────────────────┐
-│ D. Cleanup +     │◀──│ C. Quorum eval + │
-│    ledger        │   │    Dispatch (CP, │
-│ (phase_run-      │   │    state, child) │
-│  scoped)         │   │                  │
-└──────────────────┘   └──────────────────┘
-```
+inner tdd_build turn 직후 또는 SliceMerge `SM_APPROVED` 직후 실행. [`#RGC-VERIFICATION`](../contracts/reliability-and-gate-contract.md#RGC-VERIFICATION) 의 VerificationRun + MetricRun 산출.
 
-### A. Phase Pickup
-
-`application/phase_coordinator.sh` 는 `*_AWAITING_QUORUM` 또는 `*_AWAITING_HUMAN` 상태의 PhaseRun 을 ready 로 본다. 후보 정렬은 PhaseRun createdAt asc.
-
-### B. Coordinator Lease + Recovery
-
-PhaseRun 단위 coordinator lease (`lease_kind=phase_coordinator`) 를 atomic claim 한다. 만료된 coordinator lease 가 있으면 `coordinator-failure` trigger 로 회수한다 (PhaseRun 은 보존되며 다음 cycle 에서 quorum 재평가).
-
-### C. Quorum Evaluation + Dispatch
-
-`phase_policies.<phase>` 를 읽어 PhaseRun 안의 `CONTRIB_SUBMITTED` 들을 모은다. 평가 결과:
-
-- `quorum_reached` → lead contribution 의 산출을 final artifact 로 압축하고 `SOC-DISPATCH-MATRIX` 의 phase 종착 row 를 dispatch (CP 병합/종료, milestone 의 다음 phase `*_READY` 전이, 자식 객체 처리). `quorum_decision=quorum_reached` 로 ledger 기록. `quorum.rule=lead_only` phase 는 lead submit 시점에 phase 종착물이 contribution cycle 에서 이미 영속화되어 있으므로, coordinator 는 ledger 기록만 수행하고 추가 dispatch 를 생략한다.
-- `awaiting_more_contributions` → no-op. `awaiting_more_contributions` ledger 행만 남기고 다음 cycle 까지 대기. `phase_policies.<phase>.timeout` 도과 시 `contribution-timeout` recover.
-- `blocked_by_request_changes` → `request_changes_blocks=true` 정책에 따라 phase 종착을 차단. lead 에게 rework_patch 또는 다음 phase 회수 요청. `human` reject 인 경우 직전 `*_DRAFT` 로 milestone 회수.
-
-dispatch 의 side-effect 는 모두 Caller (`application/caller_dispatch.sh` 호출) 가 수행한다.
-
-### D. Cleanup + Ledger
-
-coordinator lease 를 release 하고 PhaseRun-scoped ledger 행을 append 한다. quorum 평가 결과는 `quorum_decision` 필드에 기록.
-
-## 외부 운영 (daemon)
-
-contribution cycle 은 `scheduler/runner.sh` 가 AgentProfile worker daemon 단위로 실행한다 (`scheduler/daemon.sh` 가 `daemon/agent/<profile>.lock/` lockdir 로 격리). phase coordinator cycle 은 `--phase-coordinator` daemon 이 별도 프로세스로 실행하며 `daemon/phase_coordinator.lock/` lockdir 로 격리된다. 운영 세부는 [`daemons.md`](daemons.md), 도구 매핑은 [`tools.md`](tools.md), 모듈 책임은 [`application-modules.md`](application-modules.md) 를 참조한다.
+| 트리거 | 입력 | 결과 |
+|---|---|---|
+| inner turn 직후 | turn 의 workspace_commit | failed_tests[] + verification_run_id → SessionTurn.verification_result |
+| middle review 의 evidence 수집 | SliceMerge.pre_merge_workspace_revision | required_evidence 평가 입력 |
+| trunk rebase 후 | merge_revision | SM_APPROVED → SM_MERGED 의 게이트 |
+| outer Validation pre-action | Delivery 의 trunk HEAD | cross-slice acceptance + AC-ID 별 결과 |
 
 ## 정합성 점검 포인트
 
-본 문서는 다음 invariant 의 *매핑* 만 보여준다. 위반 여부는 contract 에서 판정한다.
+본 문서는 다음 invariant 의 *매핑* 만 보여준다. 위반 여부는 contract 가 판정한다.
 
-- Inv stateless 1회 호출: contribution cycle 단계 4 의 invoke 는 stateless 단일 호출.
-- Inv Context Manifest + revision pin: contribution cycle 단계 3 의 manifest 와 단계 4 의 pin recheck.
-- Inv Caller-only operational write: phase 종착 transition 은 phase coordinator cycle C 단계가 dispatch. contribution cycle 자체는 contribution submit 까지만 책임. 모든 side-effect 가 Caller 책임 (LLM 산출에는 없음 — `AGC-OUTPUT-RUNTIME-ENRICH`).
-- Inv PhaseRun and Contribution parallelism by lease: contribution cycle 단계 2 의 contribution lease + phase coordinator cycle B 단계의 coordinator lease.
-- Inv Quorum-based PhaseRun finalization: phase coordinator cycle C 단계의 quorum 평가.
-- Inv Required human contribution: `human_approval` contribution 이 누락된 채 phase coordinator C 단계에서 quorum_reached 로 가지 못함.
-- Inv Deterministic verification by Caller: contribution cycle 단계 4 의 deterministic verification (CodeReview / Integration / Validation phase 의 Caller pre-action).
-- Inv Finite retry: phase coordinator C 단계의 attempt count 와 ESCALATED 분기.
-- Inv Contribution as persistent first-class object: contribution cycle 단계 5 의 영속 큐 enqueue.
+- Inv #1 stateless per call, contextual within session: turn worker 단계 4 의 invoke 는 stateless 단일 호출. session 컨텍스트는 단계 3 의 `session_context_ref` 합성으로만 전달.
+- Inv #2 direct invocation forbidden, mediated addressing allowed: turn envelope 의 `next_action_request` 는 dialogue_coordinator 가 routing 결정.
+- Inv #3 dual-slot milestone serialization: dual_track_scheduler 가 slot_lock 보호.
+- Inv #4 caller-only operational write: dispatch 와 trunk merge 는 caller_dispatch.
+- Inv #5 required human contribution for feature slices: feature slice 의 outer Discovery / Specification 에서 human_approval contribution 누락 시 finalization 차단.
+- Inv #6 deterministic verification authority: required_evidence 권위가 agent verdict 보다 우위.
+- Inv #7 knowledge accumulation: outer Validation PASS 시 Context Summary 영속화 + RefactorBacklog 의 architectural debt 누적.
+- Inv #8 AgentProfile abstraction: turn worker 의 agent_profile_id lookup 은 `agent_profiles.<id>.runner` 만 본다 (모델명 미등장).
+- Inv #9 self-fetch + Context Manifest + revision pin: 단계 3 의 manifest 와 단계 4 의 pin recheck. turn manifest 도 동일 invariant 적용.
+- Finite retry: dialogue_coordinator C 단계의 retry 한도 + ESCALATED 분기 ([`#RGC-FAILURE`](../contracts/reliability-and-gate-contract.md#RGC-FAILURE)).
