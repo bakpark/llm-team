@@ -49,13 +49,13 @@ Turn worker cycle
 
 | Loop · Step CONVERGED 시 | caller_dispatch 의 GitHub write 순서 | TOCTOU 가능성 |
 |---|---|---|
-| outer Discovery | `it_milestone_create()` 또는 `it_milestone_update()` → `it_milestone_set_state()` (`M_DISCOVERY_*` 전이) | milestone description 의 동시 편집(거의 없음) |
-| outer Specification | `it_milestone_update()` → `it_milestone_set_state()` (`M_SPECIFICATION_*` → `M_SPEC_APPROVED`) | 위와 동일 |
+| outer Discovery | `it_milestone_create()` 또는 `it_milestone_update()` → `it_issue_create(kind=milestone_tracker)` (1 milestone당 1회, 라벨 `kind/milestone-tracker` + body machine block) → `it_issue_body_update_awaiting()` (AWAITING_HUMAN 진입 시 awaiting block 갱신) → `it_milestone_set_state()` (`M_DISCOVERY_*` 전이) | milestone description 또는 tracker body 의 동시 편집 |
+| outer Specification | `it_milestone_update()` → `it_issue_body_update_awaiting()` (Specification 의 AWAITING_HUMAN 진입 시) → `it_milestone_set_state()` (`M_SPECIFICATION_*` → `M_SPEC_APPROVED`) | 위와 동일 |
 | outer Planning | `it_issue_create()` × N (Slice 영속화) → `it_issue_link_to_milestone()` × N → `it_issue_set_blocked_by()` × N (slice DAG `blocks`/`coordinates_with`) → `it_milestone_set_state()` (`M_DELIVERY_PLANNING` → `M_DELIVERY_BUILDING`) | Issue 생성과 link 사이에 외부 사용자가 milestone 을 close 할 가능성 |
 | inner tdd_build session 종료 (CONVERGED) | (worktree 작업은 §3) → SliceMerge `SM_DRAFT` → `SM_READY_FOR_REVIEW` 의 marker write | slice worktree 의 외부 push, label 충돌 |
 | middle review | SliceMerge marker write (`SM_READY_FOR_REVIEW` ↔ `SM_REQUEST_CHANGES` ↔ `SM_APPROVED`) → label 갱신 → comment | slice worktree HEAD 가 검증 시점 이후 push 로 변경됨 (pin re-check 가 흡수) |
 | middle merge (`SM_APPROVED` → `SM_MERGED`) | trunk merge/rebase → `it_issue_set_state()` (slice 종결) | trunk 의 동시 변경 (rebase 시 재검증) |
-| outer Validation | `it_milestone_set_state()` (`M_DELIVERY_VALIDATING` → `M_DONE`) → close note 또는 release 발행 | 검증 도중 slice 회귀 |
+| outer Validation | `it_milestone_set_state()` (`M_DELIVERY_VALIDATING` → `M_DONE`) → `it_issue_set_state(milestone_tracker, closed)` → close note 또는 release 발행 | 검증 도중 slice 회귀 |
 
 **TOCTOU 흡수 정책**: 모든 write 직전에 [`#AGC-CONTEXT-MANIFEST`](../contracts/agent-and-context-contract.md#AGC-CONTEXT-MANIFEST) 의 pin 을 재조회하고, 변경이 감지되면 [`#RGC-LEDGER`](../contracts/reliability-and-gate-contract.md#RGC-LEDGER) `stale` 로 결과를 종결한 뒤 dispatch 를 건너뛴다. 부분 진행된 write 는 [`#RGC-FAILURE`](../contracts/reliability-and-gate-contract.md#RGC-FAILURE) 의 partial-fail rollback 정책에 따라 처리한다.
 
@@ -76,3 +76,14 @@ worktree → push 사이에 [`#RGC-LEASE-KINDS`](../contracts/reliability-and-ga
 
 - 운영 사고 발생 시 [`#RGC-LEDGER`](../contracts/reliability-and-gate-contract.md#RGC-LEDGER) 의 timestamp 와 본 문서의 단계 번호를 함께 보면 어느 단계에서 멈췄는지가 식별된다.
 - 새 operation 또는 새 어댑터를 추가할 때는 본 문서의 §2 표에 행을 한 줄 추가하고 contract 의 [`#SOC-DISPATCH-MATRIX`](../contracts/state-and-operation-contract.md#SOC-DISPATCH-MATRIX) anchor 를 함께 갱신한다.
+
+## Repo Bootstrap (1회 실행)
+
+repo 첫 운영 시점에 다음 외부 surface 를 1회 생성한다 — 이후에는 재사용. 본 절은 [`사람·GitHub 경계 spec`](../superpowers/specs/2026-05-06-human-github-boundary-contract-design.md) §4.2 의 Control / Contract Change surface 도입에 대응한다.
+
+| 단계 | 호출 | 외부 효과 |
+|---|---|---|
+| Bootstrap 1 | `it_issue_create(kind=control, pinned=true)` | `target.governance.control_issue_number` 가 가리키는 Issue 1개. system signal (`pause`/`resume`/`stop`) 입력 surface. body machine block 의 안내문 포함. |
+| Bootstrap 2 | `it_issue_create(kind=contract_change, pinned=true)` | `target.governance.contract_change_issue_number` 가 가리키는 Issue 1개. `{contract, change_proposal}` signal 입력 surface. |
+
+두 Issue 모두 terminal state 가 없으며 (close 안 함), TCC 의 issue_number 키와 1:1 매핑된다. 운영자가 수동으로 close 하면 `drift_observer` 가 `sync_status=conflict` + ledger `external_observation` row 로 처리한다 (자동 reopen 없음).
