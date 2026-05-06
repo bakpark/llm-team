@@ -17,6 +17,9 @@ write 의 *시간 순서* 와 TOCTOU 정책은 [`github-side-effect-timeline.md`
 | outer Discovery / Specification DialogueSession | (없음) | — | spec 산출은 milestone 본문에 직접 누적; session 자체는 GitHub mirror 를 갖지 않는다 |
 | outer Validation DialogueSession | (없음) | — | validation 결과는 milestone 본문/close note 또는 release 에 누적 |
 | inner tdd_build DialogueSession | (없음) | — | session_log 는 KAC 가 영속화. PR 본문은 SliceMerge 의 mirror 가 담당 |
+| MilestoneTracker | GitHub Issue (label `kind/milestone-tracker` + body machine block) | `milestone_tracker` | 1 milestone : 1 Tracker Issue. outer Discovery / Specification / Validation 의 사람 승인 surface (Issue body `awaiting:` block 갱신 + comment command 입력). 보조용 — Milestone CP / Spec CP 본문은 GitHub Milestone description 에 누적되는 기존 정책 유지. spec: `docs/superpowers/specs/2026-05-06-human-github-boundary-contract-design.md` §4.2 |
+| Control | GitHub Issue (1 repo당 1개) | `control` | system signal (`pause`/`resume`/`stop`) 단일 입력 surface. `target.governance.control_issue_number` 로 식별. terminal state 없음 (close 안 함) |
+| ContractChange | GitHub Issue (1 repo당 1개) | `contract_change` | `{contract, change_proposal}` 집합 surface — verb 가 target_kind 결정. `target.governance.contract_change_issue_number` 로 식별. terminal state 없음 |
 
 `Milestone CP` / `Spec CP` 는 GitHub mirror 의 별도 객체가 아니라 GitHub Milestone 본문의 콘텐츠 누적 단위다 ([`AGC-ISSUE-BODY`](../contracts/agent-and-context-contract.md#AGC-ISSUE-BODY) 의 두 계층 구조).
 
@@ -97,9 +100,9 @@ external_refs[].sync_meta {
 - **방향**: 내부 객체 = authoritative. `external_refs[]` 는 mirror.
 - **outbound (내부 → 외부)**: SOC operation 이 dispatch 한 caller_dispatch 에서만 일어난다. write 시퀀스는 [`github-side-effect-timeline.md`](github-side-effect-timeline.md) 가 단일 권위.
 - **inbound (외부 → 내부)**: 외부 surface 의 변경은 *내부 state 를 직접 변경하지 않는다*.
-  - GitHub webhook 또는 polling 으로 감지된 변경은 [`RGC-SIGNALS`](../contracts/reliability-and-gate-contract.md#RGC-SIGNALS) 의 사람 governance signal 로만 변환된다 (예: Issue close → `request_recover` 또는 `cross_milestone_amendment` signal).
-  - 변환은 `application/human_signal.sh` 또는 그에 상응하는 어댑터에서 수행한다.
-  - signal 검증을 통과한 후에야 [`RGC-HUMAN-CONTRIBUTION`](../contracts/reliability-and-gate-contract.md#RGC-HUMAN-CONTRIBUTION) 의 contribution 으로 envelope 화되어 dialogue_coordinator 가 평가한다.
+  - GitHub Issue comment (REST `/issues/{n}/comments`, GraphQL node_id prefix `IC_`) 의 strict line-prefix command 만이 [`RGC-SIGNALS`](../contracts/reliability-and-gate-contract.md#RGC-SIGNALS) envelope 로 변환되어 사람 governance signal 의 입력으로 인정된다. PR inline review comment (`PRRC_`) / PR review native (`PRR_`) / lifecycle 이벤트 (close/reopen/label/milestone state edit/draft toggle 등) 는 신호로 승격되지 않는다.
+  - 비-신호 lifecycle 이벤트는 `drift_observer` 가 대응 `external_refs[].sync_status` 를 `conflict` 로 전이하고 ledger 에 `action_kind=external_observation` row 를 기록한다. 회복은 §7 의 `conflict` 회복 정책 (사람 governance signal) 으로 일원화한다 — 자동 reopen / state mutate 없음.
+  - signal envelope 변환과 dispatch 는 [`사람·GitHub 경계 spec`](../superpowers/specs/2026-05-06-human-github-boundary-contract-design.md) 의 `human_signal_drain` / `signal_dispatch` 컴포넌트가 수행한다. envelope 검증을 통과한 `approve` / `reject` 는 [`RGC-HUMAN-CONTRIBUTION`](../contracts/reliability-and-gate-contract.md#RGC-HUMAN-CONTRIBUTION) 의 contribution 으로 enveloping 되어 dialogue_coordinator 가 평가한다.
 
 ## 7. 회복 정책
 
