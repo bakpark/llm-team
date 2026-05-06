@@ -16,6 +16,19 @@ export const ProfileCfg = z
 
 export type ProfileCfg = z.infer<typeof ProfileCfg>;
 
+export const Governance = z
+  .object({
+    human_team: z.string().min(1),
+    control_issue_number: z.number().int().positive(),
+    contract_change_issue_number: z.number().int().positive(),
+    signal_command_prefix: z.string().min(1).default("/"),
+    human_team_cache_ttl_seconds: z.number().int().positive().default(300),
+    unauthorized_author_alert: z.boolean().default(false),
+  })
+  .strict();
+
+export type Governance = z.infer<typeof Governance>;
+
 export const TargetConfig = z
   .object({
     agent_profiles: z
@@ -26,6 +39,7 @@ export const TargetConfig = z
         scout: ProfileCfg,
       })
       .strict(),
+    governance: Governance.optional(),
   })
   .strict();
 
