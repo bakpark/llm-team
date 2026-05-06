@@ -48,6 +48,12 @@
 | `actor` | yes | signal 을 남긴 사람 |
 | `created_at` | yes | signal 생성 시각 |
 | `rationale` | recommended | 승인·거부·중단·모델 수정 사유 |
+| `source` | yes | signal 입력 어댑터 식별자. 표준값: `github_comment` (Issue comment 어댑터, node_id prefix `IC_` 한정) |
+| `external_ref` | recommended | 출처 surface 의 외부 식별자. `github_comment` 인 경우 `{ comment_node_id, html_url }` |
+
+**`signal_id` 산출**: `source=github_comment` 일 때 `signal_id = comment.node_id` (GitHub GraphQL node_id, REST `id` 와 1:1, 영속·전역 유일).
+
+**pin / session 슬롯 출처**: `source=github_comment` 인 envelope 은 동일 surface 의 Issue body 에 Caller 가 유지하는 `awaiting:` machine block 에서 `target_revision_pin`, `related_object_id`, `related_object_revision_pin`, `session_id` 를 채운다. block 부재 시 envelope 는 invalid 처리 (`docs/superpowers/specs/2026-05-06-human-github-boundary-contract-design.md` §4.4 참조).
 
 Caller 는 signal 집행 전에 다음을 검증한다.
 
@@ -449,7 +455,7 @@ VerificationRun 의 storage path 와 ID 발급 알고리즘은 본 contract 가 
 | `slot_kind` | `discovery` / `delivery` (slot 관련 transition 한정), 없으면 null |
 | `agent_profile_id` | 관련 AgentProfile id, 없으면 null. legacy `agent_role` 폐기 |
 | `contribution_kind` | 관련 contribution_kind, 없으면 null |
-| `action_kind` | 폭넓은 분류 — `intake` / `slot_promotion` / `session_progress` / `session_finalize` / `slice_merge` / `verification` / `recover` / `pause_resume` / `signal_apply`. legacy `operation` 폐기 |
+| `action_kind` | 폭넓은 분류 — `intake` / `slot_promotion` / `session_progress` / `session_finalize` / `slice_merge` / `verification` / `recover` / `pause_resume` / `signal_apply` / `external_observation`. legacy `operation` 폐기. `external_observation` 은 transition 이 아닌 외부 이벤트 관찰 (예: GitHub lifecycle drift) 의 ledger 표현으로, `from_state=to_state` 동일하고 `output_hash` / `manifest_id` 는 null 가능 |
 | `final_verdict` | session_finalize 시 (state, final_verdict) tuple 의 verdict, 없으면 null |
 | `caller_id` | 전이를 집행한 Caller |
 | `manifest_id` | 관련 Context Manifest |
