@@ -69,7 +69,7 @@ Issue body 의 machine block 은 [`AGC-ISSUE-BODY`](../contracts/agent-and-conte
 
 middle review session 의 SessionTurn 별 review_verdict 는 PR review (approve / request_changes) 또는 PR comment 로 push 된다. `next_action_request` 의 `addressed_to` 는 GitHub 의 review request 로는 mirror 하지 않는다 (mediated addressing — Caller 가 단독 routing).
 
-> SliceMerge 인스턴스 (시간순 1:N) 와 PR open / close timing 의 통합 sequence 는 [`worktree-pr-lifecycle.md`](worktree-pr-lifecycle.md) §4. signal direction (outbound mirror vs inbound `IC_` 단일 채널) 의 정리는 같은 문서 §5.
+> SliceMerge 인스턴스 (시간순 1:N) 와 PR open / close timing 의 통합 sequence 는 [`worktree-pr-lifecycle.md`](worktree-pr-lifecycle.md) §4.
 
 ## 5. 동기화 메타 스키마
 
