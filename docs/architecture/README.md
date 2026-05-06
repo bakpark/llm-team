@@ -31,6 +31,7 @@
 9. [`lease-and-recovery.md`](lease-and-recovery.md) — `RGC-LEASE-KINDS`/`RGC-RECOVERY` 의 구현 매핑(claim/expire/recovery scan).
 10. [`context-snapshot.md`](context-snapshot.md) — `AGC-CONTEXT-MANIFEST.fetch_scope` 와 contribution_kind 별 default 매핑.
 11. [`github-side-effect-timeline.md`](github-side-effect-timeline.md) — loop step session CONVERGED 와 SliceMerge 전이 시 GitHub side-effect 시퀀스.
+12. [`worktree-pr-lifecycle.md`](worktree-pr-lifecycle.md) — Slice ↔ worktree ↔ SliceMerge 인스턴스(시간순) ↔ PR 의 통합 lifecycle. patch turn workspace 적용 매트릭스, GitHub signal direction (outbound/inbound), failure 결정표 — workflow diagram entry point.
 13. [`agent-runner-adapters.md`](agent-runner-adapters.md) — agent runner 포트의 어댑터 매핑 (AgentProfile id 기반).
 14. [`adapter-inventory.md`](adapter-inventory.md) — port × production adapter 스냅샷, cross-cutting 운영 가정 (단일 호스트·macOS 호환·외부 도구 의존), 한계 인덱스.
 

@@ -45,6 +45,8 @@ workdir/
 
 `workdir/` 의 절대 경로는 target 별로 [`TCC-IDENTITY`](../contracts/target-config-contract.md#TCC-IDENTITY) 가 결정한다.
 
+> **Lifecycle overview**: workspace 가 SliceMerge 인스턴스 (시간순 1:N) 와 어떻게 결합되어 SLICE_BUILDING → CONVERGED → middle review → trunk merge 까지 흐르는지의 통합 다이어그램은 [`worktree-pr-lifecycle.md`](worktree-pr-lifecycle.md) §4-§7.
+
 ## 2. ID 발급
 
 | 객체 | 발급 주체 | 알고리즘 |

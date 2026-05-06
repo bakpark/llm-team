@@ -52,7 +52,9 @@ Turn worker cycle
 | outer Discovery | `it_milestone_create()` 또는 `it_milestone_update()` → `it_issue_create(kind=milestone_tracker)` (1 milestone당 1회, 라벨 `kind/milestone-tracker` + body machine block) → `it_issue_body_update_awaiting()` (AWAITING_HUMAN 진입 시 awaiting block 갱신) → `it_milestone_set_state()` (`M_DISCOVERY_*` 전이) | milestone description 또는 tracker body 의 동시 편집 |
 | outer Specification | `it_milestone_update()` → `it_issue_body_update_awaiting()` (Specification 의 AWAITING_HUMAN 진입 시) → `it_milestone_set_state()` (`M_SPECIFICATION_*` → `M_SPEC_APPROVED`) | 위와 동일 |
 | outer Planning | `it_issue_create()` × N (Slice 영속화) → `it_issue_link_to_milestone()` × N → `it_issue_set_blocked_by()` × N (slice DAG `blocks`/`coordinates_with`) → `it_milestone_set_state()` (`M_DELIVERY_PLANNING` → `M_DELIVERY_BUILDING`) | Issue 생성과 link 사이에 외부 사용자가 milestone 을 close 할 가능성 |
-| inner tdd_build session 종료 (CONVERGED) | (worktree 작업은 §3) → SliceMerge `SM_DRAFT` → `SM_READY_FOR_REVIEW` 의 marker write | slice worktree 의 외부 push, label 충돌 |
+| Slice SLICE_BUILDING 진입 (Caller pre-action) | SliceMerge `SM_DRAFT` 생성 + draft PR open (`external-tracking-mapping.md` §4). inner turn 별 workspace_commit push 는 [`worktree-pr-lifecycle.md`](worktree-pr-lifecycle.md) §4 | slice worktree 의 외부 push, label 충돌 |
+| inner tdd_build session 종료 (CONVERGED tests_green) | SliceMerge `SM_DRAFT → SM_READY_FOR_REVIEW` + PR ready 화 | slice worktree 의 외부 push |
+| inner tdd_build session 종료 (TIMEOUT / ABANDONED) | SliceMerge `SM_DRAFT → SM_CLOSED` + draft PR close. Slice `SLICE_BLOCKED` | (n/a) |
 | middle review | SliceMerge marker write (`SM_READY_FOR_REVIEW` ↔ `SM_REQUEST_CHANGES` ↔ `SM_APPROVED`) → label 갱신 → comment | slice worktree HEAD 가 검증 시점 이후 push 로 변경됨 (pin re-check 가 흡수) |
 | middle merge (`SM_APPROVED` → `SM_MERGED`) | trunk merge/rebase → `it_issue_set_state()` (slice 종결) | trunk 의 동시 변경 (rebase 시 재검증) |
 | outer Validation | `it_milestone_set_state()` (`M_DELIVERY_VALIDATING` → `M_DONE`) → `it_issue_set_state(milestone_tracker, closed)` → close note 또는 release 발행 | 검증 도중 slice 회귀 |
