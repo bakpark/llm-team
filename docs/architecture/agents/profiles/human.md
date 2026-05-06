@@ -22,9 +22,9 @@
 
 ## Contribution 변환 path
 
-사람은 직접 envelope 을 작성하지 않는다. [`#RGC-SIGNALS`](../../../contracts/reliability-and-gate-contract.md#RGC-SIGNALS) 의 `approve` / `reject` 신호 (GitHub label, comment, 또는 별도 form) 가 다음 절차로 contribution 으로 변환된다:
+사람은 직접 envelope 을 작성하지 않는다. [`#RGC-SIGNALS`](../../../contracts/reliability-and-gate-contract.md#RGC-SIGNALS) 의 `approve` / `reject` 신호는 GitHub Issue comment (REST `/issues/{n}/comments`, GraphQL node_id prefix `IC_`) 의 strict line-prefix command 단일 채널로 입력된다 ([`사람·GitHub 경계 spec`](../../../superpowers/specs/2026-05-06-human-github-boundary-contract-design.md) §4.1). PR inline review comment / PR review native UI 는 신호로 인정되지 않으며 drift_observer 가 lifecycle 로 관찰한다. 입력은 다음 절차로 contribution 으로 변환된다:
 
-1. `application/human_signal.sh` 가 외부 신호를 drain
+1. `human_signal_drain` 이 외부 신호를 drain
 2. signal envelope 유효성 검증 (서명, target_revision_pin, related_object_revision_pin, signal_id 중복)
 3. `human` profile 의 `human_approval` contribution envelope 으로 변환:
    - `session_id`, `turn_index`: 신호 target session 에서 lookup
