@@ -9,13 +9,14 @@
 **Tech Stack:** Markdown (contracts/architecture docs), TypeScript + Zod 3 (`src/config/target-schema.ts`), Vitest.
 
 **Spec coverage** (이 plan 이 닫는 범위):
-- spec §6.1 → Task 7 (Zod) + Task 1 (TCC markdown)
+- spec §6.1 → Task 1 (TCC-GOVERNANCE markdown + scope/precedence/change-rules 보강) + Task 7 (Zod)
 - spec §6.2 → Task 3 (AGC-SESSION-INPUT)
 - spec §6.3 → Task 2 (RGC-SIGNALS)
 - spec §6.4 → Task 5 (human.md)
-- spec §6.5 → Task 4 (external-tracking-mapping)
+- spec §6.5 → Task 4 (external-tracking-mapping §1 + §6 전부)
 - spec §6.6 → Task 6 (github-side-effect-timeline)
 - spec §6.7 → Task 2 (RGC-LEDGER `external_observation`)
+- contract conformance (README.md) → Task 8 (anchor 추가에 따른 CONTRACT-CONFORMANCE matrix + CONTRACT-ARCHITECTURE-MAPPING 갱신)
 
 다루지 않는 범위 (후속 plan / `.human/draft/`):
 - 신규 component (drain / dispatch / observer) 구현
@@ -30,7 +31,8 @@
 
 | 파일 | 변경 종류 | 책임 |
 |---|---|---|
-| `docs/contracts/target-config-contract.md` | append section | TCC-GOVERNANCE 신규 — `target.governance.*` 키 정의 단일 권위 |
+| `docs/contracts/target-config-contract.md` | append section + 3 list 보강 | TCC-GOVERNANCE 신규 + TCC-SCOPE / TCC-PRECEDENCE / TCC-CHANGE-RULES 에 governance 항목 추가 |
+| `docs/contracts/README.md` | 2 곳 갱신 | CONTRACT-CONFORMANCE matrix 의 "Target Configuration" 절에 TCC-GOVERNANCE row, CONTRACT-ARCHITECTURE-MAPPING 의 TCC row 에 anchor 추가 |
 | `docs/contracts/reliability-and-gate-contract.md` | edit RGC-LEDGER + RGC-SIGNALS | `action_kind=external_observation` 추가, signal envelope source/external_ref/awaiting binding 명시 |
 | `docs/contracts/agent-and-context-contract.md` | edit AGC-SESSION-INPUT | middle review session 의 advisory `prior_review_context` slot 정의 |
 | `docs/architecture/external-tracking-mapping.md` | edit §1·§3·§5·§6 | mapping 표에 tracker/control/contract_change 3 행 추가, `kind` enum 확장, drift/sync_status 정책 |
@@ -56,9 +58,9 @@ Expected: 두 줄 출력. AGENT-PROFILES 와 LOOP-POLICIES 라인 번호 기록 
 
 - [ ] **Step 2: TCC-GOVERNANCE 섹션 삽입**
 
-`docs/contracts/target-config-contract.md` 에서 `<a id="TCC-LOOP-POLICIES"></a>` 직전에 다음을 삽입:
+`docs/contracts/target-config-contract.md` 에서 `<a id="TCC-LOOP-POLICIES"></a>` 직전에 다음을 삽입 (markdown 파일 내부에 코드블록과 표가 있으므로 **4-backtick fence** 사용):
 
-```markdown
+````markdown
 <a id="TCC-GOVERNANCE"></a>
 ## TCC-GOVERNANCE: Governance Surface & Human Authority
 
@@ -77,24 +79,66 @@ Expected: 두 줄 출력. AGENT-PROFILES 와 LOOP-POLICIES 라인 번호 기록 
 
 `control_issue_number` 와 `contract_change_issue_number` 가 각각 1개 Issue 만 가리키는 이유는 외부 surface 단일 권위 보장이다. 다중 Issue 라우팅은 미도입.
 
+````
+
+- [ ] **Step 3: TCC-SCOPE bullet list 보강**
+
+`docs/contracts/target-config-contract.md` 의 TCC-SCOPE 절 (파일 상단) bullet list 의 `- 설정값 우선순위` 직전에 다음 한 줄 삽입:
+
+```markdown
+- Governance surface — 사람 입력 채널, GitHub Team authority, control / contract change Issue 번호 (`TCC-GOVERNANCE`)
 ```
 
-- [ ] **Step 3: 정합 확인**
+- [ ] **Step 4: TCC-PRECEDENCE anchor 목록에 추가**
+
+`docs/contracts/target-config-contract.md` 의 TCC-PRECEDENCE 의 다음 문장:
+
+```markdown
+2. target 단위 설정 (`TCC-LEASE-CONFIG`, `TCC-ONBOARDING`, `TCC-AGENT-PROFILES`, `TCC-LOOP-POLICIES`, `TCC-SLICE-CLASS-RULES`, `TCC-DUAL-TRACK`, `TCC-CONTEXT-BUDGET`, `TCC-REFACTOR-METRICS`, `TCC-ENFORCEMENT` 등)
+```
+
+을 다음으로 교체:
+
+```markdown
+2. target 단위 설정 (`TCC-LEASE-CONFIG`, `TCC-ONBOARDING`, `TCC-AGENT-PROFILES`, `TCC-LOOP-POLICIES`, `TCC-SLICE-CLASS-RULES`, `TCC-DUAL-TRACK`, `TCC-CONTEXT-BUDGET`, `TCC-REFACTOR-METRICS`, `TCC-ENFORCEMENT`, `TCC-GOVERNANCE` 등)
+```
+
+- [ ] **Step 5: TCC-CHANGE-RULES key 목록에 governance 추가**
+
+`docs/contracts/target-config-contract.md` 의 TCC-CHANGE-RULES 의 다음 bullet:
+
+```markdown
+- `lease`, `onboarding`, `agent_profiles`, `loop_policies`, `internal_escalation_rules`, `dual_track`, `context_budget`, `refactor_metrics` 키는 다음 cycle 시작 시점부터 적용된다. 진행 중인 lease 와 DialogueSession 은 이전 설정으로 끝까지 처리된다.
+```
+
+을 다음으로 교체:
+
+```markdown
+- `lease`, `onboarding`, `agent_profiles`, `loop_policies`, `internal_escalation_rules`, `dual_track`, `context_budget`, `refactor_metrics`, `governance` 키는 다음 cycle 시작 시점부터 적용된다. 진행 중인 lease 와 DialogueSession 은 이전 설정으로 끝까지 처리된다. `governance.human_team` / `governance.control_issue_number` / `governance.contract_change_issue_number` 변경은 외부 surface 재바인딩을 요구하므로 caller 가 새 cycle 시작 전에 awaiting block / Tracker Issue 의 정합을 검증한다.
+```
+
+- [ ] **Step 6: 정합 확인**
 
 Run:
 ```bash
-grep -nE '<a id="TCC-(AGENT-PROFILES|GOVERNANCE|LOOP-POLICIES)"' docs/contracts/target-config-contract.md
+grep -nE '<a id="TCC-(AGENT-PROFILES|GOVERNANCE|LOOP-POLICIES)"|TCC-GOVERNANCE|Governance surface' docs/contracts/target-config-contract.md
 ```
-Expected: 세 anchor 가 위 순서로 등장.
+Expected:
+- 세 anchor 가 위 순서로 등장 (line 70 영역, 신규, 87 영역).
+- TCC-PRECEDENCE bullet 에 `TCC-GOVERNANCE` 1회 등장.
+- TCC-CHANGE-RULES bullet 에 `governance` 1회 등장.
+- TCC-SCOPE 에 `Governance surface` 1회 등장.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add docs/contracts/target-config-contract.md
-git commit -m "docs(contracts): add TCC-GOVERNANCE for target.governance.*
+git commit -m "docs(contracts): add TCC-GOVERNANCE + scope/precedence/change-rules 보강
 
 human·GitHub 경계 spec (2026-05-06) 의 §6.1 반영. human_team /
 control_issue_number / contract_change_issue_number 등 6개 키 단일 권위.
+SCOPE bullet, PRECEDENCE 안커 list, CHANGE-RULES 키 list 도 함께 갱신해
+contract 정합 확보.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
@@ -188,9 +232,9 @@ Expected: AGC-SESSION-INPUT 다음 anchor 의 라인 번호 + 텍스트. 그 직
 
 - [ ] **Step 3: advisory slot 정의 삽입**
 
-`docs/contracts/agent-and-context-contract.md` 에서 AGC-SESSION-INPUT 절의 마지막 (다음 anchor 직전) 에 다음 단락 추가:
+`docs/contracts/agent-and-context-contract.md` 에서 AGC-SESSION-INPUT 절의 마지막 (다음 anchor 직전) 에 다음 단락 추가 (markdown 안에 yaml 코드블록 포함이라 **4-backtick fence** 사용):
 
-```markdown
+````markdown
 ### Advisory slot — `prior_review_context` (middle review session 한정)
 
 middle review DialogueSession 의 input manifest 는 *직전* SliceMerge 가 `SM_REQUEST_CHANGES → SM_CLOSED` 로 종료된 직후의 새 SliceMerge 인 경우에 한해 다음 advisory 슬롯을 포함할 수 있다.
@@ -210,7 +254,7 @@ prior_review_context:
 - **동봉 조건**: 동일 Slice 의 직전 SliceMerge 가 `SM_CLOSED` 이며 종료 사유가 `SM_REQUEST_CHANGES → SM_CLOSED` (request_changes) 인 경우만. 그 외 사유 (`abandon`, `escalate`, SM_STALE→BLOCKED) 또는 직전 SliceMerge 부재 시 슬롯은 omit.
 - **출처**: 본 슬롯의 contract 결정은 [`docs/superpowers/specs/2026-05-06-human-github-boundary-contract-design.md`](../../docs/superpowers/specs/2026-05-06-human-github-boundary-contract-design.md) §4.7.
 
-```
+````
 
 - [ ] **Step 4: 정합 확인**
 
@@ -235,67 +279,90 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ---
 
-## Task 4: external-tracking-mapping — §3 / §5 / §6 갱신
+## Task 4: external-tracking-mapping — §1 mapping + §6 inbound 정책 갱신
 
 **Files:**
-- Modify: `docs/architecture/external-tracking-mapping.md` — §3 mapping 표에 신규 row 3행, §5 `external_refs[].kind` enum 확장, §6 inbound 정책의 "Issue close → request_recover" 폐기 + drift detector 문구 대체
+- Modify: `docs/architecture/external-tracking-mapping.md` — **§1** (provider="github" 객체 매핑) 표에 신규 row 3행, §6 inbound 정책의 3개 bullet 전체 교체
+
+> **주의**: spec 본문 (`design.md` §6.5) 의 "§3 (mapping 표)" 표기는 spec 작성 시점 오류 (실제 §1 이 매핑 표). 본 plan 은 정확히 §1 을 가리킨다. spec 본문 수정은 별도 commit 으로 함께 처리 (Step 4 참조).
 
 - [ ] **Step 1: 변경 지점 확인**
 
 Run:
 ```bash
-grep -nE '^## 3\.|^## 5\.|^## 6\.|sync_status|kind.*GitHub' docs/architecture/external-tracking-mapping.md | head -30
+grep -nE '^## 1\.|^## 5\.|^## 6\.|sync_status|kind.*GitHub' docs/architecture/external-tracking-mapping.md | head -30
 ```
-Expected: §3, §5, §6 헤더 + sync_status 정의 + kind 행 위치 출력.
+Expected: §1 (provider="github" 객체 매핑), §5 (동기화 메타 스키마), §6 (동기화 방향과 inbound 정책) 헤더 + sync_status / `external_refs[].kind` 위치 출력. 매핑 표는 §1 직후 라인 11 부근에 위치함을 확인.
 
-- [ ] **Step 2: §3 mapping 표 행 추가**
+- [ ] **Step 2: §1 mapping 표 행 추가**
 
-`docs/architecture/external-tracking-mapping.md` 의 §3 의 mapping 표 — 가장 마지막 row 직후에 다음 3 row 추가:
+`docs/architecture/external-tracking-mapping.md` 의 §1 매핑 표 — 마지막 row (`inner tdd_build DialogueSession`) 직후에 다음 3 row 추가:
 
 ```markdown
-| MilestoneTracker | GitHub Issue (label `kind/milestone-tracker` + body machine block) | `milestone_tracker` | 1 milestone : 1 Tracker Issue. outer Discovery / Specification / Validation 의 사람 승인 surface (Issue body `awaiting:` block 갱신 + comment command 입력). 보조용 — Milestone CP / Spec CP 본문은 GitHub Milestone description 에 누적되는 기존 정책 유지 |
-| Control | GitHub Issue (1 repo당 1개) | `control` | system signal (`pause`/`resume`/`stop`) 단일 입력 surface. `target.governance.control_issue_number` 로 식별 |
-| ContractChange | GitHub Issue (1 repo당 1개) | `contract_change` | `{contract, change_proposal}` 집합 surface — verb 가 target_kind 결정. `target.governance.contract_change_issue_number` 로 식별 |
+| MilestoneTracker | GitHub Issue (label `kind/milestone-tracker` + body machine block) | `milestone_tracker` | 1 milestone : 1 Tracker Issue. outer Discovery / Specification / Validation 의 사람 승인 surface (Issue body `awaiting:` block 갱신 + comment command 입력). 보조용 — Milestone CP / Spec CP 본문은 GitHub Milestone description 에 누적되는 기존 정책 유지. spec: `docs/superpowers/specs/2026-05-06-human-github-boundary-contract-design.md` §4.2 |
+| Control | GitHub Issue (1 repo당 1개) | `control` | system signal (`pause`/`resume`/`stop`) 단일 입력 surface. `target.governance.control_issue_number` 로 식별. terminal state 없음 (close 안 함) |
+| ContractChange | GitHub Issue (1 repo당 1개) | `contract_change` | `{contract, change_proposal}` 집합 surface — verb 가 target_kind 결정. `target.governance.contract_change_issue_number` 로 식별. terminal state 없음 |
 ```
 
-- [ ] **Step 3: §6 inbound 정책 갱신**
+- [ ] **Step 3: §6 inbound 정책 — 3개 bullet 전부 교체**
 
-`docs/architecture/external-tracking-mapping.md` 의 §6 의 다음 bullet:
+`docs/architecture/external-tracking-mapping.md` 의 §6 의 inbound 정책에 있는 다음 3 bullet 블록 (현재 4 bullet, 첫 bullet `**inbound (외부 → 내부)**` 가 헤더이고 그 아래 3 sub-bullet):
 
 ```markdown
+- **inbound (외부 → 내부)**: 외부 surface 의 변경은 *내부 state 를 직접 변경하지 않는다*.
   - GitHub webhook 또는 polling 으로 감지된 변경은 [`RGC-SIGNALS`](../contracts/reliability-and-gate-contract.md#RGC-SIGNALS) 의 사람 governance signal 로만 변환된다 (예: Issue close → `request_recover` 또는 `cross_milestone_amendment` signal).
+  - 변환은 `application/human_signal.sh` 또는 그에 상응하는 어댑터에서 수행한다.
+  - signal 검증을 통과한 후에야 [`RGC-HUMAN-CONTRIBUTION`](../contracts/reliability-and-gate-contract.md#RGC-HUMAN-CONTRIBUTION) 의 contribution 으로 envelope 화되어 dialogue_coordinator 가 평가한다.
+```
+
+을 다음 4 bullet 블록으로 교체 (헤더 + 3 sub-bullet):
+
+```markdown
+- **inbound (외부 → 내부)**: 외부 surface 의 변경은 *내부 state 를 직접 변경하지 않는다*.
+  - GitHub Issue comment (REST `/issues/{n}/comments`, GraphQL node_id prefix `IC_`) 의 strict line-prefix command 만이 [`RGC-SIGNALS`](../contracts/reliability-and-gate-contract.md#RGC-SIGNALS) envelope 로 변환되어 사람 governance signal 의 입력으로 인정된다. PR inline review comment (`PRRC_`) / PR review native (`PRR_`) / lifecycle 이벤트 (close/reopen/label/milestone state edit/draft toggle 등) 는 신호로 승격되지 않는다.
+  - 비-신호 lifecycle 이벤트는 `drift_observer` 가 대응 `external_refs[].sync_status` 를 `conflict` 로 전이하고 ledger 에 `action_kind=external_observation` row 를 기록한다. 회복은 §7 의 `conflict` 회복 정책 (사람 governance signal) 으로 일원화한다 — 자동 reopen / state mutate 없음.
+  - signal envelope 변환과 dispatch 는 [`사람·GitHub 경계 spec`](../superpowers/specs/2026-05-06-human-github-boundary-contract-design.md) 의 `human_signal_drain` / `signal_dispatch` 컴포넌트가 수행한다. envelope 검증을 통과한 `approve` / `reject` 는 [`RGC-HUMAN-CONTRIBUTION`](../contracts/reliability-and-gate-contract.md#RGC-HUMAN-CONTRIBUTION) 의 contribution 으로 enveloping 되어 dialogue_coordinator 가 평가한다.
+```
+
+- [ ] **Step 4: spec 본문의 "§3" 표기 정정**
+
+`docs/superpowers/specs/2026-05-06-human-github-boundary-contract-design.md` §6.5 의 다음 문장:
+
+```markdown
+- §3 (mapping 표) 에 신규 row 추가: `MilestoneTracker → GitHub Issue (kind: milestone_tracker)`, `Control → GitHub Issue (kind: control)`, `ContractChange → GitHub Issue (kind: contract_change)`. `external_refs[].kind` enum 에 동일 3종 추가.
 ```
 
 을 다음으로 교체:
 
 ```markdown
-  - GitHub lifecycle 이벤트 (Issue close/reopen, label add/remove, milestone state edit, PR draft toggle, PR review native UI, PR inline review comment 등) 는 신호로 승격되지 않는다. `drift_observer` 가 대응 `external_refs[].sync_status` 를 `conflict` 로 전이하고 ledger 에 `action_kind=external_observation` row 를 기록한다. 회복은 §7 의 `conflict` 회복 정책 (사람 governance signal) 으로 일원화한다.
-  - 사람의 회수·중단 등 의도는 [`docs/superpowers/specs/2026-05-06-human-github-boundary-contract-design.md`](../superpowers/specs/2026-05-06-human-github-boundary-contract-design.md) 의 comment command 로 명시되어야 한다 (Issue comment, node_id prefix `IC_` 한정).
-  - signal envelope 변환은 본 spec §5.2 의 `human_signal_drain` 컴포넌트가 수행한다.
+- §1 (provider="github" 객체 매핑 표) 에 신규 row 추가: `MilestoneTracker → GitHub Issue (kind: milestone_tracker)`, `Control → GitHub Issue (kind: control)`, `ContractChange → GitHub Issue (kind: contract_change)`. `external_refs[].kind` enum 에 동일 3종 추가.
 ```
 
-- [ ] **Step 4: 정합 확인**
+- [ ] **Step 5: 정합 확인**
 
 Run:
 ```bash
 grep -nE 'milestone_tracker|^\| Control \|.*control \|.*system|^\| ContractChange|drift_observer|sync_status.*conflict|comment command' docs/architecture/external-tracking-mapping.md
 ```
-Expected: 6개 키워드 패턴 모두 1회 이상 등장. `Issue close → request_recover` 는 더 이상 등장하지 않아야 함:
+Expected: 6개 키워드 패턴 모두 1회 이상 등장. 다음 두 표기는 더 이상 등장하지 않아야 함:
 ```bash
-grep -c 'Issue close → ' docs/architecture/external-tracking-mapping.md
+grep -cE 'Issue close → request_recover|application/human_signal\.sh' docs/architecture/external-tracking-mapping.md
 ```
-Expected: `0`.
+Expected: `0`. (`application/human_signal.sh` 가 §6 에서 폐기되었음을 확인.)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add docs/architecture/external-tracking-mapping.md
+git add docs/architecture/external-tracking-mapping.md docs/superpowers/specs/2026-05-06-human-github-boundary-contract-design.md
 git commit -m "docs(architecture): tracker/control/contract_change kinds + drift policy
 
 human·GitHub 경계 spec (2026-05-06) §6.5 반영.
-- §3 mapping 표에 milestone_tracker/control/contract_change 3 row 추가
-- §6 inbound 정책: lifecycle 이벤트 → signal 승격 폐기, drift_observer 가
-  sync_status=conflict + external_observation ledger row 기록으로 대체
+- §1 (provider=github 객체 매핑 표) 에 milestone_tracker/control/
+  contract_change 3 row 추가
+- §6 inbound 정책 3 bullet 전부 교체: lifecycle 이벤트 → signal 승격 폐기,
+  drift_observer 가 sync_status=conflict + external_observation ledger row
+  기록. application/human_signal.sh 표기 폐기 → human_signal_drain 컴포넌트
+- spec 본문의 §3 → §1 표기 정정 (스펙 작성 시점 오류)
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 ```
@@ -508,6 +575,19 @@ describe("target.governance", () => {
     expect(cfg.governance?.unauthorized_author_alert).toBe(true);
   });
 
+  it("default human_team_cache_ttl_seconds matches TCC-GOVERNANCE doc value (300)", () => {
+    const cfg = parseTargetConfig({
+      agent_profiles: baseProfiles,
+      governance: {
+        human_team: "myorg/approvers",
+        control_issue_number: 1,
+        contract_change_issue_number: 2,
+        human_team_cache_ttl_seconds: 300,
+      },
+    });
+    expect(cfg.governance?.human_team_cache_ttl_seconds).toBe(300);
+  });
+
   it("rejects governance with missing required field", () => {
     expect(() =>
       parseTargetConfig({
@@ -555,17 +635,20 @@ describe("target.governance", () => {
 });
 ```
 
-- [ ] **Step 2: 테스트 실행 — 실패 확인**
+- [ ] **Step 2: 테스트 실행 — 실패 baseline 확인**
 
 Run:
 ```bash
 cd /Users/macpro/dev/llm-team && npx vitest run tests/config/registry.test.ts -t "target.governance"
 ```
-Expected:
-- 5 FAIL — `accepts a fully populated`, `permits explicit override`, `rejects governance with missing required field`, `rejects unknown governance keys`, `rejects non-positive issue numbers` 케이스. 모두 `.strict()` 가 알 수 없는 `governance` 키를 reject 하므로 parse 가 즉시 throw.
-- 1 PASS — `permits omitting the governance block entirely`. 현재 schema 에 governance 필드 자체가 없어 누락 입력은 무관하게 parse 성공 + `cfg.governance` 는 undefined.
 
-5 FAIL 가 본 task 의 "실패 baseline".
+> **TDD baseline 분석**: 현재 `TargetConfig` 는 `.strict()` 이며 `governance` 필드 자체가 없다. 따라서 **`governance` 객체를 입력에 포함하는 모든 테스트는 parse 단계에서 throw 한다** — `.toThrow()` 를 기대하는 negative 테스트들은 이 throw 를 그대로 받기 때문에 baseline 에서 PASS 하지만, 의도된 이유 (`human_team` missing / `typo_key` / `0` issue number 등) 가 아닌 "governance 필드 자체가 unknown" 으로 throw 하는 것이라 *의도와 다른* PASS 다. 본 task 의 진짜 baseline 은 positive (parse 성공 기대) 테스트의 FAIL 만 보면 된다.
+
+Expected (baseline):
+- **3 FAIL** — `accepts a fully populated`, `permits explicit override`, `default human_team_cache_ttl_seconds matches ...`. 모두 governance 객체를 parse 하려고 하나 schema 가 거부하므로 throw → `expect(...).toBe(...)` 단계에 도달 못 함.
+- **4 PASS (의도와 다른 이유로)** — `rejects governance with missing required field`, `rejects unknown governance keys`, `rejects non-positive issue numbers` 는 throw 를 기대하는데 schema 가 governance 자체를 reject 해 throw → 우연히 통과. `permits omitting the governance block entirely` 는 의도대로 정상 통과.
+
+이 baseline 은 TDD 의 의도와 일치한다 — Step 3 의 schema 추가 후 6 PASS 모두 *의도된 이유* 로 통과해야 한다.
 
 - [ ] **Step 3: schema 구현**
 
@@ -630,7 +713,7 @@ Run:
 ```bash
 cd /Users/macpro/dev/llm-team && npx vitest run tests/config/registry.test.ts -t "target.governance"
 ```
-Expected: 6개 테스트 모두 PASS.
+Expected: 7개 테스트 모두 PASS — positive 3종이 의도대로 parse 성공, negative 3종이 의도된 reason (필수 필드 누락 / 알 수 없는 키 / non-positive number) 으로 throw, omit 1종이 governance optional 로 정상 처리.
 
 - [ ] **Step 5: 회귀 — 전체 테스트 + typecheck**
 
@@ -655,7 +738,81 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ---
 
-## Task 8: 최종 정합 확인
+## Task 8: README — CONTRACT-CONFORMANCE 매트릭스 + ARCHITECTURE-MAPPING 갱신
+
+**Files:**
+- Modify: `docs/contracts/README.md` — `<a id="CONTRACT-CONFORMANCE">` 의 "Target Configuration" 절에 TCC-GOVERNANCE row 추가, `CONTRACT-ARCHITECTURE-MAPPING` 의 TCC row 에 anchor 추가
+
+본 task 는 README §"`anchor 를 추가·변경하면 #CONTRACT-CONFORMANCE matrix 를 함께 갱신해야 한다`" 규약을 따른다.
+
+- [ ] **Step 1: 갱신 지점 확인**
+
+Run:
+```bash
+grep -nE 'TCC-LEASE-CONFIG|TCC-PRECEDENCE \||TCC-CHANGE-RULES \||CONTRACT-ARCHITECTURE-MAPPING' docs/contracts/README.md
+```
+Expected: CONTRACT-CONFORMANCE matrix 의 Target Configuration 행들 (`TCC-LEASE-CONFIG`, `TCC-AGENT-PROFILES`, `TCC-PRECEDENCE`, `TCC-CHANGE-RULES`) + ARCHITECTURE-MAPPING anchor 위치 출력.
+
+- [ ] **Step 2: CONTRACT-CONFORMANCE matrix 에 TCC-GOVERNANCE row 추가**
+
+`docs/contracts/README.md` 의 Target Configuration 절 — 다음 row:
+
+```markdown
+| `TCC-CHANGE-RULES` | spec-only | contract prose. ledger helper (Stage 2) | always_hard (변경 ledger 기록) | 2026-05-05-loop (invariant_enforcement 변경 ledger 추가) |
+```
+
+직후에 다음 row 1개 추가 (Stage 정렬을 유지하기 위해 `TCC-CHANGE-RULES` 다음, `TCC-PHASE-POLICIES` 앞):
+
+```markdown
+| `TCC-GOVERNANCE` ★ | partial | `src/config/target-schema.ts` (Zod parse) — runtime consumer 미구현 (drain / dispatch / observer 후속 plan) | always_hard (governance schema 검증) | 2026-05-06-human-github-boundary |
+```
+
+- [ ] **Step 3: CONTRACT-ARCHITECTURE-MAPPING 의 TCC row 에 anchor 추가**
+
+`docs/contracts/README.md` 의 ARCHITECTURE-MAPPING 표 — 다음 row:
+
+```markdown
+| [`TCC-LEASE-CONFIG`](target-config-contract.md#TCC-LEASE-CONFIG), [`TCC-ONBOARDING`](target-config-contract.md#TCC-ONBOARDING), [`TCC-AGENT-PROFILES`](target-config-contract.md#TCC-AGENT-PROFILES), [`TCC-LOOP-POLICIES`](target-config-contract.md#TCC-LOOP-POLICIES), [`TCC-SLICE-CLASS-RULES`](target-config-contract.md#TCC-SLICE-CLASS-RULES), [`TCC-DUAL-TRACK`](target-config-contract.md#TCC-DUAL-TRACK), [`TCC-REFACTOR-METRICS`](target-config-contract.md#TCC-REFACTOR-METRICS), [`TCC-ENFORCEMENT`](target-config-contract.md#TCC-ENFORCEMENT) | [`lease-and-recovery.md`](../architecture/lease-and-recovery.md), [`agent-runner-adapters.md`](../architecture/agent-runner-adapters.md), [`daemons.md`](../architecture/daemons.md) |
+```
+
+을 다음으로 교체 (anchor 1개 추가 + architecture 파일 2개 추가):
+
+```markdown
+| [`TCC-LEASE-CONFIG`](target-config-contract.md#TCC-LEASE-CONFIG), [`TCC-ONBOARDING`](target-config-contract.md#TCC-ONBOARDING), [`TCC-AGENT-PROFILES`](target-config-contract.md#TCC-AGENT-PROFILES), [`TCC-LOOP-POLICIES`](target-config-contract.md#TCC-LOOP-POLICIES), [`TCC-SLICE-CLASS-RULES`](target-config-contract.md#TCC-SLICE-CLASS-RULES), [`TCC-DUAL-TRACK`](target-config-contract.md#TCC-DUAL-TRACK), [`TCC-REFACTOR-METRICS`](target-config-contract.md#TCC-REFACTOR-METRICS), [`TCC-ENFORCEMENT`](target-config-contract.md#TCC-ENFORCEMENT), [`TCC-GOVERNANCE`](target-config-contract.md#TCC-GOVERNANCE) | [`lease-and-recovery.md`](../architecture/lease-and-recovery.md), [`agent-runner-adapters.md`](../architecture/agent-runner-adapters.md), [`daemons.md`](../architecture/daemons.md), [`external-tracking-mapping.md`](../architecture/external-tracking-mapping.md), [`github-side-effect-timeline.md`](../architecture/github-side-effect-timeline.md) |
+```
+
+- [ ] **Step 4: 정합 확인**
+
+Run:
+```bash
+grep -cE '`TCC-GOVERNANCE`' docs/contracts/README.md
+```
+Expected: `2` (CONTRACT-CONFORMANCE row + ARCHITECTURE-MAPPING row 양쪽 한 번씩, 단 한 번만 검색 — 실제 grep 패턴은 backtick 포함이라 안전한 카운트는 `grep -c`).
+
+```bash
+grep -nE 'TCC-GOVERNANCE.*partial.*src/config/target-schema|external-tracking-mapping\.md.*github-side-effect-timeline\.md' docs/contracts/README.md
+```
+Expected: 두 패턴 모두 1회 이상 매칭.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add docs/contracts/README.md
+git commit -m "docs(contracts/README): conformance + architecture-mapping for TCC-GOVERNANCE
+
+human·GitHub 경계 spec (2026-05-06) §6.1 의 anchor 추가에 따른 README
+규약 보강.
+- CONTRACT-CONFORMANCE matrix 의 Target Configuration 절에 TCC-GOVERNANCE
+  row (status=partial, surface=Zod schema)
+- CONTRACT-ARCHITECTURE-MAPPING 의 TCC row 에 anchor + 영향 architecture
+  파일 (external-tracking-mapping, github-side-effect-timeline) 추가
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+## Task 9: 최종 정합 확인
 
 **Files:** (변경 없음 — 검증만)
 
@@ -663,9 +820,9 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 Run:
 ```bash
-git log --oneline -8
+git log --oneline -10
 ```
-Expected: 본 plan 이 만든 7 개 commit (Task 1-7) 가 모두 보임.
+Expected: 본 plan 이 만든 8 개 commit (Task 1-8) 가 모두 보임.
 
 - [ ] **Step 2: spec 의 §6 키워드가 contract / architecture 에 모두 등장하는지 확인**
 
@@ -679,7 +836,15 @@ done
 ```
 Expected: 6 키워드 모두 1회 이상 출현.
 
-- [ ] **Step 3: 빌드 + 테스트 최종 확인**
+- [ ] **Step 3: 폐기된 표기가 모두 사라졌는지 확인**
+
+Run:
+```bash
+grep -rn -E 'Issue close → request_recover|GitHub label, comment, 또는 별도 form|application/human_signal\.sh' docs/contracts docs/architecture
+```
+Expected: 출력 없음 (모두 0 매칭). 폐기 문구 잔존 시 본 plan 의 Task 4·5 가 미완.
+
+- [ ] **Step 4: 빌드 + 테스트 최종 확인**
 
 Run:
 ```bash
@@ -687,6 +852,6 @@ cd /Users/macpro/dev/llm-team && npm run typecheck && npm test
 ```
 Expected: 통과.
 
-- [ ] **Step 4: Plan 1 종료 보고**
+- [ ] **Step 5: Plan 1 종료 보고**
 
-Plan 의 모든 task 가 commit 으로 이어졌고 회귀 없음 확인. 후속 plan (component 구현) 의 prerequisite 인 contract 정합이 닫힘.
+Plan 의 모든 task 가 commit 으로 이어졌고 회귀 없음 확인. 후속 plan (component 구현, FU-1~FU-9 — `.human/draft/2026-05-06-human-github-boundary-followups.md`) 의 prerequisite 인 contract 정합이 닫힘.
