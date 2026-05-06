@@ -149,7 +149,7 @@ Caller                       Agent (forge / sentinel)         Persistent Store  
 
 ```text
 ... inner session TIMEOUT 또는 ABANDONED (no_progress / regression / scope_violation)
-   ├─ SliceMerge SM_DRAFT → SM_CLOSED ([SOC-SLICE-MERGE Flow step 7](../contracts/state-and-operation-contract.md#SOC-SLICE-MERGE))
+   ├─ SliceMerge SM_DRAFT → SM_CLOSED ([SOC-SLICE-MERGE Flow step 8](../contracts/state-and-operation-contract.md#SOC-SLICE-MERGE))
    ├─ Slice SLICE_BLOCKED
    ├─ workspace GC (SM_CLOSED 진입 시)
    └─ PR closed ─────────────────────────────────────────────────────────────────────────────────► PR (state=closed)
@@ -262,7 +262,7 @@ PR native review 가 SliceMerge state 를 직접 전이시키지 않는다. midd
 
 각 결정의 권위 anchor:
 
-- inner TIMEOUT / ABANDONED → [`SOC-DISPATCH-MATRIX`](../contracts/state-and-operation-contract.md#SOC-DISPATCH-MATRIX) inner tdd_build TIMEOUT / ABANDONED row, [`SOC-SLICE-MERGE`](../contracts/state-and-operation-contract.md#SOC-SLICE-MERGE) Flow step 7.
+- inner TIMEOUT / ABANDONED → [`SOC-DISPATCH-MATRIX`](../contracts/state-and-operation-contract.md#SOC-DISPATCH-MATRIX) inner tdd_build TIMEOUT / ABANDONED row, [`SOC-SLICE-MERGE`](../contracts/state-and-operation-contract.md#SOC-SLICE-MERGE) Flow step 8.
 - middle request_changes single-step → [`SOC-DISPATCH-MATRIX`](../contracts/state-and-operation-contract.md#SOC-DISPATCH-MATRIX) middle review CONVERGED `request_changes` row.
 - workspace GC 정책 → [`persistence-layout.md` §7](persistence-layout.md).
 - Lease 회수 → [`RGC-LEASE-KINDS`](../contracts/reliability-and-gate-contract.md#RGC-LEASE-KINDS), [`reliability-and-gate-contract.md#RGC-FAILURE`](../contracts/reliability-and-gate-contract.md#RGC-FAILURE).

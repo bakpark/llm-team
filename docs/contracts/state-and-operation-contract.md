@@ -414,7 +414,7 @@ session 의 (state, final_verdict) tuple 이 다음 dispatch 분기를 결정한
 
 ### Cardinality
 
-1 Slice : N SliceMerge 인스턴스 (시간순). 한 Slice 의 active SliceMerge 는 항상 1. SM_CLOSED / SM_MERGED 가 된 SliceMerge 는 동일 Slice 의 후속 SliceMerge 와 audit chain (`SliceMerge → review_session_id → SessionTurn[] → inner_session_id → ...`) 으로 연결되며 동시 활성화되지 않는다. 후속 SliceMerge 의 middle review session 은 advisory `prior_review_context` (`agent-and-context-contract.md#AGC-SESSION-INPUT` §) 로 직전 인스턴스의 verdict 를 동봉할 수 있다.
+1 Slice : N SliceMerge 인스턴스 (시간순). 한 Slice 의 active SliceMerge 는 항상 1. SM_CLOSED / SM_MERGED 가 된 SliceMerge 는 동일 Slice 의 후속 SliceMerge 와 audit chain (`SliceMerge → review_session_id → SessionTurn[] → inner_session_id → ...`) 으로 연결되며 동시 활성화되지 않는다. 후속 SliceMerge 의 middle review session 은 advisory `prior_review_context` (`agent-and-context-contract.md#AGC-SESSION-INPUT` 의 `prior_review_context` advisory slot) 로 직전 인스턴스의 verdict 를 동봉할 수 있다.
 
 ### SliceMerge Schema
 
@@ -440,8 +440,8 @@ SliceMerge {
 
 각 SliceMerge 인스턴스의 schema 필드는 state 별로 다음과 같이 채워진다 (필드 자체는 schema 와 동일 — 본 절은 가용성 timing 만 명시).
 
-- `SM_DRAFT` 동안: `inner_session_id` = 현재 inner session id, `review_session_id` = null, `verification_run_id` = 가장 최근 inner turn 의 verification id 또는 null, `pre_merge_workspace_revision` = 가장 최근 `workspace_commit` (mutable, turn 마다 갱신), `merge_revision` = null.
-- `SM_READY_FOR_REVIEW` 진입 시: `pre_merge_workspace_revision` 은 inner CONVERGED 시점의 commit 으로 freeze. `review_session_id` 는 middle review session 시작 시 채움.
+- `SM_DRAFT` 동안: `inner_session_id` = 현재 inner session id, `review_session_id` = null, `verification_run_id` = 가장 최근 inner turn 의 verification id 또는 null, `pre_merge_workspace_revision` = SliceMerge 생성 시점의 trunk HEAD (rebase base; trunk drift 시 mutable — `#SOC-MERGE-POLICY`), `merge_revision` = null. inner build 의 latest workspace_commit 자체는 `SessionTurn.workspace_commit` 이 보유하며 SliceMerge schema 가 직접 추적하지 않는다 — `inner_session_id` 를 통해 access.
+- `SM_READY_FOR_REVIEW` 진입 시: `pre_merge_workspace_revision` 은 inner CONVERGED 시점의 trunk HEAD 로 freeze (SM_STALE 회복 시 갱신 가능). `review_session_id` 는 middle review session 시작 시 채움.
 - `SM_APPROVED` 진입 시: `verification_run_id` 는 trunk rebase 후 재verify 결과로 갱신.
 - `SM_MERGED` 진입 시: `merge_revision` = trunk SHA after merge. `merged_at`, `merged_by_caller_id` 채움.
 - 모든 terminal state (`SM_MERGED` / `SM_CLOSED`): 해당 시점의 모든 필드 immutable.
@@ -460,14 +460,14 @@ SM_DRAFT                    (inner session 진행 중)
 
 ### SliceMerge Flow (Slice 와 정합)
 
-1. Slice SLICE_READY → SLICE_BUILDING 진입 시 Caller (`llm-team.md` Architecture §3) 가 SliceMerge `SM_DRAFT` 를 생성하고 draft PR 을 open 한다 (`docs/architecture/external-tracking-mapping.md` §4). 이후 inner session 의 매 turn 마다 `workspace_commit` 을 draft PR 에 push 하여 in-loop 가시성을 유지한다.
-1a. Inner session CONVERGED (final_verdict=tests_green) → SliceMerge `SM_DRAFT → SM_READY_FOR_REVIEW` 전이 + draft PR ready 화. Slice SLICE_BUILDING → SLICE_REVIEWING.
-2. Middle review session 시작 — 입력은 SliceMerge + inner session_log.
-3. Middle CONVERGED (final_verdict=approve) → SM_APPROVED → Slice SLICE_REVIEWING → SLICE_INTEGRATING → Caller trunk rebase + verification 재실행.
-4. Clean → SM_MERGED → Slice SLICE_VALIDATED.
-5. Conflict / verification fail → SM_STALE → Slice SLICE_REVIEWING 유지 (재호출 대기). 한도 내 자동 verification 재실행 → pass 시 SM_READY_FOR_REVIEW 복귀, fail 시 한도 초과 시 Slice SLICE_BLOCKED.
-6. Middle CONVERGED (final_verdict=request_changes) → SM_REQUEST_CHANGES → SM_CLOSED. Slice SLICE_REVIEWING → SLICE_BUILDING 회수, 새 inner build session 시작 (step 1 부터 새 SliceMerge 인스턴스).
-7. Inner session TIMEOUT / ABANDONED (final_verdict=`no_progress` / `regression` / `scope_violation`) → SliceMerge `SM_DRAFT → SM_CLOSED` + draft PR close. Slice SLICE_BLOCKED. 후속 사람 결정으로 Slice 가 SLICE_READY 로 재진입 시 step 1 부터 새 SliceMerge 인스턴스 생성 (audit chain 으로 직전 SM_CLOSED 와 연결).
+1. Slice 가 SLICE_BUILDING 으로 진입할 때마다 (initial `SLICE_READY → SLICE_BUILDING`, rebuild `SLICE_REVIEWING → SLICE_BUILDING` (step 7), rebuild from blocked `SLICE_BLOCKED → SLICE_READY → SLICE_BUILDING` (step 8)) Caller (`llm-team.md` Architecture §3) 가 새 SliceMerge 인스턴스 `SM_DRAFT` 를 생성하고 draft PR 을 open 한다 (`docs/architecture/external-tracking-mapping.md` §4). 이후 inner session 의 매 turn 마다 `workspace_commit` 을 draft PR 에 push 하여 in-loop 가시성을 유지한다.
+2. Inner session CONVERGED (final_verdict=tests_green) → SliceMerge `SM_DRAFT → SM_READY_FOR_REVIEW` 전이 + draft PR ready 화. Slice SLICE_BUILDING → SLICE_REVIEWING.
+3. Middle review session 시작 — 입력은 SliceMerge + inner session_log.
+4. Middle CONVERGED (final_verdict=approve) → SM_APPROVED → Slice SLICE_REVIEWING → SLICE_INTEGRATING → Caller trunk rebase + verification 재실행.
+5. Clean → SM_MERGED → Slice SLICE_VALIDATED.
+6. Conflict / verification fail → SM_STALE → Slice SLICE_REVIEWING 유지 (재호출 대기). 한도 내 자동 verification 재실행 → pass 시 SM_READY_FOR_REVIEW 복귀, fail 시 한도 초과 시 Slice SLICE_BLOCKED.
+7. Middle CONVERGED (final_verdict=request_changes) → SM_REQUEST_CHANGES → SM_CLOSED. Slice SLICE_REVIEWING → SLICE_BUILDING 회수 → step 1 재진입 (새 SliceMerge 인스턴스 SM_DRAFT 생성 + draft PR open + 새 inner build session 시작).
+8. Inner session TIMEOUT / ABANDONED (final_verdict=`no_progress` / `regression` / `scope_violation`) → SliceMerge `SM_DRAFT → SM_CLOSED` + draft PR close. Slice SLICE_BLOCKED. 후속 사람 결정으로 Slice 가 SLICE_READY 로 재진입 시 step 1 재진입 (새 SliceMerge 인스턴스 — audit chain 으로 직전 SM_CLOSED 와 연결).
 
 ### Audit Chain
 
@@ -584,7 +584,7 @@ intake 는 Agent 호출이 아니다. Caller 단독 operational write 이며 다
 
 slice 의 inner build session (`#SOC-SLICE-LIFECYCLE`) 자체는 inner loop session 이지만, slice state 전이의 lifecycle 은 middle loop 의 책임이다.
 
-- **Pre-action**: Slice 가 `SLICE_READY → SLICE_BUILDING` 진입 시 Caller 가 SliceMerge `SM_DRAFT` 생성 + draft PR open 을 단일 트랜잭션으로 수행한다 (`#SOC-SLICE-MERGE` Flow step 1, `#SOC-DISPATCH-MATRIX` 의 `Slice promotion` row).
+- **Pre-action**: Slice 가 SLICE_BUILDING 으로 진입할 때마다 (initial `SLICE_READY → SLICE_BUILDING` 또는 rebuild — middle review request_changes (Flow step 7) 또는 SLICE_BLOCKED 에서의 사람 결정 후 (Flow step 8)) Caller 가 새 SliceMerge 인스턴스 `SM_DRAFT` 생성 + draft PR open 을 단일 트랜잭션으로 수행한다 (`#SOC-SLICE-MERGE` Flow step 1, `#SOC-DISPATCH-MATRIX` 의 `Slice → SLICE_BUILDING entry` row).
 - **Post-action (CONVERGED tests_green)**: SliceMerge `SM_DRAFT → SM_READY_FOR_REVIEW` 전이 + PR ready 화.
 - **Post-action (TIMEOUT / ABANDONED)**: SliceMerge `SM_DRAFT → SM_CLOSED` + draft PR close. Slice `SLICE_BLOCKED`.
 
@@ -687,12 +687,12 @@ session 종착 transition 은 `application/dialogue_coordinator.sh` 가 (state, 
 | Slot promotion (spec_approved → delivery) | (Caller only) | — | milestone `M_DELIVERY_PLANNING` (Delivery slot 점유, promotion guard 통과 시) |
 | outer Planning | CONVERGED | `plan_accept` | milestone `M_DELIVERY_BUILDING`, slices 영속화, READY slice → SLICE_READY |
 | outer Planning | CONVERGED | `request_changes` | milestone `M_DELIVERY_PLANNING` 유지, lead 재호출 |
-| Slice promotion (SLICE_READY → SLICE_BUILDING) | (Caller only) | — | SliceMerge `SM_DRAFT` 생성 + draft PR open (`docs/architecture/external-tracking-mapping.md` §4) |
+| Slice → SLICE_BUILDING entry (initial `SLICE_READY → SLICE_BUILDING` 또는 rebuild `SLICE_REVIEWING → SLICE_BUILDING`/`SLICE_BLOCKED → SLICE_READY → SLICE_BUILDING`; 각각 새 inner build session 을 시작) | (Caller only) | — | 새 SliceMerge 인스턴스 `SM_DRAFT` 생성 + draft PR open (`docs/architecture/external-tracking-mapping.md` §4) |
 | inner tdd_build | CONVERGED | `tests_green` | slice `SLICE_BUILDING → SLICE_REVIEWING`, SliceMerge `SM_DRAFT → SM_READY_FOR_REVIEW` |
 | inner tdd_build | TIMEOUT | (n/a) | slice `SLICE_BLOCKED`, SliceMerge `SM_DRAFT → SM_CLOSED` + draft PR close |
 | inner tdd_build | ABANDONED | `no_progress`/`regression`/`scope_violation` | slice `SLICE_BLOCKED`, SliceMerge `SM_DRAFT → SM_CLOSED` + draft PR close |
 | middle review | CONVERGED | `approve` | slice `SLICE_REVIEWING → SLICE_INTEGRATING`, SliceMerge `SM_APPROVED`. trunk rebase + verification 후 `SM_MERGED` + slice `SLICE_VALIDATED` |
-| middle review | CONVERGED | `request_changes` | slice `SLICE_REVIEWING → SLICE_BUILDING`, SliceMerge `SM_REQUEST_CHANGES → SM_CLOSED`, 새 inner session 시작 |
+| middle review | CONVERGED | `request_changes` | slice `SLICE_REVIEWING → SLICE_BUILDING`, SliceMerge `SM_REQUEST_CHANGES → SM_CLOSED`. `Slice → SLICE_BUILDING entry` row 가 다시 dispatch 되어 새 SliceMerge 인스턴스 `SM_DRAFT` 생성 + draft PR open + 새 inner build session 시작 |
 | middle review | AWAITING_REVALIDATION | (n/a) | slice `SLICE_REVIEWING` 유지, SliceMerge `SM_STALE`. Caller verification 재실행 — pass 시 `SM_READY_FOR_REVIEW` 복귀, fail 한도 초과 시 SLICE_BLOCKED |
 | middle review | TIMEOUT | (n/a) | slice `SLICE_BLOCKED` |
 | outer Validation | CONVERGED | `validation_pass` | milestone `M_DONE`, Milestone CP merged, Context Summary 영속화, Delivery slot 해제 |
