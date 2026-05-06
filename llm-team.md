@@ -21,7 +21,7 @@
 | `docs/contracts/target-config-contract.md` | AgentProfile 레지스트리, loop policy, slice class rule, dual-track 정책, refactor metric, invariant enforcement 등급, lease TTL, runner 매핑을 정의한다. |
 | `docs/contracts/agent-runner-port-contract.md` | agent runner 포트 시그니처, exit 분류, idempotency 3-scope (turn / session-outcome / merge)를 정의한다. |
 
-`docs/architecture/` 등 다른 문서는 구현 또는 설명 문서로 간주한다. 그 문서들은 본 문서와 contract 문서를 보완할 수 있지만, override하지 않는다.
+`docs/architecture/` 등 다른 문서는 구현 또는 설명 문서로 간주한다. 그 문서들은 본 문서와 contract 문서를 보완할 수 있지만, override하지 않는다. 예: [`docs/architecture/agent-domain-consumer-guide.md`](docs/architecture/agent-domain-consumer-guide.md) 는 agent self-fetch manifest 의 *소비 측 권고* 만 다루는 non-normative 가이드다 — manifest validity 를 정의하지 않으며, 권위는 [`docs/contracts/README.md#CONTRACT-GLOSSARY`](docs/contracts/README.md#CONTRACT-GLOSSARY) (어휘) + [`docs/contracts/agent-and-context-contract.md#AGC-CONTEXT-MANIFEST`](docs/contracts/agent-and-context-contract.md#AGC-CONTEXT-MANIFEST) (manifest 구성) 가 각각 단일 유지한다.
 
 ---
 
