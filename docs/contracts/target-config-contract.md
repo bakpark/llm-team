@@ -101,7 +101,9 @@ legacy `agent_runner.by_role` 키는 폐기되었다.
 
 `human_team` 캐시 미스 + GitHub Teams API 실패 시 drain 은 fail-closed (envelope 큐 진입 보류, backoff 재시도). 한도 초과 시 RGC-NOTIFICATION 운영 알림.
 
-`control_issue_number` 와 `contract_change_issue_number` 가 각각 1개 Issue 만 가리키는 이유는 외부 surface 단일 권위 보장이다. 다중 Issue 라우팅은 미도입.
+`control_issue_number` 와 `contract_change_issue_number` 가 각각 1개 Issue 만 가리키는 이유는 외부 surface 단일 권위 보장이다. 다중 Issue 라우팅은 미도입. 두 키는 서로 달라야 한다 (같은 Issue 번호 시 라우팅 모호 → schema reject).
+
+**Block 자체의 optionality**: contract 정의상 `human_team` / `control_issue_number` / `contract_change_issue_number` 는 필수다. 다만 본 spec 의 runtime consumer (`human_signal_drain` / `signal_dispatch` / `drift_observer`) 가 미구현 상태이므로, Zod schema 는 v1 한정으로 `target.governance` block 자체를 optional 로 둔다 — block 부재 시 component 들은 no-op 으로 동작한다. 후속 plan 에서 component 를 도입하면 block 을 required 로 승격한다.
 
 <a id="TCC-LOOP-POLICIES"></a>
 ## TCC-LOOP-POLICIES: Loop Policies

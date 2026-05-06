@@ -25,7 +25,15 @@ export const Governance = z
     human_team_cache_ttl_seconds: z.number().int().positive().default(300),
     unauthorized_author_alert: z.boolean().default(false),
   })
-  .strict();
+  .strict()
+  .refine(
+    (g) => g.control_issue_number !== g.contract_change_issue_number,
+    {
+      message:
+        "control_issue_number and contract_change_issue_number must differ",
+      path: ["contract_change_issue_number"],
+    },
+  );
 
 export type Governance = z.infer<typeof Governance>;
 

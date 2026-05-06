@@ -13,7 +13,7 @@ adapters/
 
 새 어댑터 (예: `qwen36`, `gpt55`, `github_human_signal`) 는 `adapters/llm_runner/<id>.sh` 로 추가한다. 어댑터 식별자는 [`docs/contracts/target-config-contract.md#TCC-AGENT-PROFILES`](../contracts/target-config-contract.md#TCC-AGENT-PROFILES) 의 `agent_profiles.<id>.runner` 값과 일치해야 한다.
 
-`human` AgentProfile 의 runner 는 사람 신호 입력 어댑터 (예: `github_human_signal`) 로, GitHub label/comment 같은 외부 governance/input write 를 contribution envelope 으로 변환한다.
+`human` AgentProfile 의 runner 는 사람 신호 입력 어댑터 (예: `github_human_signal`) 로, GitHub Issue comment command (REST `/issues/{n}/comments`, node_id prefix `IC_`) 입력을 contribution envelope 으로 변환한다 ([`사람·GitHub 경계 spec`](../superpowers/specs/2026-05-06-human-github-boundary-contract-design.md) §4.1).
 
 ## 2. 진입 함수와 포트 시그니처 매핑
 

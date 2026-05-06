@@ -194,4 +194,58 @@ describe("target.governance", () => {
     const cfg = parseTargetConfig({ agent_profiles: baseProfiles });
     expect(cfg.governance).toBeUndefined();
   });
+
+  it("rejects negative human_team_cache_ttl_seconds", () => {
+    expect(() =>
+      parseTargetConfig({
+        agent_profiles: baseProfiles,
+        governance: {
+          human_team: "myorg/approvers",
+          control_issue_number: 1,
+          contract_change_issue_number: 2,
+          human_team_cache_ttl_seconds: -1,
+        },
+      }),
+    ).toThrow();
+  });
+
+  it("rejects non-integer issue numbers", () => {
+    expect(() =>
+      parseTargetConfig({
+        agent_profiles: baseProfiles,
+        governance: {
+          human_team: "myorg/approvers",
+          control_issue_number: 1.5,
+          contract_change_issue_number: 2,
+        },
+      }),
+    ).toThrow();
+  });
+
+  it("rejects empty signal_command_prefix", () => {
+    expect(() =>
+      parseTargetConfig({
+        agent_profiles: baseProfiles,
+        governance: {
+          human_team: "myorg/approvers",
+          control_issue_number: 1,
+          contract_change_issue_number: 2,
+          signal_command_prefix: "",
+        },
+      }),
+    ).toThrow();
+  });
+
+  it("rejects identical control_issue_number and contract_change_issue_number", () => {
+    expect(() =>
+      parseTargetConfig({
+        agent_profiles: baseProfiles,
+        governance: {
+          human_team: "myorg/approvers",
+          control_issue_number: 7,
+          contract_change_issue_number: 7,
+        },
+      }),
+    ).toThrow();
+  });
 });
