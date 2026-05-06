@@ -30,7 +30,7 @@ adapters/
 | `session_context_ref` | 직전 turn_log_snapshot + 직전 verification_result 합성 본문의 영속 위치 |
 | `manifest_id` | `lib/context.sh` `context_manifest_id()` 가 반환한 식별자 |
 | `prompt_ref` | `prompts/` 하위 경로 (`(parent_loop, phase|purpose, contribution_kind, agent_profile)` 별 prompt) |
-| `agent_cwd` | `lib/worktree.sh` 가 만든 격리 디렉토리 경로 (inner tdd_build 한정) |
+| `agent_cwd` | `lib/worktree.sh` 가 만든 격리 디렉토리 경로 (inner tdd_build 한정 — mutable). 그 외 turn 의 workspace 적용 매트릭스는 [`worktree-pr-lifecycle.md`](worktree-pr-lifecycle.md) §3 |
 | `timeout` | 초 단위 정수 |
 | `idempotency_key` | Caller enrichment 가 합성 — per-turn scope (`session_id + turn_index + agent_profile_id + manifest_id + ...`) |
 

@@ -69,6 +69,8 @@ Issue body 의 machine block 은 [`AGC-ISSUE-BODY`](../contracts/agent-and-conte
 
 middle review session 의 SessionTurn 별 review_verdict 는 PR review (approve / request_changes) 또는 PR comment 로 push 된다. `next_action_request` 의 `addressed_to` 는 GitHub 의 review request 로는 mirror 하지 않는다 (mediated addressing — Caller 가 단독 routing).
 
+> SliceMerge 인스턴스 (시간순 1:N) 와 PR open / close timing 의 통합 sequence 는 [`worktree-pr-lifecycle.md`](worktree-pr-lifecycle.md) §4. signal direction (outbound mirror vs inbound `IC_` 단일 채널) 의 정리는 같은 문서 §5.
+
 ## 5. 동기화 메타 스키마
 
 `external_refs[]` entry 가 mirror 의 stale 검출과 회복을 가능하게 하려면 다음 메타가 필요하다.
@@ -103,6 +105,8 @@ external_refs[].sync_meta {
   - GitHub Issue comment (REST `/issues/{n}/comments`, GraphQL node_id prefix `IC_`) 의 strict line-prefix command 만이 [`RGC-SIGNALS`](../contracts/reliability-and-gate-contract.md#RGC-SIGNALS) envelope 로 변환되어 사람 governance signal 의 입력으로 인정된다. PR inline review comment (`PRRC_`) / PR review native (`PRR_`) / lifecycle 이벤트 (close/reopen/label/milestone state edit/draft toggle 등) 는 신호로 승격되지 않는다.
   - 비-신호 lifecycle 이벤트는 `drift_observer` 가 대응 `external_refs[].sync_status` 를 `conflict` 로 전이하고 ledger 에 `action_kind=external_observation` row 를 기록한다. 회복은 §7 의 `conflict` 회복 정책 (사람 governance signal) 으로 일원화한다 — 자동 reopen / state mutate 없음.
   - signal envelope 변환과 dispatch 는 [`사람·GitHub 경계 spec`](../superpowers/specs/2026-05-06-human-github-boundary-contract-design.md) 의 `human_signal_drain` / `signal_dispatch` 컴포넌트가 수행한다. envelope 검증을 통과한 `approve` / `reject` 는 [`RGC-HUMAN-CONTRIBUTION`](../contracts/reliability-and-gate-contract.md#RGC-HUMAN-CONTRIBUTION) 의 contribution 으로 enveloping 되어 dialogue_coordinator 가 평가한다.
+
+> outbound (review_verdict → PR review/comment, SliceMerge state → label/marker) 와 inbound (IC_ 단일 채널) 의 통합 정리는 [`worktree-pr-lifecycle.md`](worktree-pr-lifecycle.md) §5.
 
 ## 7. 회복 정책
 
