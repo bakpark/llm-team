@@ -37,8 +37,28 @@ export const Governance = z
 
 export type Governance = z.infer<typeof Governance>;
 
+export const Identity = z
+  .object({
+    target_id: z.string().min(1),
+    /**
+     * TCC-IDENTITY: abstract reference to the persistent store binding.
+     * Mirrors the contract field of the same name. Concrete adapter URIs
+     * (e.g. `fs:///path/to/workdir`) are resolved by the adapter, not this
+     * schema.
+     */
+    persistent_store_ref: z.string().min(1).optional(),
+    /** FS adapter hint when persistent_store_ref points at a local path. */
+    workdir_path: z.string().min(1).optional(),
+    audit_hash_seed: z.string().min(1).optional(),
+    label_prefix: z.string().min(1).optional(),
+  })
+  .strict();
+
+export type Identity = z.infer<typeof Identity>;
+
 export const TargetConfig = z
   .object({
+    identity: Identity,
     agent_profiles: z
       .object({
         atlas: ProfileCfg,

@@ -386,7 +386,7 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 | `SOC-DISPATCH-MATRIX` | spec-only | contract prose + `caller_dispatch.sh` | always_hard | 2026-05-05-loop ((state, final_verdict) tuple 분기) |
 | `SOC-RECOVERY-OPERATION` | partial | `application/recovery.sh` | always_hard | 2026-05-05-loop (session-stale / inner-no-progress / slice-merge-stale trigger 추가) |
 | `SOC-MERGE-POLICY` | spec-only | `lib/slice_merge.sh` (Stage 2) | always_hard (first-merger-wins) | 2026-05-05-loop (SliceMerge first-merger-wins) |
-| `SOC-IDEMPOTENCY` | partial | `application/caller_dispatch.sh`, `lib/ledger.sh` | always_hard | 2026-05-05-loop (3-scope 분리) |
+| `SOC-IDEMPOTENCY` | partial | `src/application/ledger.ts` (3-scope `idempotencyKey` compositor); 미도입 dispatch 는 추후 phase | always_hard | 2026-05-05-loop (3-scope 분리) |
 | `SOC-PHASE-RUN` ✕ | deprecated | `docs/history/legacy-phase-model/contracts/state-and-operation-contract.md` | stage_graded:legacy_writer=warn (Stage 5 block) | (deprecated 2026-05-05-loop) |
 
 ### Reliability and Gate
@@ -406,7 +406,7 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 | `RGC-FAILURE` | partial | `application/recovery.sh`, `scripts/cli/daemon.sh` | always_hard | 2026-05-05-loop (retry/escalation 운영 정책 매핑) |
 | `RGC-VERIFICATION` | active | `application/verification_runner.sh` + (Stage 2) `metric_run` 추가 | always_hard (deterministic_verification_authority) | 2026-05-05-loop (VerificationRun + MetricRun + required_evidence) |
 | `RGC-HUMAN-CONTRIBUTION` | spec-only | `application/human_signal.sh` (legacy-only catch-up needed) | always_hard (required human contribution) | 2026-05-05-loop (feature slice 한정 scope) |
-| `RGC-LEDGER` | spec-only | `lib/ledger.sh` rewrite (Stage 2). append-compatible: legacy row immutable, new row new schema, parser union read | always_hard (필수 필드) | 2026-05-05-loop (slice/session/turn/loop_kind/action_kind/final_verdict 추가) |
+| `RGC-LEDGER` | partial | `src/domain/schema/ledger.ts` (필수 필드 schema), `src/application/ledger.ts` (`FileLedger.appendTransition` + audit_hash chain), `src/domain/audit-hash.ts` (sha256 canonical-json [prevHash, row]) | always_hard (필수 필드) | 2026-05-05-loop (slice/session/turn/loop_kind/action_kind/final_verdict 추가) |
 | `RGC-PAUSE` | active | `lib/signals.sh`, `scripts/cli/control.sh`, `application/human_signal.sh` | always_hard | original |
 | `RGC-NOTIFICATION` | partial | `lib/notifier.sh`, `adapters/notifier/*` | n/a (push-only) | original |
 | `RGC-FAIRNESS` | partial | `application/ready_object.sh`, `scheduler/runner.sh` | stage_graded:fairness_violation=warn | 2026-05-05-loop (within-scope vs cross-slot 분리) |
@@ -436,7 +436,7 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 | Anchor | Status | Implementation Surface | Enforcement | Active Since |
 |---|---|---|---|---|
 | `TCC-SCOPE` | active | contract authority | n/a | 2026-05-05-loop (scope 확장) |
-| `TCC-IDENTITY` | active | `scripts/cli/target.sh`, `lib/ledger.sh` | always_hard (target_id 변경 invariant) | original |
+| `TCC-IDENTITY` | active | `src/config/target-schema.ts` (`Identity` block: target_id 필수, workdir_path / audit_hash_seed / label_prefix optional), `src/application/config-validator.ts` (process-startup 전수 검증) | always_hard (target_id 변경 invariant) | original |
 | `TCC-LEASE-CONFIG` | spec-only | `lib/config.sh` rewrite (Stage 2) | always_hard (TTL > 0) | 2026-05-05-loop (4 lease kind 분기) |
 | `TCC-ONBOARDING` | partial | `scripts/cli/target.sh`, `application/onboarding/*` | always_hard | 2026-05-05-loop (required_lib startup gate 추가) |
 | `TCC-AGENT-PROFILES` | spec-only | `lib/config.sh` rewrite (Stage 2) | always_hard (agent_profile abstraction) | phase-pivot |
