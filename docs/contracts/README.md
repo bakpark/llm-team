@@ -396,21 +396,21 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 | `RGC-SCOPE` | active | contract authority | n/a | original |
 | `RGC-WRITES` | active | `application/caller_dispatch.sh`, `application/human_signal.sh`, `lib/ports/*` | always_hard (caller_only_operational_write) | original |
 | `RGC-SIGNALS` | spec-only | `application/human_signal.sh` (legacy-only catch-up needed) | always_hard (envelope 검증) | 2026-05-05-loop (cross_milestone_amendment 등 신규 signal) |
-| `RGC-LEASE-KINDS` ★ | spec-only | `lib/lease.sh` rewrite (Stage 2) | always_hard (lease_acquisition_order, always_hard list) | 2026-05-05-loop |
-| `RGC-SLOT-LOCK` ★ | spec-only | `lib/lease.sh` + `dual_track_scheduler.sh` (Stage 4) | always_hard (short transaction) | 2026-05-05-loop |
+| `RGC-LEASE-KINDS` ★ | partial | `src/domain/schema/lease.ts` (4-kind discriminated union), `src/ports/lease.ts` (`LeasePort` claim/release/renew/sweepStale/list with CAS + monotonic token semantics), `src/adapters/lease/fs.ts` (`FsLease` — lockdir CAS + bumped seq token + leases/active + leases/records layout), `src/application/lease-acquisition-order.ts` (`assertCanAcquire` + `checkCanAcquire` outer→inner enforcement), `src/application/lease-ttl-resolver.ts` (TTL lookup chain). slot_lock 의 short transaction 강제 + 실제 wiring 은 phase 6a | always_hard (lease_acquisition_order, always_hard list) | 2026-05-05-loop |
+| `RGC-SLOT-LOCK` ★ | partial | `src/domain/schema/lease.ts` (`SlotLockLease` variant with milestone_id + slot_kind), `src/adapters/lease/fs.ts` (slot_lock 도 일반 lease CAS 경로 사용). short-transaction 강제 (LLM/verification 보유 금지) + atomic promotion 4단계는 phase 6a `dual_track_scheduler.ts` | always_hard (short transaction) | 2026-05-05-loop |
 | `RGC-PROMOTION-GUARD` ★ | spec-only | `dual_track_scheduler.sh` (Stage 4) | always_hard | 2026-05-05-loop |
 | `RGC-CROSS-SLOT-STALE` ★ | spec-only | `dialogue_coordinator.sh` (Stage 4) | stage_graded:telemetry_enrichment_missing=warn | 2026-05-05-loop |
 | `RGC-CROSS-SLOT-FAIRNESS` ★ | spec-only | `lib/lease.sh`, `scheduler/runner.sh` (Stage 4) | stage_graded:dual_slot_fairness=warn (Stage 5 block) | 2026-05-05-loop |
 | `RGC-DUAL-GATE-QUEUE` ★ | spec-only | `dual_track_scheduler.sh` (Stage 4) | always_hard (FIFO + idempotency) | 2026-05-05-loop |
-| `RGC-RECOVERY` | spec-only | `application/recovery.sh` (legacy-only catch-up needed) | always_hard | 2026-05-05-loop (loop-aware trigger) |
-| `RGC-FAILURE` | partial | `application/recovery.sh`, `scripts/cli/daemon.sh` | always_hard | 2026-05-05-loop (retry/escalation 운영 정책 매핑) |
+| `RGC-RECOVERY` | partial | `src/application/recovery.ts` (`runRecoverySweep` — 만료 lease 4 kind 감지 + ledger `recovered` row + session_lease 만료 시 SESSION_OPEN → AWAITING_REVALIDATION). slot_lock recovery + slice-merge-stale auto-retry + cross-slot stale 는 phase 5/6a 가 보강 | always_hard | 2026-05-05-loop (loop-aware trigger) |
+| `RGC-FAILURE` | partial | `src/application/failure-policy.ts` (`evaluateRetry` + `DEFAULT_RETRY_CONFIG` — no_progress/regression/scope_violation/middle_review/slice_merge_revalidation 한도 평가, 한도 초과 시 ESCALATED 분류), `src/cli/daemon.ts` (cycle-loop 의 sweep 진입점) | always_hard | 2026-05-05-loop (retry/escalation 운영 정책 매핑) |
 | `RGC-VERIFICATION` | partial | `src/domain/schema/verification.ts` (`VerificationRun` + `MetricRun` schemas), `src/ports/verification.ts` (`VerificationPort.runBuild/runTest/runLint/runMetric`), `src/adapters/verification/shell.ts` (실 실행), `src/adapters/verification/fake.ts` (테스트), `src/application/verification-runner.ts` (`runInnerVerification` — inner 동기 실행 + VerificationRun 영속). middle / outer 비동기 trigger 는 phase 3 | always_hard (deterministic_verification_authority) | 2026-05-05-loop (VerificationRun + MetricRun + required_evidence) |
 | `RGC-HUMAN-CONTRIBUTION` | spec-only | `application/human_signal.sh` (legacy-only catch-up needed) | always_hard (required human contribution) | 2026-05-05-loop (feature slice 한정 scope) |
 | `RGC-LEDGER` | partial | `src/domain/schema/ledger.ts` (필수 필드 schema), `src/application/ledger.ts` (`FileLedger.appendTransition` + audit_hash chain), `src/domain/audit-hash.ts` (sha256 canonical-json [prevHash, row]) | always_hard (필수 필드) | 2026-05-05-loop (slice/session/turn/loop_kind/action_kind/final_verdict 추가) |
 | `RGC-PAUSE` | active | `lib/signals.sh`, `scripts/cli/control.sh`, `application/human_signal.sh` | always_hard | original |
 | `RGC-NOTIFICATION` | partial | `lib/notifier.sh`, `adapters/notifier/*` | n/a (push-only) | original |
-| `RGC-FAIRNESS` | partial | `application/ready_object.sh`, `scheduler/runner.sh` | stage_graded:fairness_violation=warn | 2026-05-05-loop (within-scope vs cross-slot 분리) |
-| `RGC-DAEMON-STARTUP` | partial | `scripts/cli/daemon.sh` + acquisition order CI (Stage 2) | always_hard (atomic startup) | 2026-05-05-loop (acquisition order CI startup gate) |
+| `RGC-FAIRNESS` | partial | `src/application/fairness.ts` (`sortFairly` + `pickFairly` — within-scope oldest-ready-first + priority overrides, stable). cross-slot fairness 는 phase 6a `cross-slot-fairness.ts` | stage_graded:fairness_violation=warn | 2026-05-05-loop (within-scope vs cross-slot 분리) |
+| `RGC-DAEMON-STARTUP` | partial | `src/cli/daemon.ts` (`daemonMain` — per-role PID lockdir, recovery sweep on every cycle, SIGINT/SIGTERM graceful shutdown). acquisition order CI gate via `tests/conformance/phase-4.test.ts` exhaustive (held, requested) matrix. multi-process atomic 시작 + sibling 종료 정책은 phase 5/6a 가 보강 | always_hard (atomic startup) | 2026-05-05-loop (acquisition order CI startup gate) |
 | `RGC-PHASE-LEASE` ✕ | deprecated | `docs/history/legacy-phase-model/contracts/reliability-and-gate-contract.md` | stage_graded:legacy_writer=warn | (deprecated 2026-05-05-loop, 대체: RGC-LEASE-KINDS) |
 
 ### Knowledge
@@ -437,7 +437,7 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 |---|---|---|---|---|
 | `TCC-SCOPE` | active | contract authority | n/a | 2026-05-05-loop (scope 확장) |
 | `TCC-IDENTITY` | active | `src/config/target-schema.ts` (`Identity` block: target_id 필수, workdir_path / audit_hash_seed / label_prefix optional), `src/application/config-validator.ts` (process-startup 전수 검증) | always_hard (target_id 변경 invariant) | original |
-| `TCC-LEASE-CONFIG` | spec-only | `lib/config.sh` rewrite (Stage 2) | always_hard (TTL > 0) | 2026-05-05-loop (4 lease kind 분기) |
+| `TCC-LEASE-CONFIG` | partial | `src/config/target-schema.ts` (`LeaseConfig` block — `ttl_default_ms` / `ttl_by_lease_kind` / `ttl_by_agent_profile` / `ttl_by_phase` 모두 positive integer refinement), `src/application/lease-ttl-resolver.ts` (lookup chain: worker_override → ttl_by_phase → ttl_by_agent_profile → ttl_by_lease_kind → ttl_default → 60s hardcoded) | always_hard (TTL > 0) | 2026-05-05-loop (4 lease kind 분기) |
 | `TCC-ONBOARDING` | partial | `scripts/cli/target.sh`, `application/onboarding/*` | always_hard | 2026-05-05-loop (required_lib startup gate 추가) |
 | `TCC-AGENT-PROFILES` | spec-only | `lib/config.sh` rewrite (Stage 2) | always_hard (agent_profile abstraction) | phase-pivot |
 | `TCC-LOOP-POLICIES` ★ | spec-only | `lib/config.sh` rewrite + `dialogue_coordinator.sh` (Stage 2) | always_hard | 2026-05-05-loop |

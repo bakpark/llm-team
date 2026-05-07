@@ -37,6 +37,39 @@ export const Governance = z
 
 export type Governance = z.infer<typeof Governance>;
 
+/**
+ * TCC-LEASE-CONFIG (4-kind TTL chain). Phase 4 introduces this block.
+ *
+ * Lookup chain (highest precedence first):
+ *   worker_override (caller code) → ttl_by_phase[phase] →
+ *   ttl_by_agent_profile[profile] → ttl_by_lease_kind[kind] →
+ *   ttl_default → 60_000ms hardcoded fallback.
+ *
+ * Units are millis. Zero / negative are rejected by the schema.
+ */
+export const LeaseConfig = z
+  .object({
+    ttl_default_ms: z.number().int().positive().optional(),
+    ttl_by_lease_kind: z
+      .object({
+        slot_lock: z.number().int().positive().optional(),
+        slice_lease: z.number().int().positive().optional(),
+        session_lease: z.number().int().positive().optional(),
+        turn_lease: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    ttl_by_agent_profile: z
+      .record(z.string().min(1), z.number().int().positive())
+      .optional(),
+    ttl_by_phase: z
+      .record(z.string().min(1), z.number().int().positive())
+      .optional(),
+  })
+  .strict();
+
+export type LeaseConfig = z.infer<typeof LeaseConfig>;
+
 export const Identity = z
   .object({
     target_id: z.string().min(1),
@@ -68,6 +101,7 @@ export const TargetConfig = z
       })
       .strict(),
     governance: Governance.optional(),
+    lease: LeaseConfig.optional(),
   })
   .strict();
 
