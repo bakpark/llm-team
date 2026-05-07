@@ -155,13 +155,16 @@ async function main(argv: readonly string[]): Promise<number> {
   process.once("SIGINT", onSig);
   process.once("SIGTERM", onSig);
 
+  // Hoisted so the finally block can release any leases the daemon still
+  // holds at shutdown (P2-12).
+  const lease = new FsLease({ store, clock });
+
   try {
     const ledger = new FileLedger({
       store,
       logger,
       auditHashSeed: cfg.identity.audit_hash_seed,
     });
-    const lease = new FsLease({ store, clock });
 
     const llmRunner = args.fakeLlmFixtures
       ? new AdapterRunnerPort(new FakeAdapter({ fixtureDir: args.fakeLlmFixtures }))
@@ -234,6 +237,8 @@ async function main(argv: readonly string[]): Promise<number> {
             targetId: cfg.identity.target_id,
             environmentFingerprint: `node${process.version}`,
             reverifyTestCommands: testCommands,
+            lease,
+            leaseConfig: cfg.lease,
           });
           outcomeJson = JSON.stringify({ role: args.role, outcome });
           break;
@@ -251,6 +256,25 @@ async function main(argv: readonly string[]): Promise<number> {
     } while (!interrupted);
     return 0;
   } finally {
+    // P2-12 fix (PR #63 review): graceful shutdown — release any leases
+    // we still hold so sibling daemons don't have to wait out the TTL.
+    // Per-call leases (e.g. session_lease inside dialogue-coordinator) are
+    // already released via try/finally in the application layer; this
+    // catches role-level leases the daemon held (none in phase-4, but the
+    // hook is in place for phase-5 wire-up).
+    try {
+      const held = await lease.list();
+      for (const l of held) {
+        if (l.worker_id === args.callerId) {
+          await lease.release({
+            leaseId: l.lease_id,
+            leaseToken: l.lease_token,
+          });
+        }
+      }
+    } catch {
+      // best-effort
+    }
     try {
       rmSync(lockPath, { recursive: true, force: true });
     } catch {

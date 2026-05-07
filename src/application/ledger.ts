@@ -175,7 +175,18 @@ export class FileLedger implements LedgerAppender {
           `audit_hash recompute mismatch at line ${i + 1}: expected ${expected}, got ${row.audit_hash}`,
         );
       head = row.audit_hash;
-      if (row.result === "applied") appliedKeys.add(row.idempotency_key);
+      // PR #63 review P0-3: terminal results that represent successful
+      // recovery / rollback / escalation must also dedupe their
+      // idempotency_key. Otherwise a recurring sweep would re-emit the
+      // same `recover` row forever (concurrent daemons + the
+      // sweep-clear-after-ledger ordering both produce repeats).
+      if (
+        row.result === "applied" ||
+        row.result === "recovered" ||
+        row.result === "rolled_back" ||
+        row.result === "escalated"
+      )
+        appliedKeys.add(row.idempotency_key);
     }
     return { head, appliedKeys };
   }

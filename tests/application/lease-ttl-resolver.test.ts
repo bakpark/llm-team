@@ -59,7 +59,7 @@ describe("resolveLeaseTtl", () => {
     ).toEqual({ ttlMs: 600_000, source: "by_phase" });
   });
 
-  it("worker override beats every config", () => {
+  it("worker override beats every config (PR #63 P1-9: provenance tagged worker_override)", () => {
     expect(
       resolveLeaseTtl({
         leaseKind: "session_lease",
@@ -69,6 +69,6 @@ describe("resolveLeaseTtl", () => {
           ttl_by_lease_kind: { session_lease: 60_000 },
         },
       }),
-    ).toEqual({ ttlMs: 5_000, source: "by_phase" });
+    ).toEqual({ ttlMs: 5_000, source: "worker_override" });
   });
 });

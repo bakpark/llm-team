@@ -36,11 +36,11 @@ export interface ResolvedTtl {
 }
 
 export function resolveLeaseTtl(input: ResolveTtlInput): ResolvedTtl {
+  // PR #63 review P1-9: worker_override is its own provenance — operator
+  // forensic queries cannot distinguish it from `by_phase` if we collapse
+  // them. The schema enum now carries `worker_override`.
   if (input.workerOverrideMs != null && input.workerOverrideMs > 0)
-    return { ttlMs: input.workerOverrideMs, source: "by_phase" };
-  // ^ worker overrides are rare; we tag them as `by_phase` so the lease
-  //   record's source enum stays in the canonical 5 values. Operators who
-  //   need richer provenance can extend the schema later.
+    return { ttlMs: input.workerOverrideMs, source: "worker_override" };
 
   const cfg = input.leaseConfig;
   if (cfg != null) {

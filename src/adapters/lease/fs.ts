@@ -54,21 +54,35 @@ export class FsLease implements LeasePort {
     const seqPath = `${SEQ_DIR}/${safeKey}`;
     return this.store.withFileLock(activePath, async () => {
       const existing = await this.store.readText(activePath);
-      if (existing != null) {
+      // P0-5 fix (PR #63 review): corrupt record disambiguation. The active
+      // file is one of three states:
+      //   - missing or empty string → no live lease (proceed to claim)
+      //   - parses as valid Lease   → live (refuse with claim_failed)
+      //   - present but unparseable → CORRUPT. Refuse claim and surface the
+      //     condition instead of silently overwriting. The sweeper has no
+      //     way to clear a corrupt record (it cannot determine expiry from
+      //     a malformed body), so the only safe behaviour is to require
+      //     operator intervention. Returning claim_failed with a sentinel
+      //     existingHolder makes the failure visible in logs.
+      if (existing != null && existing.length > 0) {
         let parsed: LeaseT | null = null;
         try {
           parsed = Lease.parse(JSON.parse(existing));
         } catch {
-          // Corrupt active record — let recovery clear it. Treat as held.
+          parsed = null;
         }
         if (parsed != null) {
-          // Live record — refuse claim. Sweeper handles expiry.
           return {
             result: "claim_failed" as const,
             existingHolder: parsed.worker_id,
             existingLeaseId: parsed.lease_id,
           };
         }
+        return {
+          result: "claim_failed" as const,
+          existingHolder: "<corrupt-active-record>",
+          existingLeaseId: `<corrupt:${safeKey}>`,
+        };
       }
       const seq = await this.bumpSeq(seqPath);
       const leaseId = newMonotonicId(this.clock.now());
@@ -156,6 +170,12 @@ export class FsLease implements LeasePort {
       }
       if (activeLease.lease_id !== record.lease_id)
         return { renewed: false, newExpiresAt: null };
+      // P1-7 fix (PR #63 review): refuse renew if the lease is already past
+      // expires_at. Otherwise a stale holder could indefinitely defer the
+      // sweeper by renewing post-expiry, creating a livelock.
+      const liveExp = Date.parse(activeLease.expires_at);
+      if (Number.isFinite(liveExp) && liveExp <= this.clock.now())
+        return { renewed: false, newExpiresAt: null };
       const newExpiresAt = isoFromMs(this.clock.now() + input.newTtlMs);
       const updated = { ...activeLease, expires_at: newExpiresAt, ttl_ms: input.newTtlMs };
       const body = JSON.stringify(updated, null, 2);
@@ -166,33 +186,84 @@ export class FsLease implements LeasePort {
   }
 
   async sweepStale(input?: SweepStaleInput): Promise<LeaseT[]> {
+    // P0-1 fix (PR #63 review): TOCTOU-safe sweep. The previous version read
+    // the active file outside the lock, judged expiry, then cleared inside
+    // the lock without re-checking. A `release → re-claim` racing in between
+    // those two steps would have its fresh lease destroyed. Now we re-read
+    // INSIDE the lock and only clear if the lease_id we observed initially
+    // is still the one in the active slot.
     const now = (input?.now ?? new Date(this.clock.now())).getTime();
     const wanted = input?.kinds == null ? null : new Set<LeaseKind>(input.kinds);
     const expired: LeaseT[] = [];
     const entries = await safeList(this.store, ACTIVE_DIR);
     for (const name of entries) {
       if (!name.endsWith(".json")) continue;
-      const body = await this.store.readText(`${ACTIVE_DIR}/${name}`);
-      if (body == null || body.length === 0) continue;
-      let lease: LeaseT;
+      const probe = await this.store.readText(`${ACTIVE_DIR}/${name}`);
+      if (probe == null || probe.length === 0) continue;
+      let probeLease: LeaseT;
       try {
-        lease = Lease.parse(JSON.parse(body));
+        probeLease = Lease.parse(JSON.parse(probe));
       } catch {
         continue;
       }
-      if (wanted != null && !wanted.has(lease.lease_kind)) continue;
-      const exp = Date.parse(lease.expires_at);
-      if (Number.isFinite(exp) && exp < now) {
-        expired.push(lease);
-        // Atomically clear the active slot so the next claim succeeds. The
-        // record under leases/records/ stays for audit replay.
-        const activePath = `${ACTIVE_DIR}/${name}`;
-        await this.store.withFileLock(activePath, async () => {
-          await this.store.writeAtomic(activePath, "");
-        });
-      }
+      if (wanted != null && !wanted.has(probeLease.lease_kind)) continue;
+      const probeExp = Date.parse(probeLease.expires_at);
+      if (!Number.isFinite(probeExp) || probeExp >= now) continue;
+      // Candidate — confirm under lock so a concurrent re-claim/renew is not
+      // lost.
+      const activePath = `${ACTIVE_DIR}/${name}`;
+      const swept = await this.store.withFileLock(activePath, async () => {
+        const live = await this.store.readText(activePath);
+        if (live == null || live.length === 0) return null;
+        let liveLease: LeaseT;
+        try {
+          liveLease = Lease.parse(JSON.parse(live));
+        } catch {
+          return null;
+        }
+        // Same lease still occupying the slot AND still expired? Then clear.
+        if (liveLease.lease_id !== probeLease.lease_id) return null;
+        const liveExp = Date.parse(liveLease.expires_at);
+        if (!Number.isFinite(liveExp) || liveExp >= now) return null;
+        // P0-4 fix (PR #63 review): the caller (recovery sweeper) needs to
+        // emit a ledger row for each expired lease. We return the lease
+        // without clearing here — the caller is responsible for emitting
+        // the ledger row first, then calling `clearExpired` to drop the
+        // active slot. This reverses the previous "clear-then-ledger"
+        // ordering: a crash between ledger append and clear means the next
+        // sweep will see a duplicate ledger row (absorbed by the recover
+        // idempotency_key dedup) and try the clear again — no permanent
+        // loss.
+        return liveLease;
+      });
+      if (swept != null) expired.push(swept);
     }
     return expired;
+  }
+
+  /**
+   * Companion to `sweepStale`: clear the active slot for an already-
+   * acknowledged expired lease. Idempotent — clearing an already-empty
+   * slot is a no-op. The lease_id check guards against a re-claim that
+   * happened after sweepStale returned but before the caller dispatched
+   * the clear.
+   */
+  async clearExpired(lease: LeaseT): Promise<{ cleared: boolean }> {
+    const safeKey = safeKey1(lease.object_id);
+    const activePath = `${ACTIVE_DIR}/${safeKey}.json`;
+    return this.store.withFileLock(activePath, async () => {
+      const live = await this.store.readText(activePath);
+      if (live == null || live.length === 0) return { cleared: false };
+      let liveLease: LeaseT;
+      try {
+        liveLease = Lease.parse(JSON.parse(live));
+      } catch {
+        return { cleared: false };
+      }
+      if (liveLease.lease_id !== lease.lease_id) return { cleared: false };
+      await this.store.writeAtomic(activePath, "");
+      return { cleared: true };
+    });
   }
 
   async list(): Promise<LeaseT[]> {
@@ -211,6 +282,12 @@ export class FsLease implements LeasePort {
     return out;
   }
 
+  /**
+   * **MUST be called inside `withFileLock(activePath)`**. The seq counter
+   * shares the active-slot lock so two concurrent claims on the same
+   * object_id cannot both observe the same `n`. Callers outside `claim`
+   * must not invoke this directly.
+   */
   private async bumpSeq(seqPath: string): Promise<number> {
     const body = await this.store.readText(seqPath);
     let n = 0;

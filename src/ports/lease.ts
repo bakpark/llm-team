@@ -74,8 +74,20 @@ export interface LeasePort {
   claim(input: ClaimInput): Promise<ClaimResult>;
   release(input: ReleaseInput): Promise<{ released: boolean }>;
   renew(input: RenewInput): Promise<{ renewed: boolean; newExpiresAt: string | null }>;
-  /** Returns expired leases. Sweeper consumers do the actual recovery dispatch. */
+  /**
+   * Returns expired leases WITHOUT clearing them. The sweeper consumer is
+   * responsible for emitting the recover ledger row first (PR #63 review:
+   * ledger-before-clear ordering), then calling `clearExpired` to drop the
+   * active slot. A crash between ledger append and clear is recoverable —
+   * the next sweep observes the same expired lease, ledger duplicate dedup
+   * absorbs the row, clearExpired retries.
+   */
   sweepStale(input?: SweepStaleInput): Promise<Lease[]>;
+  /**
+   * Idempotently clear an already-acknowledged expired lease. Returns
+   * `cleared=false` when the slot is already empty or has been re-claimed.
+   */
+  clearExpired(lease: Lease): Promise<{ cleared: boolean }>;
   /** Diagnostic — list active leases (post-sweep snapshot). */
   list(): Promise<Lease[]>;
 }

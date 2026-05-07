@@ -33,6 +33,7 @@ const baseLeaseShape = {
   expires_at: z.string().datetime(),
   ttl_ms: z.number().int().positive(),
   ttl_source: z.enum([
+    "worker_override",
     "by_phase",
     "by_agent_profile",
     "by_lease_kind",

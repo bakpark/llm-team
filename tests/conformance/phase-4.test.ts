@@ -134,4 +134,24 @@ describe("Phase 4 — acquisition order CI gate (RGC-DAEMON-STARTUP §운영 진
       }
     }
   });
+
+  it("multi-held acquisition order — any held >= requested throws (PR #63 P1-10)", async () => {
+    const { assertCanAcquire } = await import(
+      "../../src/application/lease-acquisition-order.js"
+    );
+    // valid nested holdings
+    expect(() =>
+      assertCanAcquire(["slot_lock", "slice_lease"], "session_lease"),
+    ).not.toThrow();
+    expect(() =>
+      assertCanAcquire(["slot_lock", "slice_lease", "session_lease"], "turn_lease"),
+    ).not.toThrow();
+    // any inner held → outer claim must throw, even if outer is also held
+    expect(() =>
+      assertCanAcquire(["slot_lock", "session_lease"], "slice_lease"),
+    ).toThrow();
+    expect(() =>
+      assertCanAcquire(["slice_lease", "turn_lease"], "session_lease"),
+    ).toThrow();
+  });
 });

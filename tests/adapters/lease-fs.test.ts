@@ -132,7 +132,7 @@ describe("FsLease (4-kind CAS adapter)", () => {
     expect(Date.parse(renewed.newExpiresAt!)).toBe(ISO_BASE + 10_000 + 120_000);
   });
 
-  it("sweepStale returns expired and clears the active slot for re-claim", async () => {
+  it("sweepStale returns expired without clearing; clearExpired drops the slot (PR #63 P0-4)", async () => {
     const r1 = await env.lease.claim({
       leaseKind: "slice_lease",
       objectId: SLICE_ID,
@@ -147,7 +147,74 @@ describe("FsLease (4-kind CAS adapter)", () => {
     const expired = await env.lease.sweepStale();
     expect(expired.length).toBe(1);
     expect(expired[0]?.lease_id).toBe(r1.lease.lease_id);
-    // Re-claim succeeds because the active slot was cleared.
+    // Until clearExpired runs, the slot still holds the (expired) lease, so
+    // a fresh claim must fail. This guarantees ledger-before-clear ordering:
+    // a crash between sweepStale and clearExpired is recoverable on the
+    // next sweep.
+    const r2 = await env.lease.claim({
+      leaseKind: "slice_lease",
+      objectId: SLICE_ID,
+      workerId: "w2",
+      ttlMs: 60_000,
+      ttlSource: "ttl_default",
+      targetId: TARGET,
+      aux: { kind: "slice_lease", slice_id: SLICE_ID },
+    });
+    expect(r2.result).toBe("claim_failed");
+    // Now clear and retry.
+    const cleared = await env.lease.clearExpired(expired[0]!);
+    expect(cleared.cleared).toBe(true);
+    const r3 = await env.lease.claim({
+      leaseKind: "slice_lease",
+      objectId: SLICE_ID,
+      workerId: "w3",
+      ttlMs: 60_000,
+      ttlSource: "ttl_default",
+      targetId: TARGET,
+      aux: { kind: "slice_lease", slice_id: SLICE_ID },
+    });
+    expect(r3.result).toBe("acquired");
+  });
+
+  it("clearExpired is idempotent (already-cleared slot returns cleared=false)", async () => {
+    const r1 = await env.lease.claim({
+      leaseKind: "slice_lease",
+      objectId: SLICE_ID,
+      workerId: "w1",
+      ttlMs: 1_000,
+      ttlSource: "ttl_default",
+      targetId: TARGET,
+      aux: { kind: "slice_lease", slice_id: SLICE_ID },
+    });
+    if (r1.result !== "acquired") return;
+    env.clock.advance(2_000);
+    const expired = await env.lease.sweepStale();
+    await env.lease.clearExpired(expired[0]!);
+    const second = await env.lease.clearExpired(expired[0]!);
+    expect(second.cleared).toBe(false);
+  });
+
+  it("sweepStale TOCTOU — concurrent re-claim under lock is preserved (PR #63 P0-1)", async () => {
+    // Claim a short-lived lease, let it expire, then race a sweep against
+    // a release+re-claim that finishes between the sweep's read and clear.
+    // The new sweep contract re-reads inside the lock, so the fresh lease
+    // is preserved.
+    const r1 = await env.lease.claim({
+      leaseKind: "slice_lease",
+      objectId: SLICE_ID,
+      workerId: "w1",
+      ttlMs: 1_000,
+      ttlSource: "ttl_default",
+      targetId: TARGET,
+      aux: { kind: "slice_lease", slice_id: SLICE_ID },
+    });
+    if (r1.result !== "acquired") return;
+    env.clock.advance(2_000);
+    // Replace the expired lease with a fresh one.
+    await env.lease.release({
+      leaseId: r1.lease.lease_id,
+      leaseToken: r1.lease.lease_token,
+    });
     const r2 = await env.lease.claim({
       leaseKind: "slice_lease",
       objectId: SLICE_ID,
@@ -158,6 +225,62 @@ describe("FsLease (4-kind CAS adapter)", () => {
       aux: { kind: "slice_lease", slice_id: SLICE_ID },
     });
     expect(r2.result).toBe("acquired");
+    if (r2.result !== "acquired") return;
+    // Sweep should NOT see the fresh lease as expired — the probe sees
+    // the new record with future expiry, returns nothing.
+    const expired = await env.lease.sweepStale();
+    expect(expired.length).toBe(0);
+    // Even if we feed the OLD lease into clearExpired, it must not clear
+    // the slot (lease_id mismatch).
+    const out = await env.lease.clearExpired(r1.lease);
+    expect(out.cleared).toBe(false);
+    // Verify the fresh lease still holds.
+    const list = await env.lease.list();
+    expect(list.length).toBe(1);
+    expect(list[0]?.lease_id).toBe(r2.lease.lease_id);
+  });
+
+  it("renew refuses after expires_at (PR #63 P1-7)", async () => {
+    const r = await env.lease.claim({
+      leaseKind: "slice_lease",
+      objectId: SLICE_ID,
+      workerId: "w1",
+      ttlMs: 1_000,
+      ttlSource: "ttl_default",
+      targetId: TARGET,
+      aux: { kind: "slice_lease", slice_id: SLICE_ID },
+    });
+    if (r.result !== "acquired") return;
+    env.clock.advance(2_000);
+    const out = await env.lease.renew({
+      leaseId: r.lease.lease_id,
+      leaseToken: r.lease.lease_token,
+      newTtlMs: 60_000,
+    });
+    expect(out.renewed).toBe(false);
+    expect(out.newExpiresAt).toBeNull();
+  });
+
+  it("corrupt active record refuses claim with sentinel holder (PR #63 P0-5)", async () => {
+    // Inject an invalid active record directly.
+    const safeKey = SLICE_ID.replace(/[^A-Za-z0-9_-]/g, "_");
+    await env.store.writeAtomic(
+      `leases/active/${safeKey}.json`,
+      "{ not valid json",
+    );
+    const out = await env.lease.claim({
+      leaseKind: "slice_lease",
+      objectId: SLICE_ID,
+      workerId: "w1",
+      ttlMs: 60_000,
+      ttlSource: "ttl_default",
+      targetId: TARGET,
+      aux: { kind: "slice_lease", slice_id: SLICE_ID },
+    });
+    expect(out.result).toBe("claim_failed");
+    if (out.result === "claim_failed") {
+      expect(out.existingHolder).toBe("<corrupt-active-record>");
+    }
   });
 
   it("list returns active leases only", async () => {
