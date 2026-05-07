@@ -1,4 +1,19 @@
 import { z } from "zod";
+import { UlidString } from "../ids.js";
+
+/**
+ * RGC-LEASE-KINDS Lease record schema.
+ *
+ * Field names follow the contract directly:
+ *   lease_id, lease_kind, object_id, worker_id, claimed_at, expires_at,
+ *   lease_token, agent_profile_id (turn / session lease only).
+ *
+ * `object_id` is the canonical key the lease protects. For composite keys
+ * (slot_lock = (milestone_id, slot_kind), turn_lease = (session_id, turn_index))
+ * the caller serializes them into a single string. Variant-specific fields are
+ * preserved as auxiliary metadata for ergonomic dispatch — they must agree
+ * with `object_id` (enforced by validation in caller code).
+ */
 
 export const LeaseKind = z.enum([
   "slot_lock",
@@ -8,13 +23,14 @@ export const LeaseKind = z.enum([
 ]);
 export type LeaseKind = z.infer<typeof LeaseKind>;
 
-const baseLease = {
-  lease_id: z.string().min(1),
+const baseLeaseShape = {
+  lease_id: UlidString,
   lease_token: z.string().min(1),
   target_id: z.string().min(1),
+  object_id: z.string().min(1),
   worker_id: z.string().min(1),
-  acquired_at: z.string().min(1),
-  expires_at: z.string().min(1),
+  claimed_at: z.string().datetime(),
+  expires_at: z.string().datetime(),
   ttl_ms: z.number().int().positive(),
   ttl_source: z.enum([
     "by_phase",
@@ -27,39 +43,41 @@ const baseLease = {
 
 export const SlotLockLease = z
   .object({
-    ...baseLease,
-    kind: z.literal("slot_lock"),
+    ...baseLeaseShape,
+    lease_kind: z.literal("slot_lock"),
     slot_kind: z.enum(["discovery", "delivery"]),
+    milestone_id: UlidString,
   })
   .strict();
 
 export const SliceLease = z
   .object({
-    ...baseLease,
-    kind: z.literal("slice_lease"),
-    slice_id: z.string().min(1),
+    ...baseLeaseShape,
+    lease_kind: z.literal("slice_lease"),
+    slice_id: UlidString,
   })
   .strict();
 
 export const SessionLease = z
   .object({
-    ...baseLease,
-    kind: z.literal("session_lease"),
-    session_id: z.string().min(1),
+    ...baseLeaseShape,
+    lease_kind: z.literal("session_lease"),
+    session_id: UlidString,
+    agent_profile_id: z.string().min(1),
   })
   .strict();
 
 export const TurnLease = z
   .object({
-    ...baseLease,
-    kind: z.literal("turn_lease"),
-    session_id: z.string().min(1),
+    ...baseLeaseShape,
+    lease_kind: z.literal("turn_lease"),
+    session_id: UlidString,
     turn_index: z.number().int().nonnegative(),
     agent_profile_id: z.string().min(1),
   })
   .strict();
 
-export const Lease = z.discriminatedUnion("kind", [
+export const Lease = z.discriminatedUnion("lease_kind", [
   SlotLockLease,
   SliceLease,
   SessionLease,

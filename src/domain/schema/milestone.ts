@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { UlidString } from "../ids.js";
 import { ExternalRef } from "./external-ref.js";
 
 export const MilestoneState = z.enum([
@@ -21,7 +22,7 @@ export type SlotKind = z.infer<typeof SlotKind>;
 
 export const Milestone = z
   .object({
-    milestone_id: z.string().min(1),
+    milestone_id: UlidString,
     target_id: z.string().min(1),
     title: z.string().min(1),
     state: MilestoneState,
@@ -29,10 +30,10 @@ export const Milestone = z
     intake_source_kind: z.string().min(1),
     intake_source_id: z.string().min(1),
     spec_revision_pin: z.string().min(1).nullable(),
-    context_summary_id: z.string().min(1).nullable(),
-    external_refs: z.array(ExternalRef).default([]),
-    created_at: z.string().min(1),
-    updated_at: z.string().min(1),
+    context_summary_id: UlidString.nullable(),
+    external_refs: z.array(ExternalRef).default(() => []),
+    created_at: z.string().datetime(),
+    updated_at: z.string().datetime(),
   })
   .strict();
 

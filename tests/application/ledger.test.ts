@@ -9,13 +9,19 @@ import { AUDIT_HASH_GENESIS } from "../../src/domain/audit-hash.js";
 import type { LedgerRow } from "../../src/domain/schema/ledger.js";
 import { CollectingLogger } from "../../src/ports/logger.js";
 
+const TX_ID_1 = "01HZTX0000000000000000000A";
+const TX_ID_2 = "01HZTX0000000000000000000B";
+const TX_ID_3 = "01HZTX0000000000000000000C";
+const M_ID = "01HZM00000000000000000000A";
+const ISO = "2026-05-07T00:00:00.000Z";
+
 function baseRow(
   overrides: Partial<Omit<LedgerRow, "audit_hash" | "audit_hash_prev">>,
 ): Omit<LedgerRow, "audit_hash" | "audit_hash_prev"> {
   return {
-    transition_id: "TX1",
+    transition_id: TX_ID_1,
     target_id: "demo",
-    object_id: "M1",
+    object_id: M_ID,
     object_kind: "milestone",
     from_state: null,
     to_state: "M_INTAKE_QUEUED",
@@ -42,7 +48,7 @@ function baseRow(
     lease_kind: null,
     result: "applied",
     result_detail: null,
-    timestamp: "2026-05-07T00:00:00Z",
+    timestamp: ISO,
     ...overrides,
   };
 }
@@ -134,23 +140,41 @@ describe("FileLedger", () => {
     const ledger = new FileLedger({ store });
     const r1 = await ledger.appendTransition(baseRow({}));
     const r2 = await ledger.appendTransition(
-      baseRow({ transition_id: "TX2", idempotency_key: "k2" }),
+      baseRow({ transition_id: TX_ID_2, idempotency_key: "k2" }),
     );
     expect(r2.row.audit_hash_prev).toBe(r1.row.audit_hash);
     expect(r2.row.audit_hash).not.toBe(r1.row.audit_hash);
   });
 
-  it("rejects rows with duplicate idempotency_key (returns duplicate)", async () => {
+  it("records a duplicate row per SOC-IDEMPOTENCY when key reappears", async () => {
     const store = new MemoryStore();
     const ledger = new FileLedger({ store });
     const r1 = await ledger.appendTransition(baseRow({}));
     expect(r1.result).toBe("applied");
+    expect(r1.row.result).toBe("applied");
     const r2 = await ledger.appendTransition(
-      baseRow({ transition_id: "TX2" }),
+      baseRow({ transition_id: TX_ID_2 }),
     );
     expect(r2.result).toBe("duplicate");
+    expect(r2.row.result).toBe("duplicate");
+    expect(r2.row.idempotency_key).toBe(r1.row.idempotency_key);
+    expect(r2.row.audit_hash_prev).toBe(r1.row.audit_hash);
     const body = (await store.readText(LEDGER_TRANSITIONS_PATH)) ?? "";
-    expect(body.split("\n").filter(Boolean).length).toBe(1);
+    expect(body.split("\n").filter(Boolean).length).toBe(2);
+  });
+
+  it("subsequent applied rows chain off the duplicate row", async () => {
+    const store = new MemoryStore();
+    const ledger = new FileLedger({ store });
+    const r1 = await ledger.appendTransition(baseRow({}));
+    const r2 = await ledger.appendTransition(
+      baseRow({ transition_id: TX_ID_2 }),
+    );
+    const r3 = await ledger.appendTransition(
+      baseRow({ transition_id: TX_ID_3, idempotency_key: "k3" }),
+    );
+    expect(r3.result).toBe("applied");
+    expect(r3.row.audit_hash_prev).toBe(r2.row.audit_hash);
   });
 
   it("auditHashSeed alters the chain", async () => {
@@ -172,10 +196,61 @@ describe("FileLedger", () => {
     expect(await ledger2.lastAuditHash()).toBe(r1.row.audit_hash);
     const dup = await ledger2.appendTransition(baseRow({}));
     expect(dup.result).toBe("duplicate");
+    // Duplicate row chains forward — head advances.
+    expect(await ledger2.lastAuditHash()).toBe(dup.row.audit_hash);
     const r3 = await ledger2.appendTransition(
-      baseRow({ transition_id: "TX2", idempotency_key: "k2" }),
+      baseRow({ transition_id: TX_ID_3, idempotency_key: "k3" }),
     );
-    expect(r3.row.audit_hash_prev).toBe(r1.row.audit_hash);
+    expect(r3.row.audit_hash_prev).toBe(dup.row.audit_hash);
+  });
+
+  it("multi-instance writers see the latest head via withFileLock (no fork)", async () => {
+    const store = new MemoryStore();
+    const a = new FileLedger({ store });
+    const b = new FileLedger({ store });
+    const ra = await a.appendTransition(baseRow({}));
+    const rb = await b.appendTransition(
+      baseRow({ transition_id: TX_ID_2, idempotency_key: "k2" }),
+    );
+    // b reads file, sees a's row, chains forward.
+    expect(rb.row.audit_hash_prev).toBe(ra.row.audit_hash);
+  });
+
+  it("replay throws LedgerCorruptError when audit_hash_prev is tampered", async () => {
+    const store = new MemoryStore();
+    const ledger1 = new FileLedger({ store });
+    await ledger1.appendTransition(baseRow({}));
+    await ledger1.appendTransition(
+      baseRow({ transition_id: TX_ID_2, idempotency_key: "k2" }),
+    );
+    // Tamper: rewrite the second row's audit_hash_prev.
+    const body = (await store.readText(LEDGER_TRANSITIONS_PATH)) ?? "";
+    const lines = body.split("\n").filter(Boolean);
+    const r2 = JSON.parse(lines[1]!) as LedgerRow;
+    const tampered = { ...r2, audit_hash_prev: "0".repeat(64) };
+    await store.writeAtomic(
+      LEDGER_TRANSITIONS_PATH,
+      `${lines[0]}\n${JSON.stringify(tampered)}\n`,
+    );
+    const ledger2 = new FileLedger({ store });
+    await expect(ledger2.lastAuditHash()).rejects.toThrow(
+      /audit_hash_prev mismatch/,
+    );
+  });
+
+  it("replay throws when audit_hash itself does not match recompute", async () => {
+    const store = new MemoryStore();
+    const ledger1 = new FileLedger({ store });
+    const r1 = await ledger1.appendTransition(baseRow({}));
+    const tampered = { ...r1.row, audit_hash: "f".repeat(64) };
+    await store.writeAtomic(
+      LEDGER_TRANSITIONS_PATH,
+      `${JSON.stringify(tampered)}\n`,
+    );
+    const ledger2 = new FileLedger({ store });
+    await expect(ledger2.lastAuditHash()).rejects.toThrow(
+      /audit_hash recompute mismatch/,
+    );
   });
 
   it("serializes concurrent appends so audit_hash chain stays linear", async () => {
@@ -183,10 +258,11 @@ describe("FileLedger", () => {
     const ledger = new FileLedger({ store });
     const tasks: Promise<unknown>[] = [];
     for (let i = 0; i < 10; i++) {
+      const txId = `01HZTX000000000000000000${i.toString().padStart(2, "0")}`;
       tasks.push(
         ledger.appendTransition(
           baseRow({
-            transition_id: `TX${i}`,
+            transition_id: txId,
             idempotency_key: `key-${i}`,
           }),
         ),

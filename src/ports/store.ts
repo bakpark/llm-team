@@ -21,4 +21,13 @@ export interface StorePort {
 
   /** Whether relPath exists (file or dir). */
   exists(relPath: string): Promise<boolean>;
+
+  /**
+   * Run `fn` while holding an exclusive cross-process lock keyed by `relPath`.
+   * Reads / writes performed inside `fn` are not themselves serialized — the
+   * caller controls the critical section. The lock is best-effort across
+   * processes via a lockdir with a stale-recovery TTL; multi-host shared
+   * filesystems that violate POSIX rename semantics are out of scope.
+   */
+  withFileLock<T>(relPath: string, fn: () => Promise<T>): Promise<T>;
 }

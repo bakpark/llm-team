@@ -109,9 +109,85 @@ describe("Phase 1a — ledger row schema includes target_id (TCC-IDENTITY)", () 
       "utf8",
     );
     expect(body).toMatch(/target_id:\s*z\.string\(\)\.min\(1\)/);
-    expect(body).toMatch(/audit_hash:\s*z\.string\(\)\.regex\(\/\^\[0-9a-f\]\{64\}\$\//);
+    expect(body).toMatch(
+      /audit_hash:\s*z\.string\(\)\.regex\(\/\^\[0-9a-f\]\{64\}\$\//,
+    );
     expect(body).toMatch(
       /audit_hash_prev:\s*z\.string\(\)\.regex\(\/\^\[0-9a-f\]\{64\}\$\//,
     );
+  });
+});
+
+describe("Phase 1a — Lease record schema matches RGC-LEASE-KINDS", () => {
+  it("uses lease_kind discriminator and contract field names (claimed_at, object_id)", async () => {
+    const mod = (await import(
+      resolve(REPO_ROOT, "src/domain/schema/lease.ts")
+    )) as typeof import("../../src/domain/schema/lease.js");
+    const shape = (mod.SliceLease as unknown as { _def: { shape: () => Record<string, unknown> } })
+      ._def.shape();
+    for (const required of [
+      "lease_id",
+      "lease_kind",
+      "object_id",
+      "worker_id",
+      "claimed_at",
+      "expires_at",
+      "lease_token",
+      "ttl_ms",
+      "ttl_source",
+    ]) {
+      expect(Object.keys(shape)).toContain(required);
+    }
+    // Guard against regression to the legacy `kind`/`acquired_at` names.
+    expect(Object.keys(shape)).not.toContain("kind");
+    expect(Object.keys(shape)).not.toContain("acquired_at");
+  });
+
+  it("turn_lease and session_lease require agent_profile_id", async () => {
+    const mod = (await import(
+      resolve(REPO_ROOT, "src/domain/schema/lease.ts")
+    )) as typeof import("../../src/domain/schema/lease.js");
+    for (const v of [mod.TurnLease, mod.SessionLease]) {
+      const shape = (v as unknown as { _def: { shape: () => Record<string, unknown> } })
+        ._def.shape();
+      expect(Object.keys(shape)).toContain("agent_profile_id");
+    }
+  });
+});
+
+describe("Phase 1a — Identity schema models TCC-IDENTITY", () => {
+  it("declares target_id required and persistent_store_ref optional", async () => {
+    const mod = (await import(
+      resolve(REPO_ROOT, "src/config/target-schema.ts")
+    )) as typeof import("../../src/config/target-schema.js");
+    const shape = (mod.Identity as unknown as { _def: { shape: () => Record<string, unknown> } })
+      ._def.shape();
+    expect(Object.keys(shape)).toContain("target_id");
+    expect(Object.keys(shape)).toContain("persistent_store_ref");
+    expect(Object.keys(shape)).toContain("label_prefix");
+  });
+});
+
+describe("Phase 1a — ULID refinement enforced on Caller-issued ids", () => {
+  it("Milestone schema rejects non-ULID milestone_id", async () => {
+    const mod = (await import(
+      resolve(REPO_ROOT, "src/domain/schema/milestone.ts")
+    )) as typeof import("../../src/domain/schema/milestone.js");
+    expect(() =>
+      mod.Milestone.parse({
+        milestone_id: "M1",
+        target_id: "demo",
+        title: "x",
+        state: "M_INTAKE_QUEUED",
+        slot_kind: null,
+        intake_source_kind: "k",
+        intake_source_id: "s",
+        spec_revision_pin: null,
+        context_summary_id: null,
+        external_refs: [],
+        created_at: "2026-05-07T00:00:00.000Z",
+        updated_at: "2026-05-07T00:00:00.000Z",
+      }),
+    ).toThrow();
   });
 });

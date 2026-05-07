@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { UlidString } from "../ids.js";
 import { LeaseKind } from "./lease.js";
 import { SliceKind } from "./slice.js";
 
@@ -58,7 +59,7 @@ export type LedgerSlotKind = z.infer<typeof LedgerSlotKind>;
 
 export const LedgerRow = z
   .object({
-    transition_id: z.string().min(1),
+    transition_id: UlidString,
     target_id: z.string().min(1),
     object_id: z.string().min(1),
     object_kind: LedgerObjectKind,
@@ -66,10 +67,10 @@ export const LedgerRow = z
     to_state: z.string(),
     loop_kind: LedgerLoopKind.nullable(),
     phase: LedgerOuterPhase.nullable(),
-    slice_id: z.string().min(1).nullable(),
+    slice_id: UlidString.nullable(),
     slice_kind: SliceKind.nullable(),
     dod_revision: z.string().min(1).nullable(),
-    session_id: z.string().min(1).nullable(),
+    session_id: UlidString.nullable(),
     turn_index: z.number().int().nonnegative().nullable(),
     slot_kind: LedgerSlotKind.nullable(),
     agent_profile_id: z.string().min(1).nullable(),
@@ -77,17 +78,17 @@ export const LedgerRow = z
     action_kind: LedgerActionKind,
     final_verdict: z.string().min(1).nullable(),
     caller_id: z.string().min(1),
-    manifest_id: z.string().min(1).nullable(),
+    manifest_id: UlidString.nullable(),
     input_revision_pins: z.array(z.string().min(1)),
     output_hash: z.string().min(1).nullable(),
-    verification_run_id: z.string().min(1).nullable(),
-    metric_run_id: z.string().min(1).nullable(),
+    verification_run_id: UlidString.nullable(),
+    metric_run_id: UlidString.nullable(),
     idempotency_key: z.string().min(1),
     lease_token: z.string().min(1).nullable(),
     lease_kind: LeaseKind.nullable(),
     result: LedgerResult,
     result_detail: z.string().min(1).nullable(),
-    timestamp: z.string().min(1),
+    timestamp: z.string().datetime(),
     audit_hash: z.string().regex(/^[0-9a-f]{64}$/),
     audit_hash_prev: z.string().regex(/^[0-9a-f]{64}$/),
   })

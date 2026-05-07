@@ -53,4 +53,20 @@ describe("computeAuditHash", () => {
     const h2alt = computeAuditHash(h0, { i: 2 });
     expect(h2).not.toBe(h2alt);
   });
+
+  it("rejects Date / Map / Set / RegExp / class instances (silent corruption guard)", () => {
+    expect(() => canonicalJson(new Date())).toThrow(/Date/);
+    expect(() => canonicalJson(new Map())).toThrow(/Map/);
+    expect(() => canonicalJson(new Set())).toThrow(/Set/);
+    expect(() => canonicalJson(/regex/)).toThrow(/RegExp/);
+    class C {}
+    expect(() => canonicalJson(new C())).toThrow(/plain objects/);
+  });
+
+  it("rejects bigint / undefined / function / symbol leaves", () => {
+    expect(() => canonicalJson(BigInt(1) as unknown)).toThrow(/bigint/);
+    expect(() => canonicalJson({ a: undefined })).toThrow(/undefined/);
+    expect(() => canonicalJson({ a: () => 1 })).toThrow(/function/);
+    expect(() => canonicalJson({ a: Symbol("x") })).toThrow(/symbol/);
+  });
 });

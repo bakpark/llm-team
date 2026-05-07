@@ -19,7 +19,7 @@ workdir/
   log/
     daemon.ndjson                   # 운영 로그 (lease claim/release, recovery scan, ledger.append/duplicate emit)
   milestones/
-    <milestone_id>.json             # SOC-OBJECTS Milestone (8-state 포함)
+    <milestone_id>.json             # SOC-OBJECTS Milestone (11-state lifecycle)
   slices/
     <slice_id>.json                 # SOC-OBJECTS Slice (7-state, dependencies)
   slice_merges/
