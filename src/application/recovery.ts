@@ -40,6 +40,7 @@ import {
   type DialogueSession as DialogueSessionT,
 } from "../domain/schema/dialogue-session.js";
 import type { Lease, LeaseKind } from "../domain/schema/lease.js";
+import { Slice, type Slice as SliceT } from "../domain/schema/slice.js";
 import type { ClockPort } from "../ports/clock.js";
 import type { LeasePort } from "../ports/lease.js";
 import type { StorePort } from "../ports/store.js";
@@ -59,6 +60,8 @@ export interface RecoverySweepDeps {
 export interface RecoverySweepResult {
   expiredLeases: Lease[];
   reanimatedSessions: string[];
+  /** Slice ids whose state was rolled back to SLICE_READY. */
+  reanimatedSlices: string[];
   /**
    * Number of ledger rows the sweep produced. Tests pin this to assert that
    * an idempotent re-run does not double-write.
@@ -80,6 +83,7 @@ export async function runRecoverySweep(
   //      recover row, then clearExpired runs again. No permanent loss.
   const expiredLeases = await deps.lease.sweepStale();
   const reanimatedSessions: string[] = [];
+  const reanimatedSlices: string[] = [];
   let rows = 0;
   for (const lease of expiredLeases) {
     await emitLeaseRecoveredRow(lease, deps);
@@ -90,12 +94,19 @@ export async function runRecoverySweep(
         rows++;
         reanimatedSessions.push(reanimated);
       }
+    } else if (lease.lease_kind === "slice_lease") {
+      const reanimated = await reanimateSliceIfNeeded(lease, deps);
+      if (reanimated != null) {
+        rows++;
+        reanimatedSlices.push(reanimated);
+      }
     }
     await deps.lease.clearExpired(lease);
   }
   return {
     expiredLeases,
     reanimatedSessions,
+    reanimatedSlices,
     ledgerRowsAppended: rows,
   };
 }
@@ -237,6 +248,83 @@ async function emitReanimateRow(
     result: "recovered",
     result_detail: "session_lease expired — session moved to AWAITING_REVALIDATION",
     timestamp: deps.clock.isoNow(),
+  });
+}
+
+/**
+ * If the slice referenced by an expired slice_lease is still SLICE_BUILDING,
+ * roll it back to SLICE_READY + clear current_session_id so the next
+ * pickup can start a fresh inner session. The orphaned DialogueSession is
+ * left alone — phase-3 / phase-4 reanimate it via session_lease recovery,
+ * or it stays as a stale SESSION_OPEN until phase-5 wires explicit cleanup.
+ *
+ * Read-check-write under `withFileLock(slicePath)` so a live worker that
+ * just transitioned the slice to SLICE_REVIEWING cannot be overwritten by
+ * a stale SLICE_BUILDING snapshot.
+ */
+async function reanimateSliceIfNeeded(
+  lease: Extract<Lease, { lease_kind: "slice_lease" }>,
+  deps: RecoverySweepDeps,
+): Promise<string | null> {
+  const path = layout.slice(lease.slice_id);
+  return deps.store.withFileLock(path, async () => {
+    const body = await deps.store.readText(path);
+    if (body == null) return null;
+    let slice: SliceT;
+    try {
+      slice = Slice.parse(JSON.parse(body));
+    } catch {
+      return null;
+    }
+    if (slice.state !== "SLICE_BUILDING") return null;
+    const updated = Slice.parse({
+      ...slice,
+      state: "SLICE_READY",
+      current_session_id: null,
+      updated_at: deps.clock.isoNow(),
+    });
+    await deps.store.writeAtomic(path, JSON.stringify(updated, null, 2));
+    await deps.ledger.appendTransition({
+      transition_id: newMonotonicId(deps.clock.now()),
+      target_id: deps.targetId,
+      object_id: slice.slice_id,
+      object_kind: "slice",
+      from_state: "SLICE_BUILDING",
+      to_state: "SLICE_READY",
+      loop_kind: "inner",
+      phase: null,
+      slice_id: slice.slice_id,
+      slice_kind: slice.slice_kind,
+      dod_revision: slice.dod_revision_pin,
+      session_id: slice.current_session_id,
+      turn_index: null,
+      slot_kind: "delivery",
+      agent_profile_id: null,
+      contribution_kind: null,
+      action_kind: "recover",
+      final_verdict: null,
+      caller_id: deps.callerId,
+      manifest_id: null,
+      input_revision_pins: [],
+      output_hash: null,
+      verification_run_id: null,
+      metric_run_id: null,
+      idempotency_key: idempotencyKey({
+        scope: "recover",
+        parts: {
+          kind: "slice_lease_expired_reanimate",
+          slice_id: slice.slice_id,
+          lease_id: lease.lease_id,
+        },
+      }),
+      lease_token: null,
+      lease_kind: null,
+      result: "recovered",
+      result_detail:
+        "slice_lease expired — slice rolled back to SLICE_READY for re-pickup",
+      timestamp: deps.clock.isoNow(),
+    });
+    return slice.slice_id;
   });
 }
 

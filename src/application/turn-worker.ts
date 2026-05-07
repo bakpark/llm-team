@@ -11,6 +11,7 @@ import { Slice, type Slice as SliceT } from "../domain/schema/slice.js";
 import type { Envelope } from "../domain/schema/envelope.js";
 import type { CallerRoutingDecision } from "../domain/schema/session-turn.js";
 import type { ClockPort } from "../ports/clock.js";
+import type { LeasePort } from "../ports/lease.js";
 import type { LlmRunnerPort } from "../ports/llm-runner.js";
 import type { StorePort } from "../ports/store.js";
 import type {
@@ -18,8 +19,11 @@ import type {
   VerificationPort,
 } from "../ports/verification.js";
 import type { WorkspacePort } from "../ports/workspace.js";
+import type { LeaseConfig } from "../config/target-schema.js";
 import { callAgent, type AgentIoOutcome } from "./agent-io.js";
 import { idempotencyKey } from "./idempotency.js";
+import { assertCanAcquire } from "./lease-acquisition-order.js";
+import { resolveLeaseTtl } from "./lease-ttl-resolver.js";
 import type { LedgerAppender } from "./ledger.js";
 import {
   ManifestBuilder,
@@ -91,6 +95,12 @@ export type TurnWorkerOutcome =
       sessionId: string;
       sliceId: string;
       stalePins: { object_id: string; recorded_pin: string }[];
+    }
+  | {
+      /** Another worker holds the slice_lease. */
+      kind: "lease_unavailable";
+      sliceId: string;
+      detail: string;
     };
 
 export interface TurnWorkerCfg {
@@ -110,6 +120,16 @@ export interface TurnWorkerDeps {
   verification: VerificationPort;
   ledger: LedgerAppender;
   cfg: TurnWorkerCfg;
+  /**
+   * When provided, the worker claims a `slice_lease` for the duration of
+   * the turn so a killed daemon's SLICE_BUILDING orphan is recoverable
+   * by `runRecoverySweep` (slice_lease expires → slice → SLICE_READY).
+   *
+   * Optional so legacy single-shot tests can run without leases. Daemon
+   * deployment passes both.
+   */
+  lease?: LeasePort;
+  leaseConfig?: LeaseConfig;
 }
 
 export async function runOneInnerTurn(
@@ -127,6 +147,57 @@ export async function runOneInnerTurn(
     return { kind: "noop", detail: "no SLICE_READY/SLICE_BUILDING internal slices" };
   }
   const { slice, session, turnIndex } = ready;
+
+  // PR #63 review wire-up symmetry: claim slice_lease for the duration of
+  // the inner turn so a killed turn-worker's SLICE_BUILDING orphan is
+  // recoverable by runRecoverySweep (slice_lease expires → SLICE_READY
+  // via the new slice_lease handler).
+  let leaseClaim:
+    | Awaited<ReturnType<NonNullable<typeof deps.lease>["claim"]>>
+    | null = null;
+  if (deps.lease != null) {
+    assertCanAcquire([], "slice_lease");
+    const ttl = resolveLeaseTtl({
+      leaseKind: "slice_lease",
+      leaseConfig: deps.leaseConfig,
+      phase: "tdd_build",
+      agentProfileId: "forge",
+    });
+    leaseClaim = await deps.lease.claim({
+      leaseKind: "slice_lease",
+      objectId: slice.slice_id,
+      workerId: deps.cfg.callerId,
+      ttlMs: ttl.ttlMs,
+      ttlSource: ttl.source,
+      targetId: deps.cfg.targetId,
+      aux: { kind: "slice_lease", slice_id: slice.slice_id },
+    });
+    if (leaseClaim.result === "claim_failed") {
+      return {
+        kind: "lease_unavailable",
+        sliceId: slice.slice_id,
+        detail: `slice_lease held by ${leaseClaim.existingHolder} (lease_id=${leaseClaim.existingLeaseId})`,
+      };
+    }
+  }
+  try {
+    return await runOneInnerTurnInner(slice, session, turnIndex, deps);
+  } finally {
+    if (leaseClaim != null && leaseClaim.result === "acquired" && deps.lease != null) {
+      await deps.lease.release({
+        leaseId: leaseClaim.lease.lease_id,
+        leaseToken: leaseClaim.lease.lease_token,
+      });
+    }
+  }
+}
+
+async function runOneInnerTurnInner(
+  slice: SliceT,
+  session: DialogueSessionT,
+  turnIndex: number,
+  deps: TurnWorkerDeps,
+): Promise<TurnWorkerOutcome> {
 
   // Step 3 — Workspace prep
   const prep = await deps.workspace.prepareInnerWorkspace({

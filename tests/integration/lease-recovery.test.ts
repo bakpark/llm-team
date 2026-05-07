@@ -228,6 +228,84 @@ describe("Phase 4 lease + recovery integration", () => {
     void wsRoot;
   });
 
+  it("slice_lease expired → SLICE_BUILDING orphan → SLICE_READY (turn-worker wire-up symmetry)", async () => {
+    // Mirror of the dialogue-coordinator wire-up test. Killed turn-worker
+    // leaves SLICE_BUILDING + an orphan SESSION_OPEN. Recovery sweep
+    // detects the expired slice_lease and rolls the slice back to
+    // SLICE_READY so a fresh worker picks it up. The orphan session is
+    // left as SESSION_OPEN — phase-5 cleans it up via the session-stale
+    // path; for phase-4-onward the slice rollback is the critical recovery.
+    const workdir = mkdtempSync(join(tmpdir(), "slice-lease-recover-"));
+    const store = new FsStore({ workdir });
+    const clock = new FixedClock(ISO_BASE);
+    const lease = new FsLease({ store, clock });
+    const logger = new NdjsonLogger({ store, clock, relPath: LOG_DAEMON_PATH });
+    const ledger = new FileLedger({ store, logger });
+    const SLICE = "01HZS00000000000000000000D";
+    const SESSION = "01HZSE0000000000000000000D";
+    mkdirSync(join(workdir, "slices"), { recursive: true });
+    const sliceFixture = (await import("../../src/domain/schema/slice.js")).Slice.parse({
+      slice_id: SLICE,
+      milestone_id: "01HZM00000000000000000000A",
+      slice_kind: "internal",
+      value_statement: "x",
+      ac_ids: [],
+      acceptance_tests: [],
+      declared_scope: [],
+      declared_metric_threshold: null,
+      interface_break: false,
+      dependencies: [],
+      trunk_base_revision: "trunk-base",
+      dod_revision_pin: "dod",
+      state: "SLICE_BUILDING",
+      current_session_id: SESSION,
+      external_refs: [],
+      created_at: new Date(ISO_BASE).toISOString(),
+      updated_at: new Date(ISO_BASE).toISOString(),
+    });
+    writeFileSync(
+      join(workdir, layout.slice(SLICE)),
+      JSON.stringify(sliceFixture),
+      "utf8",
+    );
+
+    // Worker claims a slice_lease, then "dies".
+    await lease.claim({
+      leaseKind: "slice_lease",
+      objectId: SLICE,
+      workerId: "killed-turn-worker",
+      ttlMs: 1_000,
+      ttlSource: "ttl_default",
+      targetId: TARGET,
+      aux: { kind: "slice_lease", slice_id: SLICE },
+    });
+    clock.advance(2_000);
+
+    const out = await runRecoverySweep({
+      store, clock, ledger, lease, callerId: "sweeper", targetId: TARGET,
+    });
+    expect(out.expiredLeases.length).toBe(1);
+    expect(out.reanimatedSlices).toEqual([SLICE]);
+
+    // Slice rolled back.
+    const reread = (await import("../../src/domain/schema/slice.js")).Slice.parse(
+      JSON.parse(readFileSync(join(workdir, layout.slice(SLICE)), "utf8")),
+    );
+    expect(reread.state).toBe("SLICE_READY");
+    expect(reread.current_session_id).toBeNull();
+
+    const rows = readLedgerRows(workdir);
+    expect(
+      rows.find(
+        (r) =>
+          r.object_kind === "slice" &&
+          r.from_state === "SLICE_BUILDING" &&
+          r.to_state === "SLICE_READY" &&
+          r.action_kind === "recover",
+      ),
+    ).toBeDefined();
+  });
+
   it("idempotent sweep: re-running with no expired leases produces zero ledger rows", async () => {
     const workdir = mkdtempSync(join(tmpdir(), "lease-idem-"));
     const store = new FsStore({ workdir });

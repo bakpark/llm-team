@@ -220,6 +220,8 @@ async function main(argv: readonly string[]): Promise<number> {
               testCommands,
               environmentFingerprint: `node${process.version}`,
             },
+            lease,
+            leaseConfig: cfg.lease,
           });
           outcomeJson = JSON.stringify({ role: args.role, outcome });
           break;
