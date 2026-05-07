@@ -25,6 +25,14 @@ describe("ShellVerification", () => {
     expect(out.result).toBe("error");
   });
 
+  it("empty command list classifies as error (not zero-check pass)", async () => {
+    const v = new ShellVerification({ clock: new FixedClock(0) });
+    const out = await v.runTest([]);
+    expect(out.result).toBe("error");
+    expect(out.exitCodes.length).toBe(0);
+    expect(out.log).toContain("empty command list");
+  });
+
   it("runMetric parses last numeric token from stdout", async () => {
     const v = new ShellVerification({ clock: new FixedClock(0) });
     const out = await v.runMetric({

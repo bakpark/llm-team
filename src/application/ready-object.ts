@@ -6,6 +6,8 @@ import {
 import { Slice, type Slice as SliceT } from "../domain/schema/slice.js";
 import type { ClockPort } from "../ports/clock.js";
 import type { StorePort } from "../ports/store.js";
+import { idempotencyKey } from "./idempotency.js";
+import type { LedgerAppender } from "./ledger.js";
 import { layout } from "./persistence-layout.js";
 
 /**
@@ -19,10 +21,12 @@ import { layout } from "./persistence-layout.js";
  *   - Lists `slices/` and selects the oldest SLICE_READY internal slice.
  *   - If the slice has no `current_session_id`, opens a new SESSION_OPEN
  *     DialogueSession (lead_only, forge, inner, tdd_build) and advances the
- *     slice to SLICE_BUILDING.
+ *     slice to SLICE_BUILDING. Both writes happen inside `withFileLock` and
+ *     are followed by a ledger row (`action_kind=session_progress`,
+ *     `to_state=SLICE_BUILDING`) so the audit trail covers the transition.
  *   - If the slice already has a SESSION_OPEN session, returns that session
  *     to continue (turn_index taken from session.current_turn_index).
- *   - Returns null when no SLICE_READY internal slices exist.
+ *   - Returns null when no SLICE_READY/SLICE_BUILDING internal slices exist.
  *
  * Idempotency: opening a session writes both records under
  * `withFileLock(slice_path)` so concurrent runners cannot create two
@@ -40,6 +44,9 @@ export interface ReadyTurn {
 export interface PickReadyTurnDeps {
   store: StorePort;
   clock: ClockPort;
+  ledger: LedgerAppender;
+  callerId: string;
+  targetId: string;
 }
 
 export async function pickReadyInnerTurn(
@@ -92,11 +99,11 @@ async function openOrResumeSession(
         );
       const session = DialogueSession.parse(JSON.parse(sessionBody));
       if (session.state !== "SESSION_OPEN") {
-        // The slice still claims the session but the session itself is
-        // converged/abandoned. Phase 3 caller-dispatch resolves this; in
-        // phase 2 we return null upstream by treating the slice as
-        // unavailable.
-        throw new SessionNotOpenError(slice.slice_id, session.session_id, session.state);
+        throw new SessionNotOpenError(
+          slice.slice_id,
+          session.session_id,
+          session.state,
+        );
       }
       return {
         slice: live,
@@ -105,6 +112,7 @@ async function openOrResumeSession(
         newSession: false,
       };
     }
+    const previousState = live.state;
     const session = await openSession(live, deps);
     const updated = Slice.parse({
       ...live,
@@ -116,6 +124,51 @@ async function openOrResumeSession(
       layout.slice(updated.slice_id),
       JSON.stringify(updated, null, 2),
     );
+
+    // P0 fix (PR #61 review): emit a ledger row for the SLICE_READY →
+    // SLICE_BUILDING transition + session-open so the audit trail does
+    // not skip the transition. Caller-side idempotency uses the canonical
+    // compositor.
+    await deps.ledger.appendTransition({
+      transition_id: newMonotonicId(deps.clock.now()),
+      target_id: deps.targetId,
+      object_id: updated.slice_id,
+      object_kind: "slice",
+      from_state: previousState,
+      to_state: "SLICE_BUILDING",
+      loop_kind: "inner",
+      phase: null,
+      slice_id: updated.slice_id,
+      slice_kind: updated.slice_kind,
+      dod_revision: updated.dod_revision_pin,
+      session_id: session.session_id,
+      turn_index: null,
+      slot_kind: "delivery",
+      agent_profile_id: "forge",
+      contribution_kind: null,
+      action_kind: "session_progress",
+      final_verdict: null,
+      caller_id: deps.callerId,
+      manifest_id: null,
+      input_revision_pins: [],
+      output_hash: null,
+      verification_run_id: null,
+      metric_run_id: null,
+      idempotency_key: idempotencyKey({
+        scope: "external_observation",
+        parts: {
+          kind: "session_open",
+          slice_id: updated.slice_id,
+          session_id: session.session_id,
+        },
+      }),
+      lease_token: null,
+      lease_kind: null,
+      result: "applied",
+      result_detail: null,
+      timestamp: deps.clock.isoNow(),
+    });
+
     return {
       slice: updated,
       session,
@@ -151,7 +204,9 @@ async function openSession(
       required_evidence: [
         {
           kind: "verification_green",
-          acceptance_tests: slice.acceptance_tests.map((a) => `${a.path}:${a.name}`),
+          acceptance_tests: slice.acceptance_tests.map(
+            (a) => `${a.path}:${a.name}`,
+          ),
           deterministic_checks: [],
         },
       ],

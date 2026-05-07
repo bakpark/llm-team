@@ -60,13 +60,24 @@ export class GitWorktreeWorkspace implements WorkspacePort {
 
   async commit(input: CommitInput): Promise<CommitResult> {
     const wt = this.worktreePath(input.sliceId);
+    // P0 fix (PR #61 review): only add the explicit envelope-listed paths.
+    // `git add --all` would commit any side-effect file the agent process
+    // wrote outside `envelope.artifacts.files`, breaking Inv #4 (Caller-only
+    // operational write) and the AGC-OUTPUT envelope strict boundary.
     for (const f of input.files) {
       assertSafeRel(f.path);
       const target = resolve(wt, f.path);
       mkdirSync(dirname(target), { recursive: true });
       writeFileSync(target, f.content, "utf8");
     }
-    await git(wt, ["add", "--all"]);
+    if (input.files.length === 0) {
+      // No declared artefacts → nothing to commit. Caller decides whether
+      // this is a malformed envelope or a legitimate refactor-no-op.
+      const head = (await git(wt, ["rev-parse", "HEAD"])).stdout.trim();
+      return { commit: head };
+    }
+    const addArgs = ["add", "--", ...input.files.map((f) => f.path)];
+    await git(wt, addArgs);
     const env = this.commitEnv();
     await git(wt, ["commit", "-m", input.message], env);
     const head = (await git(wt, ["rev-parse", "HEAD"])).stdout.trim();

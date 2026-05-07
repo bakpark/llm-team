@@ -63,6 +63,21 @@ export class ShellVerification implements VerificationPort {
 
   private async runAll(commands: CommandSpec[]): Promise<VerificationOutcome> {
     const startedAt = this.cfg.clock.isoNow();
+    // P1 fix (PR #61 review): an empty command list is a configuration
+    // error, not a passing run. Returning `pass` here would let a missing
+    // target.yaml verify entry promote a turn to tests_green without
+    // running anything (#RGC-VERIFICATION deterministic_verification_authority).
+    if (commands.length === 0) {
+      const finishedAt = this.cfg.clock.isoNow();
+      return {
+        result: "error",
+        log: "[verification adapter: empty command list — no checks ran]",
+        failed_tests: [],
+        startedAt,
+        finishedAt,
+        exitCodes: [],
+      };
+    }
     let result: VerificationResult = "pass";
     const exitCodes: (number | null)[] = [];
     const logs: string[] = [];
