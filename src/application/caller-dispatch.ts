@@ -120,7 +120,7 @@ export type DispatchDetail =
             verificationRunId: string;
           }
         | { result: "stale"; sliceMergeId: string; reason: string };
-      sliceState: "SLICE_VALIDATED" | "SLICE_REVIEWING";
+      sliceState: "SLICE_VALIDATED" | "SLICE_BLOCKED";
     }
   | {
       effect: "reset_slice_for_rebuild";
@@ -203,6 +203,15 @@ async function runEffect(
         throw new Error(
           "promote_slice_merge_to_approved_then_integrate requires trunkRevision",
         );
+      // P0-1 fix (PR #62 review): resolve the actual mutable worktree path
+      // before invoking the reverify test commands. Previously this passed
+      // the literal string `slice-<id>` which would point ShellVerification
+      // at a non-existent cwd and report SM_STALE for every clean rebase.
+      // Re-running prepareInnerWorkspace is idempotent in both adapters.
+      const innerPrep = await deps.workspace.prepareInnerWorkspace({
+        sliceId: input.slice.slice_id,
+        trunkBaseRevision: input.slice.trunk_base_revision,
+      });
       const approved = await promoteSliceMergeToApproved(
         {
           sliceMerge: input.sliceMerge,
@@ -224,9 +233,7 @@ async function runEffect(
           reviewSessionId: input.sessionId,
           trunkRevision: input.trunkRevision,
           testCommands:
-            input.testCommandsForReverify?.(
-              `slice-${input.slice.slice_id}`,
-            ) ?? [],
+            input.testCommandsForReverify?.(innerPrep.agentCwd) ?? [],
           environmentFingerprint: input.environmentFingerprint,
         },
         { ...smOpDeps, workspace: deps.workspace, verification: deps.verification },
@@ -247,12 +254,16 @@ async function runEffect(
           sliceState: "SLICE_VALIDATED",
         };
       }
-      // SM_STALE → keep slice in SLICE_INTEGRATING until phase-4 recovery
-      // sweep or a successor SliceMerge re-attempts. Phase 3 records the
-      // stale state but does not auto-retry (plan: "한도 내 자동 재실행" is
-      // phase 4 failure-policy).
-      // Slice rolls back to SLICE_REVIEWING (waiting for re-review or re-attempt).
-      await transitionSliceState(input.slice, "SLICE_REVIEWING", deps, {
+      // P0-4 fix (PR #62 review): on SM_STALE, transition slice to
+      // SLICE_BLOCKED rather than rolling back to SLICE_REVIEWING. The
+      // contract (SOC-MERGE-POLICY) routes "한도 초과" to SLICE_BLOCKED;
+      // phase-3 has zero retry budget, so the limit is immediately
+      // exhausted. This breaks the previous orphan state where SLICE_REVIEWING
+      // + SM_STALE was un-pickable (pickReadyMiddleReview only finds
+      // SM_READY_FOR_REVIEW). Phase 4 will introduce bounded retry that
+      // resets SM_STALE → SM_READY_FOR_REVIEW with slice held at
+      // SLICE_REVIEWING until the budget is exhausted.
+      await transitionSliceState(input.slice, "SLICE_BLOCKED", deps, {
         loop_kind: "middle",
         session_id: input.sessionId,
       });
@@ -263,7 +274,7 @@ async function runEffect(
           sliceMergeId: integrate.sliceMerge.slice_merge_id,
           reason: integrate.reason,
         },
-        sliceState: "SLICE_REVIEWING",
+        sliceState: "SLICE_BLOCKED",
       };
     }
     case "reset_slice_for_rebuild": {

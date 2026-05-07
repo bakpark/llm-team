@@ -99,14 +99,14 @@ function parseArgs(argv: readonly string[]): CliArgs {
         throw new Error(`unknown flag: ${flag}`);
     }
   }
-  if (!out.once) throw new Error("CLI requires --once");
+  if (!out.once) throw new Error("CLI requires --once (phase 2/3 single-iteration only)");
   if (out.dialogueCoordinator && out.agentProfile !== "")
     throw new Error(
-      "--dialogue-coordinator and --agent-profile are mutually exclusive",
+      "phase 2/3 CLI: --dialogue-coordinator (phase 3 middle review pickup) and --agent-profile (phase 2 inner turn worker) are mutually exclusive — pick exactly one loop per invocation",
     );
   if (!out.dialogueCoordinator && out.agentProfile !== "forge")
     throw new Error(
-      "phase 2 inner cycle requires --agent-profile forge (or use --dialogue-coordinator for phase 3 middle review)",
+      "phase 2 inner cycle requires --agent-profile forge (only forge runs inner tdd_build); use --dialogue-coordinator for phase 3 middle review",
     );
   return out;
 }
@@ -182,6 +182,8 @@ async function main(argv: readonly string[]): Promise<number> {
         reverifyTestCommands: testCommands,
       });
       process.stdout.write(`${JSON.stringify(outcome)}\n`);
+      // P0-2 fix (PR #62 review): dispatch_no_match exits non-zero so CI
+      // surfaces a matrix-coverage gap; invalid_envelope is also an error.
       return outcome.kind === "noop" || outcome.kind === "turn_persisted"
         ? 0
         : 1;

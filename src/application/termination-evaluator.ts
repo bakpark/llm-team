@@ -236,13 +236,15 @@ function checkEvidence(
         if (latest?.verification?.result !== "pass")
           return { ok: false };
         break;
+      // P1-7 fix (PR #62 review): unimplemented evidence kinds must NOT
+      // silently pass. Returning `{ ok: false }` keeps the session in
+      // `continue` until a future phase wires the actual evaluator. This
+      // prevents a misconfigured `required_evidence` block from converging
+      // a session with no real evidence.
       case "metric_threshold":
       case "interface_diff_clean":
       case "coverage_threshold":
-        // Phase 3 leaves these as warn-only — passes if no contradicting
-        // evidence is recorded. Phase 5/6 wires the actual checks via
-        // MetricRun and verification interface-diff outputs.
-        break;
+        return { ok: false };
     }
   }
   // Inner tdd_build: a passed verification implies tests_green.

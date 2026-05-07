@@ -101,7 +101,7 @@ describe("Phase 3 — module surface contract", () => {
 });
 
 describe("Phase 3 — DISPATCH_MATRIX phase-3 coverage", () => {
-  it("contains all five (loop, purpose, state, verdict) entries phase 3 promises", async () => {
+  it("contains all phase-3 (loop, purpose, state, verdict) entries (incl. middle TIMEOUT/ABANDONED P1-11)", async () => {
     const { DISPATCH_MATRIX } = await import("../../src/domain/dispatch-matrix.js");
     const promised: Array<[string, string, string, string | null]> = [
       ["inner", "tdd_build", "CONVERGED", "tests_green"],
@@ -109,6 +109,8 @@ describe("Phase 3 — DISPATCH_MATRIX phase-3 coverage", () => {
       ["inner", "tdd_build", "ABANDONED", null],
       ["middle", "review", "CONVERGED", "approve"],
       ["middle", "review", "CONVERGED", "request_changes"],
+      ["middle", "review", "TIMEOUT", null],
+      ["middle", "review", "ABANDONED", null],
     ];
     for (const [pl, pp, st, fv] of promised) {
       const found = DISPATCH_MATRIX.some(
@@ -119,6 +121,24 @@ describe("Phase 3 — DISPATCH_MATRIX phase-3 coverage", () => {
           e.final_verdict === fv,
       );
       expect(found, `missing matrix entry for (${pl}, ${pp}, ${st}, ${fv ?? "<null>"})`).toBe(true);
+    }
+  });
+
+  it("every matrix-referenced effect has a runEffect handler (PR #62 P0-2 executor coverage)", async () => {
+    const { DISPATCH_MATRIX } = await import("../../src/domain/dispatch-matrix.js");
+    const callerDispatchSrc = readFileSync(
+      resolve(REPO_ROOT, "src/application/caller-dispatch.ts"),
+      "utf8",
+    );
+    const referenced = new Set<string>();
+    for (const entry of DISPATCH_MATRIX) {
+      for (const effect of entry.effects) referenced.add(effect.kind);
+    }
+    for (const kind of referenced) {
+      expect(
+        callerDispatchSrc.includes(`case "${kind}"`),
+        `caller-dispatch.runEffect missing handler for effect kind "${kind}"`,
+      ).toBe(true);
     }
   });
 });

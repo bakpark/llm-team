@@ -39,30 +39,84 @@ export interface AgentWorkspaceHandle extends PreparedWorkspace {
   mutable: boolean;
 }
 
+/**
+ * P1-8 fix (PR #62 review): explicit allow-list of (parent_loop,
+ * phase_or_purpose, role, profile) tuples. Anything not in this table is
+ * rejected. Inv #4 (Caller-only operational write) requires the mutable
+ * workspace path to be reachable only by inner forge `lead_draft`; any
+ * other tuple must route through the read-only checkout, but only the
+ * tuples that actually appear in the AGC-CONTRIBUTION-OUTPUTS matrix are
+ * legal. Phase 5 extends this list when outer loops arrive.
+ */
+const ALLOWED_TUPLES: readonly {
+  parentLoop: ParentLoop;
+  phaseOrPurpose: string;
+  agentRoleInSession: AgentWorkspaceRole;
+  agentProfileId: string;
+  mutable: boolean;
+}[] = [
+  // Inner TDD build: forge lead receives mutable slice-local worktree.
+  {
+    parentLoop: "inner",
+    phaseOrPurpose: "tdd_build",
+    agentRoleInSession: "lead",
+    agentProfileId: "forge",
+    mutable: true,
+  },
+  // Middle review: sentinel lead, atlas / forge reviewers (worktree-pr-
+  // lifecycle.md §3 매트릭스). Each gets the same read-only checkout.
+  {
+    parentLoop: "middle",
+    phaseOrPurpose: "review",
+    agentRoleInSession: "lead",
+    agentProfileId: "sentinel",
+    mutable: false,
+  },
+  {
+    parentLoop: "middle",
+    phaseOrPurpose: "review",
+    agentRoleInSession: "reviewer",
+    agentProfileId: "atlas",
+    mutable: false,
+  },
+  {
+    parentLoop: "middle",
+    phaseOrPurpose: "review",
+    agentRoleInSession: "reviewer",
+    agentProfileId: "forge",
+    mutable: false,
+  },
+];
+
 export async function prepareAgentWorkspace(
   req: AgentWorkspaceRequest,
   workspace: WorkspacePort,
 ): Promise<AgentWorkspaceHandle> {
-  if (
-    req.parentLoop === "inner" &&
-    req.phaseOrPurpose === "tdd_build" &&
-    req.agentRoleInSession === "lead" &&
-    req.agentProfileId === "forge"
-  ) {
+  const allowed = ALLOWED_TUPLES.find(
+    (t) =>
+      t.parentLoop === req.parentLoop &&
+      t.phaseOrPurpose === req.phaseOrPurpose &&
+      t.agentRoleInSession === req.agentRoleInSession &&
+      t.agentProfileId === req.agentProfileId,
+  );
+  if (allowed == null) {
+    throw new Error(
+      `prepareAgentWorkspace: unsupported combination (parent_loop=${req.parentLoop}, phase_or_purpose=${req.phaseOrPurpose}, role=${req.agentRoleInSession}, profile=${req.agentProfileId})`,
+    );
+  }
+  if (allowed.mutable) {
     const prep = await workspace.prepareInnerWorkspace({
       sliceId: req.sliceId,
       trunkBaseRevision: req.revision,
     });
     return { ...prep, mutable: true };
   }
-  if (req.parentLoop === "middle" && req.phaseOrPurpose === "review") {
-    const prep = await workspace.prepareReadOnlyCheckout({
-      sliceId: req.sliceId,
-      revision: req.revision,
-    });
-    return { ...prep, mutable: false };
-  }
-  throw new Error(
-    `prepareAgentWorkspace: unsupported combination (parent_loop=${req.parentLoop}, phase_or_purpose=${req.phaseOrPurpose}, role=${req.agentRoleInSession}, profile=${req.agentProfileId})`,
-  );
+  const prep = await workspace.prepareReadOnlyCheckout({
+    sliceId: req.sliceId,
+    revision: req.revision,
+  });
+  return { ...prep, mutable: false };
 }
+
+/** Test / introspection — phase-3 conformance asserts dispatch-matrix coverage. */
+export const ALLOWED_AGENT_WORKSPACE_TUPLES = ALLOWED_TUPLES;

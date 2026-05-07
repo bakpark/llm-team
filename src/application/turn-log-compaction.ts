@@ -27,10 +27,16 @@ export interface CompactionDecision {
 }
 
 export function shouldCompactTurnLog(
-  session: Pick<DialogueSession, "current_turn_index">,
+  session: Pick<DialogueSession, "current_turn_index" | "state">,
   policy: CompactionPolicy,
 ): CompactionDecision {
   if (policy.every_n_turns <= 0)
+    return { fire: false, triggered_at_turn_index: null };
+  // P2-13 fix (PR #62 review): only fire on SESSION_OPEN. If the session
+  // is already CONVERGED / TIMEOUT / ABANDONED / AWAITING_REVALIDATION,
+  // any compaction snapshot would include the finalized turn — that snapshot
+  // is the responsibility of the dispatch path, not the in-loop compactor.
+  if (session.state !== "SESSION_OPEN")
     return { fire: false, triggered_at_turn_index: null };
   // current_turn_index reflects the index of the NEXT turn to be persisted
   // (post-increment). The most recent persisted turn is therefore

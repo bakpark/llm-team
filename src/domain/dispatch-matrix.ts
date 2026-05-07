@@ -78,6 +78,24 @@ export const DISPATCH_MATRIX: readonly DispatchEntry[] = [
     final_verdict: "request_changes",
     effects: [{ kind: "reset_slice_for_rebuild" }],
   },
+  // P1-11 fix (PR #62 review): middle review TIMEOUT/ABANDONED → SM_CLOSED +
+  // SLICE_BLOCKED. The SOC-DISPATCH-MATRIX row "middle review TIMEOUT (n/a) →
+  // slice SLICE_BLOCKED" is the contract authority; reusing the
+  // close_slice_merge_blocked effect keeps the SM closure logic in one place.
+  {
+    parent_loop: "middle",
+    phase_or_purpose: "review",
+    session_state: "TIMEOUT",
+    final_verdict: null,
+    effects: [{ kind: "close_slice_merge_blocked" }],
+  },
+  {
+    parent_loop: "middle",
+    phase_or_purpose: "review",
+    session_state: "ABANDONED",
+    final_verdict: null,
+    effects: [{ kind: "close_slice_merge_blocked" }],
+  },
 ];
 
 export function lookupDispatch(input: {

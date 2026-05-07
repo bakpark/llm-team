@@ -92,6 +92,13 @@ export type RunMiddleReviewOutcome =
       stage: string;
       reason: string;
       detail: string;
+    }
+  | {
+      kind: "dispatch_no_match";
+      sessionId: string;
+      sliceId: string;
+      sliceMergeId: string;
+      detail: string;
     };
 
 /**
@@ -111,6 +118,14 @@ export async function runOneMiddleReviewTurn(
     };
   const { slice, sliceMerge, session } = ready;
   const turnIndex = session.current_turn_index;
+
+  // P0-5 fix (PR #62 review): resume branch — if the SliceMerge is already
+  // SM_APPROVED + slice is SLICE_INTEGRATING, the previous run crashed
+  // mid-dispatch. Re-invoke integrateSliceMerge directly (idempotent via
+  // per_merge ledger key) and skip a redundant sentinel turn.
+  if (sliceMerge.state === "SM_APPROVED" && slice.state === "SLICE_INTEGRATING") {
+    return await resumeIntegration(slice, sliceMerge, session, deps);
+  }
 
   // Read-only checkout (worktree-pr-lifecycle.md §3) — reviewer never writes.
   const prep = await prepareAgentWorkspace(
@@ -265,22 +280,19 @@ export async function runOneMiddleReviewTurn(
     timestamp: deps.clock.isoNow(),
   });
 
-  // Evaluate termination (middle review default: any_request_changes_blocks +
-  // verification_green + finalization_AND_evidence).
-  const turnSummary: TurnSummary = {
-    agent_role_in_session: "lead",
-    verdict: agentOut.envelope.verdict,
-    verification:
-      sliceMerge.verification_run_id != null
-        ? await loadVerificationSummary(
-            sliceMerge.verification_run_id,
-            deps,
-          )
-        : null,
-  };
+  // P1-6 fix (PR #62 review): load all persisted turns for the session
+  // so evaluateTermination sees every prior verdict (any_request_changes_blocks
+  // tracks accumulated request_changes) and the max_turns TIMEOUT trigger
+  // works once daemon mode permits multi-turn sessions.
+  const allTurns = await loadAllTurnSummaries(
+    sessionAfterTurn.session_id,
+    sessionAfterTurn.current_turn_index,
+    sliceMerge.verification_run_id,
+    deps,
+  );
   const decision = evaluateTermination({
     termination: sessionAfterTurn.session_termination,
-    turns: [turnSummary],
+    turns: allTurns,
     max_turns: sessionAfterTurn.max_turns,
   });
 
@@ -295,7 +307,96 @@ export async function runOneMiddleReviewTurn(
     };
   }
 
-  // Persist CONVERGED + final_verdict.
+  // P0-3 fix (PR #62 review): dispatch FIRST, persist CONVERGED LAST.
+  // Effects in caller-dispatch are idempotent (per_merge ledger keys +
+  // exists-checks on slice writes). If we crash mid-dispatch, the next
+  // pickReadyMiddleReview iteration resumes via the SM_APPROVED +
+  // SLICE_INTEGRATING resume branch (P0-5). If we crash between dispatch
+  // and CONVERGED-persist, the slice/SM are already at the target state;
+  // the session is left as SESSION_OPEN and reaped by the phase-4 sweep.
+  // Persisting CONVERGED first risked the previous gap where the session
+  // was finalized but no dispatch ran — pickup couldn't find the slice
+  // (SM_READY_FOR_REVIEW.review_session_id pointed at a CONVERGED session).
+  const dispatchDeps: DispatchDeps = {
+    store: deps.store,
+    clock: deps.clock,
+    ledger: deps.ledger,
+    workspace: deps.workspace,
+    verification: deps.verification,
+    callerId: deps.callerId,
+    targetId: deps.targetId,
+  };
+  const dispatch = await dispatchOutcome(
+    {
+      parent_loop: "middle",
+      phase_or_purpose: "review",
+      session_state: "CONVERGED",
+      final_verdict: decision.final_verdict,
+      slice,
+      sliceMerge,
+      sessionId: sessionAfterTurn.session_id,
+      verificationRunId: sliceMerge.verification_run_id,
+      trunkRevision: slice.trunk_base_revision,
+      testCommandsForReverify: deps.reverifyTestCommands,
+      environmentFingerprint: deps.environmentFingerprint,
+    },
+    dispatchDeps,
+  );
+
+  // P0-2 fix (PR #62 review): explicit guard for unmatched dispatch
+  // tuples. Previously the coordinator silently CONVERGED with no
+  // side-effects; now it records an error row and returns a distinct
+  // outcome so the CLI can exit non-zero.
+  if (dispatch.kind === "no_match") {
+    await deps.ledger.appendTransition({
+      transition_id: newMonotonicId(deps.clock.now()),
+      target_id: deps.targetId,
+      object_id: sessionAfterTurn.session_id,
+      object_kind: "dialogue_session",
+      from_state: "SESSION_OPEN",
+      to_state: "SESSION_OPEN",
+      loop_kind: "middle",
+      phase: null,
+      slice_id: slice.slice_id,
+      slice_kind: slice.slice_kind,
+      dod_revision: slice.dod_revision_pin,
+      session_id: sessionAfterTurn.session_id,
+      turn_index: turnIndex,
+      slot_kind: "delivery",
+      agent_profile_id: "sentinel",
+      contribution_kind: null,
+      action_kind: "session_finalize",
+      final_verdict: decision.final_verdict,
+      caller_id: deps.callerId,
+      manifest_id: null,
+      input_revision_pins: [],
+      output_hash: null,
+      verification_run_id: sliceMerge.verification_run_id,
+      metric_run_id: null,
+      idempotency_key: idempotencyKey({
+        scope: "external_observation",
+        parts: {
+          kind: "dispatch_no_match",
+          session_id: sessionAfterTurn.session_id,
+          final_verdict: decision.final_verdict,
+        },
+      }),
+      lease_token: null,
+      lease_kind: null,
+      result: "error",
+      result_detail: dispatch.detail.slice(0, 200),
+      timestamp: deps.clock.isoNow(),
+    });
+    return {
+      kind: "dispatch_no_match",
+      sessionId: sessionAfterTurn.session_id,
+      sliceId: slice.slice_id,
+      sliceMergeId: sliceMerge.slice_merge_id,
+      detail: dispatch.detail,
+    };
+  }
+
+  // Persist CONVERGED + final_verdict last (atomicity — see comment above).
   const finalized = DialogueSession.parse({
     ...sessionAfterTurn,
     state: "CONVERGED",
@@ -349,33 +450,6 @@ export async function runOneMiddleReviewTurn(
     timestamp: deps.clock.isoNow(),
   });
 
-  // Dispatch via caller-dispatch.
-  const dispatchDeps: DispatchDeps = {
-    store: deps.store,
-    clock: deps.clock,
-    ledger: deps.ledger,
-    workspace: deps.workspace,
-    verification: deps.verification,
-    callerId: deps.callerId,
-    targetId: deps.targetId,
-  };
-  const dispatch = await dispatchOutcome(
-    {
-      parent_loop: "middle",
-      phase_or_purpose: "review",
-      session_state: "CONVERGED",
-      final_verdict: decision.final_verdict,
-      slice,
-      sliceMerge,
-      sessionId: finalized.session_id,
-      verificationRunId: sliceMerge.verification_run_id,
-      trunkRevision: slice.trunk_base_revision,
-      testCommandsForReverify: deps.reverifyTestCommands,
-      environmentFingerprint: deps.environmentFingerprint,
-    },
-    dispatchDeps,
-  );
-
   return {
     kind: "turn_persisted",
     sessionId: finalized.session_id,
@@ -404,11 +478,16 @@ export async function pickReadyMiddleReview(
     } catch {
       continue;
     }
-    if (sm.state !== "SM_READY_FOR_REVIEW") continue;
+    // P0-5 fix (PR #62 review): also pick up SM_APPROVED + SLICE_INTEGRATING
+    // for the resume branch (mid-dispatch crash recovery).
+    if (sm.state !== "SM_READY_FOR_REVIEW" && sm.state !== "SM_APPROVED") continue;
     const sliceBody = await deps.store.readText(layout.slice(sm.slice_id));
     if (sliceBody == null) continue;
     const slice = Slice.parse(JSON.parse(sliceBody));
-    if (slice.state !== "SLICE_REVIEWING") continue;
+    if (sm.state === "SM_READY_FOR_REVIEW" && slice.state !== "SLICE_REVIEWING")
+      continue;
+    if (sm.state === "SM_APPROVED" && slice.state !== "SLICE_INTEGRATING")
+      continue;
     if (sm.review_session_id == null) {
       const session = await openMiddleReviewSession(slice, sm, deps);
       // Persist the link from sliceMerge → review_session_id so concurrent
@@ -584,6 +663,169 @@ async function loadVerificationSummary(
   } catch {
     return null;
   }
+}
+
+/**
+ * Load every persisted SessionTurn for a session and synthesise the
+ * TurnSummary[] termination-evaluator consumes. The verification run is
+ * the SliceMerge's frozen evidence (one per session for middle review);
+ * we attach it to the latest turn only so evidence_only / AND_evidence
+ * paths see a single conclusive verification record.
+ */
+async function loadAllTurnSummaries(
+  sessionId: string,
+  upToTurnIndexExclusive: number,
+  verificationRunId: string | null,
+  deps: Pick<CoordinatorDeps, "store">,
+): Promise<TurnSummary[]> {
+  const summaries: TurnSummary[] = [];
+  for (let i = 0; i < upToTurnIndexExclusive; i++) {
+    const body = await deps.store.readText(layout.sessionTurn(sessionId, i));
+    if (body == null) continue;
+    let parsed: { agent_role_in_session?: string; output_envelope?: { verdict?: TurnSummary["verdict"] } };
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      continue;
+    }
+    const role = (parsed.agent_role_in_session ?? "lead") as TurnSummary["agent_role_in_session"];
+    summaries.push({
+      agent_role_in_session: role,
+      verdict: parsed.output_envelope?.verdict ?? null,
+      verification: null,
+    });
+  }
+  // Attach the frozen verification to the latest turn only.
+  if (summaries.length > 0 && verificationRunId != null) {
+    const v = await loadVerificationSummary(verificationRunId, deps);
+    summaries[summaries.length - 1] = {
+      ...summaries[summaries.length - 1]!,
+      verification: v,
+    };
+  }
+  return summaries;
+}
+
+/**
+ * P0-5 fix (PR #62 review): resume the integrate step when a previous
+ * dispatch crashed between SM_APPROVED and SM_MERGED. We re-enter
+ * `caller-dispatch.dispatchOutcome` which calls `integrateSliceMerge`;
+ * its per_merge ledger key absorbs the prior SM_APPROVED row so we don't
+ * double-write it, and rebase + reverify are themselves idempotent.
+ *
+ * Also persists the CONVERGED finalization that the original run never
+ * got to write — without it the session would stay SESSION_OPEN forever.
+ */
+async function resumeIntegration(
+  slice: SliceT,
+  sliceMerge: SliceMergeT,
+  session: DialogueSessionT,
+  deps: CoordinatorDeps,
+): Promise<RunMiddleReviewOutcome> {
+  // Synthesise the CONVERGED+approve decision we know already happened
+  // (otherwise the SM would not be SM_APPROVED).
+  const decision: TerminationDecision = {
+    converged: true,
+    final_verdict: "approve",
+    finalization_decision: "composite",
+  };
+  const dispatchDeps: DispatchDeps = {
+    store: deps.store,
+    clock: deps.clock,
+    ledger: deps.ledger,
+    workspace: deps.workspace,
+    verification: deps.verification,
+    callerId: deps.callerId,
+    targetId: deps.targetId,
+  };
+  // Roll the SM "back" to SM_READY_FOR_REVIEW in-memory so the dispatch
+  // executor's promote step succeeds. The on-disk row is already SM_APPROVED;
+  // promoteSliceMergeToApproved is a no-op via the ledger duplicate guard
+  // (external_observation key with to_state=SM_APPROVED).
+  const dispatch = await dispatchOutcome(
+    {
+      parent_loop: "middle",
+      phase_or_purpose: "review",
+      session_state: "CONVERGED",
+      final_verdict: "approve",
+      slice,
+      sliceMerge: SliceMerge.parse({
+        ...sliceMerge,
+        state: "SM_READY_FOR_REVIEW",
+      }),
+      sessionId: session.session_id,
+      verificationRunId: sliceMerge.verification_run_id,
+      trunkRevision: slice.trunk_base_revision,
+      testCommandsForReverify: deps.reverifyTestCommands,
+      environmentFingerprint: deps.environmentFingerprint,
+    },
+    dispatchDeps,
+  );
+
+  // Persist CONVERGED if not already done. Idempotent via per_session_outcome key.
+  if (session.state === "SESSION_OPEN") {
+    const finalized = DialogueSession.parse({
+      ...session,
+      state: "CONVERGED",
+      final_verdict: decision.final_verdict,
+      finalization_decision: decision.finalization_decision,
+      updated_at: deps.clock.isoNow(),
+    });
+    await deps.store.writeAtomic(
+      layout.sessionMetadata(finalized.session_id),
+      JSON.stringify(finalized, null, 2),
+    );
+    await deps.ledger.appendTransition({
+      transition_id: newMonotonicId(deps.clock.now()),
+      target_id: deps.targetId,
+      object_id: finalized.session_id,
+      object_kind: "dialogue_session",
+      from_state: "SESSION_OPEN",
+      to_state: "CONVERGED",
+      loop_kind: "middle",
+      phase: null,
+      slice_id: slice.slice_id,
+      slice_kind: slice.slice_kind,
+      dod_revision: slice.dod_revision_pin,
+      session_id: finalized.session_id,
+      turn_index: session.current_turn_index - 1,
+      slot_kind: "delivery",
+      agent_profile_id: "sentinel",
+      contribution_kind: null,
+      action_kind: "session_finalize",
+      final_verdict: decision.final_verdict,
+      caller_id: deps.callerId,
+      manifest_id: null,
+      input_revision_pins: [],
+      output_hash: null,
+      verification_run_id: sliceMerge.verification_run_id,
+      metric_run_id: null,
+      idempotency_key: idempotencyKey({
+        scope: "per_session_outcome",
+        parts: {
+          session_id: finalized.session_id,
+          final_verdict: decision.final_verdict,
+          finalization_decision: decision.finalization_decision,
+          workspace_revision_pin_at_convergence:
+            sliceMerge.pre_merge_workspace_revision,
+        },
+      }),
+      lease_token: null,
+      lease_kind: null,
+      result: "applied",
+      result_detail: "resumed_after_crash",
+      timestamp: deps.clock.isoNow(),
+    });
+  }
+
+  return {
+    kind: "turn_persisted",
+    sessionId: session.session_id,
+    sliceId: slice.slice_id,
+    sliceMergeId: sliceMerge.slice_merge_id,
+    decision,
+    dispatch,
+  };
 }
 
 async function emitInvalidReviewTurn(

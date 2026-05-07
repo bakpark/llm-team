@@ -279,7 +279,7 @@ describe("Phase 3 middle review cycle", () => {
     ).toBeDefined();
   });
 
-  it("SM_STALE branch — rebase conflict during integration leaves SLICE_REVIEWING + SM_STALE", async () => {
+  it("SM_STALE branch — rebase conflict during integration → SLICE_BLOCKED + SM_STALE (PR #62 P0-4)", async () => {
     const workdir = mkdtempSync(join(tmpdir(), "middle-stale-"));
     const wsRoot = mkdtempSync(join(tmpdir(), "ws-"));
     seedFixture(workdir);
@@ -318,7 +318,10 @@ describe("Phase 3 middle review cycle", () => {
     const slice = readJson(workdir, layout.slice(SLICE_ID), (raw) =>
       Slice.parse(raw),
     );
-    expect(slice.state).toBe("SLICE_REVIEWING");
+    // P0-4 fix: SLICE_BLOCKED instead of SLICE_REVIEWING (which was an
+    // orphan state in phase 3 — pickReadyMiddleReview only finds
+    // SM_READY_FOR_REVIEW, so SLICE_REVIEWING + SM_STALE was un-pickable).
+    expect(slice.state).toBe("SLICE_BLOCKED");
 
     const sm = readJson(workdir, layout.sliceMerge(SLICE_MERGE_ID), (raw) =>
       SliceMerge.parse(raw),
@@ -333,6 +336,65 @@ describe("Phase 3 middle review cycle", () => {
           r.object_kind === "slice_merge" &&
           r.to_state === "SM_STALE" &&
           r.result === "stale",
+      ),
+    ).toBeDefined();
+  });
+
+  it("reverify fail during integration → SM_STALE + SLICE_BLOCKED (PR #62 P2-12)", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "middle-reverify-fail-"));
+    const wsRoot = mkdtempSync(join(tmpdir(), "ws-"));
+    seedFixture(workdir);
+    const store = new FsStore({ workdir });
+    const clock = new SystemClock();
+    const logger = new NdjsonLogger({ store, clock, relPath: LOG_DAEMON_PATH });
+    const ledger = new FileLedger({ store, logger });
+    const workspace = new FakeWorkspace(wsRoot);
+    await workspace.prepareInnerWorkspace({
+      sliceId: SLICE_ID,
+      trunkBaseRevision: "trunk-base",
+    });
+
+    const adapter = new StampingFakeAdapter(envelopeFixture("approve"));
+    const llmRunner = new AdapterRunnerPort(adapter);
+    // FakeVerification returns `fail` for the reverify pass even though
+    // rebase succeeds — this exercises the second SM_STALE branch the
+    // SM_STALE conflict test does not cover.
+    const verification = new FakeVerification(clock, { test: { result: "fail" } });
+
+    const out = await runOneMiddleReviewTurn({
+      store,
+      clock,
+      llmRunner,
+      workspace,
+      verification,
+      ledger,
+      callerId: "test-caller",
+      targetId: TARGET_ID,
+      environmentFingerprint: "vitest",
+      reverifyTestCommands: (cwd) => [{ argv: ["true"], cwd }],
+    });
+
+    expect(out.kind).toBe("turn_persisted");
+    if (out.kind !== "turn_persisted") return;
+
+    const slice = readJson(workdir, layout.slice(SLICE_ID), (raw) =>
+      Slice.parse(raw),
+    );
+    expect(slice.state).toBe("SLICE_BLOCKED");
+
+    const sm = readJson(workdir, layout.sliceMerge(SLICE_MERGE_ID), (raw) =>
+      SliceMerge.parse(raw),
+    );
+    expect(sm.state).toBe("SM_STALE");
+
+    const rows = readLedgerRows(workdir);
+    expect(
+      rows.find(
+        (r) =>
+          r.object_kind === "slice_merge" &&
+          r.to_state === "SM_STALE" &&
+          r.result === "stale" &&
+          (r.result_detail ?? "").includes("reverify"),
       ),
     ).toBeDefined();
   });
