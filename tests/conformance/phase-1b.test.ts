@@ -12,9 +12,23 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ContributionKind, OutputKind } from "../../src/domain/schema/contribution.js";
-import { SessionState } from "../../src/domain/schema/dialogue-session.js";
-import { FetchScope } from "../../src/domain/schema/manifest.js";
+import {
+  ContributionKind,
+  OutputKind,
+  ParentLoop,
+  FinalVerdict,
+} from "../../src/domain/schema/contribution.js";
+import {
+  CompositeRule,
+  FinalizationRule,
+  SessionState,
+} from "../../src/domain/schema/dialogue-session.js";
+import { FetchScope, ManifestPurpose } from "../../src/domain/schema/manifest.js";
+import { RoutingDecision } from "../../src/domain/schema/session-turn.js";
+import {
+  FailureType,
+} from "../../src/domain/schema/envelope.js";
+import { MetricComparator } from "../../src/domain/schema/verification.js";
 
 const REPO_ROOT = resolve(__dirname, "../..");
 const README = resolve(REPO_ROOT, "docs/contracts/README.md");
@@ -116,6 +130,24 @@ function findEnvelopeRow(section: string, field: string): string {
   return m[0];
 }
 
+/**
+ * Bidirectional drift gate: schema ↔ contract enum sets must match exactly.
+ * Every contract-listed literal must appear in the schema, AND every schema
+ * literal must appear in the contract — silent additions on either side
+ * fail the gate.
+ */
+function assertBidirectionalEnum(
+  schemaOptions: readonly string[],
+  contractLiterals: readonly string[],
+  label: string,
+): void {
+  const schemaSet = new Set(schemaOptions);
+  const contractSet = new Set(contractLiterals);
+  expect(schemaSet, `${label}: schema has unexpected literal`).toEqual(
+    contractSet,
+  );
+}
+
 describe("Phase 1b — AGC-OUTPUT envelope enum sync (schema ↔ contract)", () => {
   const contract = readFileSync(AGENT_CONTRACT, "utf8");
   const section = agcOutputSection(contract);
@@ -125,17 +157,7 @@ describe("Phase 1b — AGC-OUTPUT envelope enum sync (schema ↔ contract)", () 
     const fields = extractEnumFromRow(row).filter(
       (v) => !v.startsWith("#") && !v.startsWith("docs/"),
     );
-    const expected = [
-      "lead_draft",
-      "review_verdict",
-      "human_approval",
-      "session_outcome",
-      "proposal",
-    ];
-    for (const v of expected) {
-      expect(fields, `contribution_kind missing literal ${v}`).toContain(v);
-    }
-    expect(new Set(ContributionKind.options)).toEqual(new Set(expected));
+    assertBidirectionalEnum(ContributionKind.options, fields, "contribution_kind");
   });
 
   it("output_kind enum matches contract", () => {
@@ -143,58 +165,149 @@ describe("Phase 1b — AGC-OUTPUT envelope enum sync (schema ↔ contract)", () 
     const fields = extractEnumFromRow(row).filter(
       (v) => !v.startsWith("#") && !v.startsWith("docs/"),
     );
-    const expected = [
-      "spec_proposal",
-      "task_plan",
-      "slice_decomposition",
-      "patch",
-      "verdict",
-      "milestone_package",
-      "proposal_artifact",
-      "failure",
-    ];
-    for (const v of expected) {
-      expect(fields, `output_kind missing literal ${v}`).toContain(v);
-    }
-    expect(new Set(OutputKind.options)).toEqual(new Set(expected));
+    assertBidirectionalEnum(OutputKind.options, fields, "output_kind");
+  });
+
+  it("parent_loop enum matches contract", () => {
+    const row = findEnvelopeRow(section, "parent_loop");
+    const fields = extractEnumFromRow(row);
+    assertBidirectionalEnum(ParentLoop.options, fields, "parent_loop");
   });
 });
 
 describe("Phase 1b — AGC-CONTEXT-MANIFEST fetch_scope enum sync", () => {
   it("FetchScope schema enum matches the contract enum table", () => {
     const contract = readFileSync(AGENT_CONTRACT, "utf8");
-    // Contract Fetch Scope table rows:
-    //   | `metadata` | ... | `body` | ... | `tree` | ... | `body+comments` | ... | `body+turn_log` | ...
     const expected = ["metadata", "body", "tree", "body+comments", "body+turn_log"];
     for (const v of expected) {
-      // Each value appears wrapped in backticks in the table
       expect(contract).toContain(`\`${v}\``);
     }
-    expect(new Set(FetchScope.options)).toEqual(new Set(expected));
+    assertBidirectionalEnum(FetchScope.options, expected, "fetch_scope");
+  });
+
+  it("ManifestPurpose schema matches AGC-SESSION-INPUT purpose enum", () => {
+    const contract = readFileSync(AGENT_CONTRACT, "utf8");
+    const expected = [
+      "design",
+      "build",
+      "review",
+      "tdd_build",
+      "planning_decompose",
+      "validation",
+    ];
+    for (const v of expected) expect(contract).toContain(v);
+    assertBidirectionalEnum(ManifestPurpose.options, expected, "manifest purpose");
   });
 });
 
-describe("Phase 1b — SOC-SESSION-LIFECYCLE state enum sync", () => {
-  it("SessionState schema matches the 5-state contract enumeration", () => {
-    const soc = readFileSync(SOC_CONTRACT, "utf8");
-    for (const s of [
+describe("Phase 1b — SOC-SESSION-LIFECYCLE / TERMINATION enum sync", () => {
+  const soc = readFileSync(SOC_CONTRACT, "utf8");
+
+  it("SessionState matches the 5-state contract enumeration", () => {
+    const expected = [
       "SESSION_OPEN",
       "CONVERGED",
       "TIMEOUT",
       "ABANDONED",
       "AWAITING_REVALIDATION",
-    ]) {
-      expect(soc).toContain(s);
+    ];
+    for (const s of expected) expect(soc).toContain(s);
+    assertBidirectionalEnum(SessionState.options, expected, "SessionState");
+  });
+
+  it("FinalizationRule matches SOC-SESSION-TERMINATION", () => {
+    const expected = [
+      "lead_only",
+      "unanimous_approve",
+      "quorum_then_lead",
+      "any_request_changes_blocks",
+      "timeout_only",
+    ];
+    for (const v of expected) expect(soc).toContain(v);
+    assertBidirectionalEnum(FinalizationRule.options, expected, "FinalizationRule");
+  });
+
+  it("CompositeRule matches SOC-SESSION-TERMINATION", () => {
+    const expected = [
+      "finalization_AND_evidence",
+      "evidence_only",
+      "finalization_only",
+    ];
+    for (const v of expected) expect(soc).toContain(v);
+    assertBidirectionalEnum(CompositeRule.options, expected, "CompositeRule");
+  });
+
+  it("FinalVerdict matches SOC-SESSION-TERMINATION final_verdict table", () => {
+    const expected = [
+      "approve",
+      "request_changes",
+      "tests_green",
+      "spec_accept",
+      "spec_reject",
+      "plan_accept",
+      "validation_pass",
+      "validation_fail",
+      "validation_stale",
+      "no_progress",
+      "regression",
+      "scope_violation",
+    ];
+    for (const v of expected) expect(soc).toContain(`\`${v}\``);
+    assertBidirectionalEnum(FinalVerdict.options, expected, "FinalVerdict");
+  });
+});
+
+describe("Phase 1b — RoutingDecision / FailureType / MetricComparator enum sync", () => {
+  it("RoutingDecision matches AGC-NEXT-ACTION-REQUEST", () => {
+    const contract = readFileSync(AGENT_CONTRACT, "utf8");
+    const expected = ["accepted", "overridden", "delayed", "dropped"];
+    for (const v of expected) expect(contract).toContain(`\`${v}\``);
+    assertBidirectionalEnum(RoutingDecision.options, expected, "RoutingDecision");
+  });
+
+  it("FailureType matches AGC-LLM-NEUTRALITY / AGC-INVALID failure.type usages", () => {
+    const contract = readFileSync(AGENT_CONTRACT, "utf8");
+    // need_context / invalid_output explicitly listed in AGC-LLM-NEUTRALITY.
+    // no_progress / regression / scope_violation are abandoned_reason values
+    // mapped through SOC-SESSION-TERMINATION to failure.type for inner ABANDONED.
+    // Contract embeds these as `failure.type=<value>` in backticks.
+    for (const v of ["need_context", "invalid_output"]) {
+      expect(contract).toContain(`failure.type=${v}`);
     }
-    expect(new Set(SessionState.options)).toEqual(
+    expect(new Set(FailureType.options)).toEqual(
       new Set([
-        "SESSION_OPEN",
-        "CONVERGED",
-        "TIMEOUT",
-        "ABANDONED",
-        "AWAITING_REVALIDATION",
+        "need_context",
+        "invalid_output",
+        "no_progress",
+        "regression",
+        "scope_violation",
       ]),
     );
+  });
+
+  it("MetricComparator is the single shared enum across schemas", () => {
+    expect(new Set(MetricComparator.options)).toEqual(
+      new Set(["lte", "lt", "gte", "gt", "eq"]),
+    );
+  });
+});
+
+describe("Phase 1b — AGC-INVALID reason regression gate", () => {
+  it("envelope.ts exports the canonical reason set used by parser/enricher/matrix", async () => {
+    const mod = await import("../../src/application/envelope.js");
+    for (const r of [
+      "schema_violation",
+      "matrix_violation",
+      "missing_required_envelope_field",
+      "phase_or_purpose_outside_loop",
+      "agent_authored_idempotency_key",
+      "agent_authored_runtime_metadata",
+      "agent_authored_session_outcome",
+      "enrich_key_collision",
+      "legacy_field_present",
+    ] as const) {
+      expect(mod.AGC_INVALID_REASONS).toContain(r);
+    }
   });
 });
 

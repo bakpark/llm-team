@@ -6,6 +6,7 @@ import {
   FinalVerdict,
   ParentLoop,
 } from "./contribution.js";
+import { MetricComparator } from "./verification.js";
 
 /**
  * SOC-SESSION-LIFECYCLE / SOC-SESSION-TERMINATION schemas.
@@ -44,7 +45,6 @@ export const FinalizationRule = z.enum([
 ]);
 export type FinalizationRule = z.infer<typeof FinalizationRule>;
 
-const MetricComparator = z.enum(["lte", "lt", "gte", "gt", "eq"]);
 const CoverageComparator = z.enum(["gte", "gt"]);
 
 export const RequiredEvidence = z.discriminatedUnion("kind", [

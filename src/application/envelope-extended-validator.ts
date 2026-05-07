@@ -6,10 +6,17 @@ import type { Envelope } from "../domain/schema/envelope.js";
  *
  * Two-axis layout:
  * - `LOOP_PURPOSE_ROWS`: parent_loop × phase_or_purpose × contribution_kind
- * - `ANY_LOOP_ROWS`: contribution_kind only (matches across any loop)
+ * - `ANY_LOOP_ROWS`: contribution_kind only (matches across any loop).
+ *   Includes `human_approval`, `proposal`, and `session_outcome`. The latter
+ *   is Caller-only at the AGC-OUTPUT layer (Inv #4) — `application/
+ *   envelope.ts#parseAgentAuthored` rejects it before this matrix runs, so
+ *   only Caller-built canonical envelopes reach the row.
  *
- * `failure` output_kind is allowed in any combination provided the `failure`
- * block is present — handled before the matrix lookup.
+ * `failure` output_kind is allowed in any combination provided the
+ * `failure` block is present — but the loop-conditional fields
+ * (`slice_id`, `slice_kind`, `tdd_phase`) are still validated first, since
+ * AGC-OUTPUT lists them as conditional on `parent_loop` alone (independent
+ * of `output_kind`).
  */
 
 export type ExtendedValidationResult =
@@ -119,17 +126,10 @@ export function extendedValidate(env: Envelope): ExtendedValidationResult {
     };
   }
 
-  if (env.output_kind === "failure") {
-    if (env.failure == null) {
-      return {
-        ok: false,
-        reason: "missing_required_envelope_field",
-        detail: "output_kind=failure requires the `failure` block",
-      };
-    }
-    return { ok: true };
-  }
-
+  // AGC-OUTPUT slice_id / slice_kind / tdd_phase invariants apply regardless
+  // of output_kind — including `failure`. A failure envelope still has to
+  // identify the caller / session context it failed in. The failure
+  // short-circuit comes AFTER conditional-field validation, not before.
   if (env.parent_loop === "middle" || env.parent_loop === "inner") {
     if (env.slice_id == null) {
       return {
@@ -152,6 +152,17 @@ export function extendedValidate(env: Envelope): ExtendedValidationResult {
       reason: "missing_required_envelope_field",
       detail: "tdd_phase required for parent_loop=inner",
     };
+  }
+
+  if (env.output_kind === "failure") {
+    if (env.failure == null) {
+      return {
+        ok: false,
+        reason: "missing_required_envelope_field",
+        detail: "output_kind=failure requires the `failure` block",
+      };
+    }
+    return { ok: true };
   }
 
   const anyRow = ANY_LOOP_ROWS.find(

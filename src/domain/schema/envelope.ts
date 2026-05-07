@@ -104,7 +104,9 @@ const agentAuthoredShape = {
   contribution_kind: ContributionKind,
   parent_review_verdict_id: UlidString.nullable().default(null),
   output_kind: OutputKind,
-  object_id: z.string().min(1),
+  // AGC-OUTPUT: `object_id` 는 주 처리 대상 (slice / milestone / SliceMerge)
+  // 식별자. 셋 모두 Caller-issued ULID 이므로 schema 단에서 ULID refinement.
+  object_id: UlidString,
   manifest_id: UlidString,
   input_revision_pins: z.array(z.string().min(1)),
   summary: z.string().min(1),
@@ -117,6 +119,22 @@ const agentAuthoredShape = {
 export const AgentAuthoredEnvelope = z.object(agentAuthoredShape).strict();
 export type AgentAuthoredEnvelope = z.infer<typeof AgentAuthoredEnvelope>;
 
+/**
+ * Canonical post-enrichment envelope. Adds the two Caller-injected fields
+ * specified by AGC-OUTPUT-RUNTIME-ENRICH:
+ *   - `idempotency_key`: composed by `application/idempotency.ts` (the
+ *     SOC-IDEMPOTENCY 3-scope authority). Callers must NOT pass arbitrary
+ *     strings — `application/envelope.ts#enrichEnvelope` enforces this by
+ *     accepting `IdempotencyParts` rather than a free-form string.
+ *   - `runtime_metadata`: Caller-injected key-value bag. `application/
+ *     envelope.ts#enrichEnvelope` rejects keys that collide with envelope
+ *     fields.
+ *
+ * The `runtime_metadata` field carries an explicit empty-object default
+ * (`.default(() => ({}))`) — overriding the agent-authored shape's lack of
+ * default — so `Envelope.parse()` never produces an undefined runtime
+ * metadata bag.
+ */
 export const Envelope = z
   .object({
     ...agentAuthoredShape,

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { UlidString } from "../ids.js";
+import { ParentLoop } from "./contribution.js";
 import { LeaseKind } from "./lease.js";
 import { SliceKind } from "./slice.js";
 
@@ -15,7 +16,12 @@ export const LedgerObjectKind = z.enum([
 ]);
 export type LedgerObjectKind = z.infer<typeof LedgerObjectKind>;
 
-export const LedgerLoopKind = z.enum(["outer", "middle", "inner"]);
+/**
+ * The ledger row's `loop_kind` field uses the same {outer, middle, inner}
+ * enum as `AGC-OUTPUT.parent_loop`. Re-exported as `LedgerLoopKind` to
+ * preserve the existing import surface.
+ */
+export const LedgerLoopKind = ParentLoop;
 export type LedgerLoopKind = z.infer<typeof LedgerLoopKind>;
 
 export const LedgerOuterPhase = z.enum([

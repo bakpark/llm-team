@@ -6,6 +6,10 @@ import {
   type Envelope as EnvelopeT,
 } from "../domain/schema/envelope.js";
 import { extendedValidate } from "./envelope-extended-validator.js";
+import {
+  idempotencyKey,
+  type IdempotencyParts,
+} from "./idempotency.js";
 
 /**
  * AGC-OUTPUT envelope parser, runtime enricher, and post-enrichment matrix
@@ -42,6 +46,7 @@ export const AGC_INVALID_REASONS = [
   "context_budget_truncation",
   "agent_authored_runtime_metadata",
   "agent_authored_idempotency_key",
+  "agent_authored_session_outcome",
 ] as const;
 export type AgcInvalidReason = (typeof AGC_INVALID_REASONS)[number];
 
@@ -106,11 +111,27 @@ export function parseAgentAuthored(
       detail: zodMessage(parsed.error),
     };
   }
+  // AGC-CONTRIBUTION: `session_outcome` is Caller-only — agents must not
+  // produce it. Inv #4 (Caller-only operational write).
+  if (parsed.data.contribution_kind === "session_outcome") {
+    return {
+      ok: false,
+      reason: "agent_authored_session_outcome",
+      detail:
+        "Agent must not produce contribution_kind=session_outcome (AGC-CONTRIBUTION: Caller-only)",
+    };
+  }
   return { ok: true, value: parsed.data };
 }
 
 export interface EnrichmentInputs {
-  idempotency_key: string;
+  /**
+   * SOC-IDEMPOTENCY parts. The compositor in `application/idempotency.ts`
+   * deterministically derives the canonical envelope idempotency_key — we
+   * do not accept arbitrary strings, since that would bypass the SOC-
+   * IDEMPOTENCY 3-scope authority and break replay determinism.
+   */
+  idempotency: IdempotencyParts;
   runtime_metadata: Record<string, unknown>;
 }
 
@@ -140,9 +161,10 @@ export function enrichEnvelope(
       };
     }
   }
+  const composedKey = idempotencyKey(inputs.idempotency);
   const parsed = Envelope.safeParse({
     ...agent,
-    idempotency_key: inputs.idempotency_key,
+    idempotency_key: composedKey,
     runtime_metadata: inputs.runtime_metadata,
   });
   if (!parsed.success) {

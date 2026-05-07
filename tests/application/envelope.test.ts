@@ -6,11 +6,28 @@ import {
   parseAgentAuthored,
   validateEnvelope,
 } from "../../src/application/envelope.js";
+import type { IdempotencyParts } from "../../src/application/idempotency.js";
 
 const SESSION_ID = "01HZSE0000000000000000000A";
 const MANIFEST_ID = "01HZMA0000000000000000000A";
 const SLICE_ID = "01HZS00000000000000000000A";
 const M_ID = "01HZM00000000000000000000A";
+
+function perTurn(
+  overrides: Partial<IdempotencyParts extends { scope: "per_turn"; parts: infer P } ? P : never> = {},
+): IdempotencyParts {
+  return {
+    scope: "per_turn",
+    parts: {
+      session_id: SESSION_ID,
+      turn_index: 0,
+      agent_profile_id: "forge",
+      manifest_id: MANIFEST_ID,
+      input_revision_pins: ["abc1234"],
+      ...overrides,
+    },
+  };
+}
 
 function innerTdd(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -37,7 +54,7 @@ function pipeline(raw: Record<string, unknown>) {
   const parsed = parseAgentAuthored(raw);
   if (!parsed.ok) return parsed;
   const enriched = enrichEnvelope(parsed.value, {
-    idempotency_key: "k1",
+    idempotency: perTurn(),
     runtime_metadata: {},
   });
   if (!enriched.ok) return enriched;
@@ -89,26 +106,49 @@ describe("parseAgentAuthored", () => {
       parseAgentAuthored(innerTdd({ contribution_kind: "rework_patch" })),
     ).toMatchObject({ ok: false, reason: "schema_violation" });
   });
+
+  it("rejects contribution_kind=session_outcome (Caller-only per AGC-CONTRIBUTION)", () => {
+    expect(
+      parseAgentAuthored(
+        innerTdd({
+          contribution_kind: "session_outcome",
+          output_kind: "verdict",
+          verdict: { result: "tests_green", rationale: "passed" },
+        }),
+      ),
+    ).toMatchObject({ ok: false, reason: "agent_authored_session_outcome" });
+  });
 });
 
 describe("enrichEnvelope", () => {
-  it("returns canonical envelope with idempotency_key + runtime_metadata", () => {
+  it("composes idempotency_key from SOC-IDEMPOTENCY parts and injects runtime_metadata", () => {
     const a = parseAgentAuthored(innerTdd());
     if (!a.ok) throw new Error("agent parse failed");
     const r = enrichEnvelope(a.value, {
-      idempotency_key: "k1",
+      idempotency: perTurn(),
       runtime_metadata: { workspace_commit: "deadbeef" },
     });
     if (!r.ok) throw new Error("enrich failed");
-    expect(r.value.idempotency_key).toBe("k1");
+    expect(r.value.idempotency_key).toBe(
+      `per_turn|${SESSION_ID}|0|forge|${MANIFEST_ID}|abc1234`,
+    );
     expect(r.value.runtime_metadata).toEqual({ workspace_commit: "deadbeef" });
+  });
+
+  it("is deterministic — identical parts produce identical keys", () => {
+    const a = parseAgentAuthored(innerTdd());
+    if (!a.ok) throw new Error();
+    const r1 = enrichEnvelope(a.value, { idempotency: perTurn(), runtime_metadata: {} });
+    const r2 = enrichEnvelope(a.value, { idempotency: perTurn(), runtime_metadata: {} });
+    if (!r1.ok || !r2.ok) throw new Error();
+    expect(r1.value.idempotency_key).toBe(r2.value.idempotency_key);
   });
 
   it("rejects runtime_metadata key colliding with envelope field", () => {
     const a = parseAgentAuthored(innerTdd());
     if (!a.ok) throw new Error("agent parse failed");
     const r = enrichEnvelope(a.value, {
-      idempotency_key: "k1",
+      idempotency: perTurn(),
       runtime_metadata: { summary: "shadow" },
     });
     expect(r).toMatchObject({ ok: false, reason: "enrich_key_collision" });
@@ -118,7 +158,7 @@ describe("enrichEnvelope", () => {
     const a = parseAgentAuthored(innerTdd());
     if (!a.ok) throw new Error("agent parse failed");
     const r = enrichEnvelope(a.value, {
-      idempotency_key: "k1",
+      idempotency: perTurn(),
       runtime_metadata: { idempotency_key: "x" },
     });
     expect(r).toMatchObject({ ok: false, reason: "enrich_key_collision" });
@@ -236,6 +276,30 @@ describe("validateEnvelope (AGC-CONTRIBUTION-OUTPUTS matrix)", () => {
     ).toBe(true);
   });
 
+  it("output_kind=failure still requires loop-conditional fields (slice_id/slice_kind/tdd_phase)", () => {
+    // slice_id absent on inner failure must STILL be rejected — failure
+    // does not waive the AGC-OUTPUT loop-conditional invariants.
+    expect(
+      pipeline(
+        innerTdd({
+          slice_id: null,
+          output_kind: "failure",
+          failure: { type: "invalid_output", rationale: "x" },
+        }),
+      ),
+    ).toMatchObject({ ok: false, reason: "missing_required_envelope_field" });
+
+    expect(
+      pipeline(
+        innerTdd({
+          tdd_phase: null,
+          output_kind: "failure",
+          failure: { type: "invalid_output", rationale: "x" },
+        }),
+      ),
+    ).toMatchObject({ ok: false, reason: "missing_required_envelope_field" });
+  });
+
   it("accepts proposal contribution under any loop", () => {
     const r = pipeline(
       innerTdd({
@@ -284,6 +348,7 @@ describe("AgcInvalidError + AGC_INVALID_REASONS", () => {
       "phase_or_purpose_outside_loop",
       "agent_authored_idempotency_key",
       "agent_authored_runtime_metadata",
+      "agent_authored_session_outcome",
       "enrich_key_collision",
       "legacy_field_present",
     ] as const) {

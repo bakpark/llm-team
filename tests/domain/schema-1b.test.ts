@@ -183,6 +183,12 @@ describe("AgentAuthoredEnvelope (AGC-OUTPUT pre-enrichment)", () => {
       AgentAuthoredEnvelope.parse(baseAgent({ session_id: "not-ulid" })),
     ).toThrow();
   });
+
+  it("rejects non-ULID object_id (AGC-OUTPUT primary target must be Caller-issued)", () => {
+    expect(() =>
+      AgentAuthoredEnvelope.parse(baseAgent({ object_id: "not-a-ulid" })),
+    ).toThrow();
+  });
 });
 
 describe("Envelope (AGC-OUTPUT canonical)", () => {
@@ -212,31 +218,35 @@ describe("Envelope (AGC-OUTPUT canonical)", () => {
 });
 
 describe("SessionTurn schema", () => {
+  function baseEnvelope(): Record<string, unknown> {
+    return {
+      session_id: SESSION_ID,
+      turn_index: 0,
+      parent_loop: "inner",
+      phase_or_purpose: "tdd_build",
+      slice_id: SLICE_ID,
+      slice_kind: "internal",
+      tdd_phase: "red_green",
+      agent_profile_id: "forge",
+      agent_role_in_session: "lead",
+      contribution_kind: "lead_draft",
+      output_kind: "patch",
+      object_id: SLICE_ID,
+      manifest_id: MANIFEST_ID,
+      input_revision_pins: ["abc1234"],
+      summary: "first turn",
+      idempotency_key: "per_turn|sid|0|forge|mid|abc1234",
+      runtime_metadata: {},
+    };
+  }
+
   it("round-trips with embedded canonical envelope", () => {
     const turn = SessionTurn.parse({
       session_id: SESSION_ID,
       turn_index: 0,
       agent_profile_id: "forge",
       input_manifest_id: MANIFEST_ID,
-      output_envelope: {
-        session_id: SESSION_ID,
-        turn_index: 0,
-        parent_loop: "inner",
-        phase_or_purpose: "tdd_build",
-        slice_id: SLICE_ID,
-        slice_kind: "internal",
-        tdd_phase: "red_green",
-        agent_profile_id: "forge",
-        agent_role_in_session: "lead",
-        contribution_kind: "lead_draft",
-        output_kind: "patch",
-        object_id: SLICE_ID,
-        manifest_id: MANIFEST_ID,
-        input_revision_pins: ["abc1234"],
-        summary: "first turn",
-        idempotency_key: "k1",
-        runtime_metadata: {},
-      },
+      output_envelope: baseEnvelope(),
       caller_routing_decision: {
         decision: "dropped",
         decision_reason: "single-agent inner session, no next_action_request",
@@ -247,6 +257,29 @@ describe("SessionTurn schema", () => {
       recorded_at: ISO,
     });
     expect(turn.caller_routing_decision?.decision).toBe("dropped");
+    expect(turn.next_action_request).toBeNull();
+  });
+
+  it("supports top-level next_action_request mirror (SOC-SESSION-LIFECYCLE)", () => {
+    const turn = SessionTurn.parse({
+      session_id: SESSION_ID,
+      turn_index: 0,
+      agent_profile_id: "forge",
+      input_manifest_id: MANIFEST_ID,
+      output_envelope: baseEnvelope(),
+      next_action_request: {
+        addressed_to: "sentinel",
+        intent: "review draft",
+      },
+      caller_routing_decision: {
+        decision: "accepted",
+        decision_reason: "sentinel is the middle-review reviewer",
+        resolved_addressed_to: "sentinel",
+      },
+      workspace_commit: null,
+      recorded_at: ISO,
+    });
+    expect(turn.next_action_request?.addressed_to).toBe("sentinel");
   });
 });
 
