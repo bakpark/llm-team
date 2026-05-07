@@ -14,17 +14,25 @@ import { validateOrThrow } from "../application/config-validator.js";
 import { FileLedger } from "../application/ledger.js";
 import { LOG_DAEMON_PATH } from "../application/persistence-layout.js";
 import { runOneInnerTurn } from "../application/turn-worker.js";
+import { runOneMiddleReviewTurn } from "../application/dialogue-coordinator.js";
 import { SystemClock } from "../ports/clock.js";
 
 /**
- * Phase 2 CLI entrypoint — runs a single inner turn and exits.
+ * CLI entrypoint — runs a single coordinator iteration and exits.
  *
+ * Phase 2 (inner cycle, forge solo):
  *   tsx src/cli/runner.ts --once --agent-profile forge \
  *     --target ./target.json [--workdir <path>]
  *     [--fake-llm-fixtures <dir>] [--fake-workspace] [--fake-verification]
  *
- * Phase 2 enforcement: only `--once --agent-profile forge` is accepted.
- * Daemon mode arrives in phase 4.
+ * Phase 3 (middle review, sentinel solo):
+ *   tsx src/cli/runner.ts --once --dialogue-coordinator \
+ *     --target ./target.json [--workdir <path>]
+ *     [--fake-llm-fixtures <dir>] [--fake-workspace] [--fake-verification]
+ *
+ * `--dialogue-coordinator` and `--agent-profile` are mutually exclusive —
+ * the flag picks which loop the runner advances. Daemon mode (continuous
+ * cycle, multi-process) arrives in phase 4.
  *
  * PID lockdir at `<workdir>/log/runner.pid.lock` prevents two runners
  * from racing on the same workdir. The lock is released on exit.
@@ -33,6 +41,7 @@ import { SystemClock } from "../ports/clock.js";
 interface CliArgs {
   once: boolean;
   agentProfile: string;
+  dialogueCoordinator: boolean;
   targetPath: string;
   workdir?: string;
   fakeLlmFixtures?: string;
@@ -47,6 +56,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
   const out: CliArgs = {
     once: false,
     agentProfile: "",
+    dialogueCoordinator: false,
     targetPath: "./target.json",
     fakeWorkspace: false,
     fakeVerification: false,
@@ -60,6 +70,9 @@ function parseArgs(argv: readonly string[]): CliArgs {
         break;
       case "--agent-profile":
         out.agentProfile = a.shift() ?? "";
+        break;
+      case "--dialogue-coordinator":
+        out.dialogueCoordinator = true;
         break;
       case "--target":
         out.targetPath = a.shift() ?? "";
@@ -86,9 +99,15 @@ function parseArgs(argv: readonly string[]): CliArgs {
         throw new Error(`unknown flag: ${flag}`);
     }
   }
-  if (!out.once) throw new Error("phase 2 CLI requires --once");
-  if (out.agentProfile !== "forge")
-    throw new Error("phase 2 CLI only supports --agent-profile forge");
+  if (!out.once) throw new Error("CLI requires --once (phase 2/3 single-iteration only)");
+  if (out.dialogueCoordinator && out.agentProfile !== "")
+    throw new Error(
+      "phase 2/3 CLI: --dialogue-coordinator (phase 3 middle review pickup) and --agent-profile (phase 2 inner turn worker) are mutually exclusive — pick exactly one loop per invocation",
+    );
+  if (!out.dialogueCoordinator && out.agentProfile !== "forge")
+    throw new Error(
+      "phase 2 inner cycle requires --agent-profile forge (only forge runs inner tdd_build); use --dialogue-coordinator for phase 3 middle review",
+    );
   return out;
 }
 
@@ -148,6 +167,27 @@ async function main(argv: readonly string[]): Promise<number> {
         ? { argv: tokenize(args.testCmd), cwd }
         : { argv: ["npm", "test"], cwd },
     ];
+
+    if (args.dialogueCoordinator) {
+      const outcome = await runOneMiddleReviewTurn({
+        store,
+        clock,
+        llmRunner,
+        workspace,
+        verification,
+        ledger,
+        callerId: args.callerId,
+        targetId: cfg.identity.target_id,
+        environmentFingerprint: `node${process.version}`,
+        reverifyTestCommands: testCommands,
+      });
+      process.stdout.write(`${JSON.stringify(outcome)}\n`);
+      // P0-2 fix (PR #62 review): dispatch_no_match exits non-zero so CI
+      // surfaces a matrix-coverage gap; invalid_envelope is also an error.
+      return outcome.kind === "noop" || outcome.kind === "turn_persisted"
+        ? 0
+        : 1;
+    }
 
     const outcome = await runOneInnerTurn({
       store,

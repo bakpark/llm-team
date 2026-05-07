@@ -5,6 +5,7 @@ import type {
   CommitInput,
   CommitResult,
   PreparedWorkspace,
+  RebaseOutcome,
   WorkspacePort,
 } from "../../ports/workspace.js";
 
@@ -89,8 +90,54 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     return (await git(wt, ["rev-parse", "HEAD"])).stdout.trim();
   }
 
+  async prepareReadOnlyCheckout(input: {
+    sliceId: string;
+    revision: string;
+  }): Promise<PreparedWorkspace> {
+    const wt = this.readOnlyPath(input.sliceId);
+    if (!(await pathExists(wt))) {
+      mkdirSync(dirname(wt), { recursive: true });
+      await git(this.cfg.repoRoot, [
+        "worktree",
+        "add",
+        "--detach",
+        wt,
+        input.revision,
+      ]);
+    } else {
+      await git(wt, ["checkout", "--detach", input.revision]);
+    }
+    return { agentCwd: wt, headBefore: input.revision };
+  }
+
+  async rebaseOntoTrunk(input: {
+    sliceId: string;
+    trunkRevision: string;
+  }): Promise<RebaseOutcome> {
+    const wt = this.worktreePath(input.sliceId);
+    try {
+      await git(wt, ["rebase", input.trunkRevision]);
+    } catch (err) {
+      try {
+        await git(wt, ["rebase", "--abort"]);
+      } catch {
+        // best-effort
+      }
+      return {
+        result: "conflict",
+        reason: (err as Error).message.split("\n")[0] ?? "rebase failed",
+      };
+    }
+    const head = (await git(wt, ["rev-parse", "HEAD"])).stdout.trim();
+    return { result: "clean", commit: head };
+  }
+
   private worktreePath(sliceId: string): string {
     return resolve(this.cfg.workspacesDir, sliceId);
+  }
+
+  private readOnlyPath(sliceId: string): string {
+    return resolve(this.cfg.workspacesDir, `${sliceId}-readonly`);
   }
 
   private branchName(sliceId: string): string {

@@ -5,6 +5,7 @@ import type {
   CommitInput,
   CommitResult,
   PreparedWorkspace,
+  RebaseOutcome,
   WorkspacePort,
 } from "../../ports/workspace.js";
 
@@ -21,10 +22,24 @@ import type {
  * sorted file digests, so the same sequence of commits produces identical
  * pins across runs. No call to git is performed.
  */
+export interface FakeWorkspaceOptions {
+  /**
+   * When set, the fake workspace will fail rebases for the given slice ids
+   * with `result: "conflict"`. Tests use this to drive the SM_STALE branch.
+   */
+  rebaseConflictSlices?: ReadonlySet<string>;
+}
+
 export class FakeWorkspace implements WorkspacePort {
   private readonly state = new Map<string, { head: string; commits: number }>();
+  private readonly rebaseConflictSlices: ReadonlySet<string>;
 
-  constructor(private readonly rootDir: string) {}
+  constructor(
+    private readonly rootDir: string,
+    options: FakeWorkspaceOptions = {},
+  ) {
+    this.rebaseConflictSlices = options.rebaseConflictSlices ?? new Set();
+  }
 
   async prepareInnerWorkspace(input: {
     sliceId: string;
@@ -80,6 +95,38 @@ export class FakeWorkspace implements WorkspacePort {
   /** Test-only — directory where files have been materialised. */
   agentCwd(sliceId: string): string {
     return resolve(this.rootDir, sliceId);
+  }
+
+  async prepareReadOnlyCheckout(input: {
+    sliceId: string;
+    revision: string;
+  }): Promise<PreparedWorkspace> {
+    const dir = resolve(this.rootDir, `${input.sliceId}-readonly`);
+    mkdirSync(dir, { recursive: true });
+    return { agentCwd: dir, headBefore: input.revision };
+  }
+
+  async rebaseOntoTrunk(input: {
+    sliceId: string;
+    trunkRevision: string;
+  }): Promise<RebaseOutcome> {
+    if (this.rebaseConflictSlices.has(input.sliceId)) {
+      return {
+        result: "conflict",
+        reason: `fake conflict configured for slice_id=${input.sliceId}`,
+      };
+    }
+    const cur = this.state.get(input.sliceId);
+    if (cur == null)
+      throw new Error(
+        `rebase on un-prepared workspace for slice_id=${input.sliceId}`,
+      );
+    const next = cur.commits + 1;
+    const head = sha(
+      `${cur.head}|${input.sliceId}|${next}|rebase-onto|${input.trunkRevision}`,
+    ).slice(0, 40);
+    this.state.set(input.sliceId, { head, commits: next });
+    return { result: "clean", commit: head };
   }
 }
 

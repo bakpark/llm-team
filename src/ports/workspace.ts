@@ -1,12 +1,18 @@
 /**
  * Workspace port (#AGC-WORKSPACE).
  *
- * Phase 2 inner-only surface: prepares a slice-local mutable worktree,
- * applies envelope artefacts, commits to the slice-local branch, and
- * reports the current head revision (for revision_pin recheck).
+ * Phase 2 surface: prepares a slice-local mutable worktree, applies envelope
+ * artefacts, commits to the slice-local branch, and reports the current head
+ * revision.
  *
- * Read-only checkout (middle review) and trunk rebase (SliceMerge) are
- * deferred to phase 3.
+ * Phase 3 additions:
+ *   - `prepareReadOnlyCheckout` — middle review reviewer's read-only working
+ *     copy (worktree-pr-lifecycle.md §3 매트릭스). The reviewer never writes,
+ *     so this is a separate handle from `prepareInnerWorkspace`.
+ *   - `rebaseOntoTrunk` — SliceMerge integration step (SOC-MERGE-POLICY).
+ *     Tries to fast-forward the slice-local branch onto the supplied trunk
+ *     revision; clean → returns the new commit, conflict → caller dispatches
+ *     SM_STALE.
  */
 
 export interface PreparedWorkspace {
@@ -33,6 +39,10 @@ export interface CommitResult {
   commit: string;
 }
 
+export type RebaseOutcome =
+  | { result: "clean"; commit: string }
+  | { result: "conflict"; reason: string };
+
 export interface WorkspacePort {
   prepareInnerWorkspace(input: {
     sliceId: string;
@@ -48,4 +58,25 @@ export interface WorkspacePort {
 
   /** Current head revision of the slice-local branch. */
   head(sliceId: string): Promise<string>;
+
+  /**
+   * Prepare a separate read-only checkout pinned to a specific revision so
+   * a reviewer agent can inspect the slice without mutating the slice-local
+   * worktree. The implementation may return a different cwd from the inner
+   * workspace; callers must NOT pass this cwd to a `commit` invocation.
+   */
+  prepareReadOnlyCheckout(input: {
+    sliceId: string;
+    revision: string;
+  }): Promise<PreparedWorkspace>;
+
+  /**
+   * Try to rebase the slice-local branch onto the supplied trunk revision.
+   * Clean → returns the new commit. Conflict → returns a structured failure
+   * so the caller can transition the SliceMerge to SM_STALE.
+   */
+  rebaseOntoTrunk(input: {
+    sliceId: string;
+    trunkRevision: string;
+  }): Promise<RebaseOutcome>;
 }
