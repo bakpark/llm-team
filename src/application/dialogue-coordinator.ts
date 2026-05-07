@@ -37,6 +37,10 @@ import {
   type DispatchDeps,
   type DispatchResult,
 } from "./caller-dispatch.js";
+import { assertCanAcquire } from "./lease-acquisition-order.js";
+import { resolveLeaseTtl } from "./lease-ttl-resolver.js";
+import type { LeasePort } from "../ports/lease.js";
+import type { LeaseConfig } from "../config/target-schema.js";
 import { idempotencyKey } from "./idempotency.js";
 import type { LedgerAppender } from "./ledger.js";
 import {
@@ -73,6 +77,17 @@ export interface CoordinatorDeps {
   environmentFingerprint: string;
   agentTimeoutSec?: number;
   maxReviewTurns?: number;
+  /**
+   * PR #63 review fix: phase-4 wire-up. When provided, the coordinator
+   * claims a `session_lease` for the duration of the middle review turn.
+   * Killed-daemon scenarios are then recoverable by `runRecoverySweep`
+   * (the lease expires → SESSION_OPEN → AWAITING_REVALIDATION).
+   *
+   * Optional so phase-2 / older tests can keep using the coordinator
+   * without leases, but operational deployment passes both.
+   */
+  lease?: LeasePort;
+  leaseConfig?: LeaseConfig;
 }
 
 export type RunMiddleReviewOutcome =
@@ -99,6 +114,13 @@ export type RunMiddleReviewOutcome =
       sliceId: string;
       sliceMergeId: string;
       detail: string;
+    }
+  | {
+      /** PR #63 review wire-up: another worker holds the session_lease. */
+      kind: "lease_unavailable";
+      sessionId: string;
+      sliceId: string;
+      detail: string;
     };
 
 /**
@@ -118,6 +140,61 @@ export async function runOneMiddleReviewTurn(
     };
   const { slice, sliceMerge, session } = ready;
   const turnIndex = session.current_turn_index;
+
+  // PR #63 review fix: claim a session_lease for the entire middle review
+  // turn so a killed daemon's orphan SESSION_OPEN session is recoverable
+  // by `runRecoverySweep` (lease expires → AWAITING_REVALIDATION). Without
+  // this wire-up the phase-4 sweep sees zero phase-3-style orphans.
+  let leaseClaim: Awaited<ReturnType<NonNullable<typeof deps.lease>["claim"]>> | null = null;
+  if (deps.lease != null) {
+    assertCanAcquire([], "session_lease");
+    const ttl = resolveLeaseTtl({
+      leaseKind: "session_lease",
+      leaseConfig: deps.leaseConfig,
+      phase: "review",
+      agentProfileId: "sentinel",
+    });
+    leaseClaim = await deps.lease.claim({
+      leaseKind: "session_lease",
+      objectId: session.session_id,
+      workerId: deps.callerId,
+      ttlMs: ttl.ttlMs,
+      ttlSource: ttl.source,
+      targetId: deps.targetId,
+      aux: {
+        kind: "session_lease",
+        session_id: session.session_id,
+        agent_profile_id: "sentinel",
+      },
+    });
+    if (leaseClaim.result === "claim_failed") {
+      return {
+        kind: "lease_unavailable",
+        sessionId: session.session_id,
+        sliceId: slice.slice_id,
+        detail: `session_lease held by ${leaseClaim.existingHolder} (lease_id=${leaseClaim.existingLeaseId})`,
+      };
+    }
+  }
+  try {
+    return await runMiddleReviewTurnInner(slice, sliceMerge, session, turnIndex, deps);
+  } finally {
+    if (leaseClaim != null && leaseClaim.result === "acquired" && deps.lease != null) {
+      await deps.lease.release({
+        leaseId: leaseClaim.lease.lease_id,
+        leaseToken: leaseClaim.lease.lease_token,
+      });
+    }
+  }
+}
+
+async function runMiddleReviewTurnInner(
+  slice: SliceT,
+  sliceMerge: SliceMergeT,
+  session: DialogueSessionT,
+  turnIndex: number,
+  deps: CoordinatorDeps,
+): Promise<RunMiddleReviewOutcome> {
 
   // P0-5 fix (PR #62 review): resume branch — if the SliceMerge is already
   // SM_APPROVED + slice is SLICE_INTEGRATING, the previous run crashed
