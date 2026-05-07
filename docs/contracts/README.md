@@ -351,7 +351,7 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 | `AGC-CONTRIBUTION` | partial | `src/domain/schema/contribution.ts` (`ContributionKind`, `OutputKind`, `FinalVerdict`, `ParentLoop`, `AgentProfileId`, `AgentRoleInSession`, `TddPhase` zod enums) | always_hard (enum 검증) | 2026-05-05-loop (enum 정정) |
 | `AGC-CALL-BOUNDARY` | partial | `application/agent_io.sh`, `lib/ports/*` | always_hard (caller_only_operational_write) | 2026-05-05-loop (turn 단위로 재정의) |
 | `AGC-SESSION-INPUT` ★ | spec-only | contract prose | always_hard (manifest_external_read_write) | 2026-05-05-loop |
-| `AGC-PROMPT-SERIALIZATION` ★ | spec-only | contract prose. prompt builder catch-up (`docs/architecture/prompt-build-pipeline.md`) | always_hard (4-part layout + header echo 7 필드) | 2026-05-05-loop |
+| `AGC-PROMPT-SERIALIZATION` ★ | partial | `src/application/prompt-compose.ts` (frontmatter 7 필드 + Context/Instruction/Output Schema 4-part 조립), `src/adapters/llm-runner/common/prompt-relay.ts` (`assertFourPartLayout` preflight), `src/application/agent-io.ts` (`checkHeaderEcho` 7-field 검증) | always_hard (4-part layout + header echo 7 필드) | 2026-05-05-loop |
 | `AGC-NEXT-ACTION-REQUEST` ★ | spec-only | contract prose | always_hard (direct_invocation_forbidden, decision_reason 필수) | 2026-05-05-loop |
 | `AGC-TURN-ORDERING` ★ | spec-only | contract prose + `dialogue_coordinator.sh` (Stage 2) | always_hard (priority + fairness) | 2026-05-05-loop |
 | `AGC-CONFLICT-RESOLUTION` ★ | spec-only | contract prose + `dialogue_coordinator.sh` (Stage 2) | always_hard (re-dispatch / human escalation) | 2026-05-05-loop |
@@ -361,7 +361,7 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 | `AGC-OUTPUT-RUNTIME-ENRICH` | partial | `src/application/envelope.ts` (`enrichEnvelope` injects `idempotency_key` + `runtime_metadata`, rejects key collisions and agent-authored caller-only fields) | always_hard | 2026-05-05-loop (3-scope idempotency 매핑) |
 | `AGC-LLM-NEUTRALITY` ★ | spec-only | contract prose. adapter normalize 책임 (`adapters/llm_runner/*`) | always_hard (provider-native → envelope normalize) | 2026-05-05-loop |
 | `AGC-CONTRIBUTION-OUTPUTS` | partial | `src/application/envelope-extended-validator.ts` (data-driven (parent_loop, phase_or_purpose, contribution_kind) → output_kind / verdict.result matrix) | always_hard (output_kind 매트릭스 검증) | 2026-05-05-loop |
-| `AGC-WORKSPACE` | partial | `adapters/workspace/*`, `application/caller_dispatch.sh` | stage_graded:scope_violation=warn (Stage 3b block) | 2026-05-05-loop (inner scope enforcement) |
+| `AGC-WORKSPACE` | partial | `src/ports/workspace.ts` (`WorkspacePort.prepareInnerWorkspace` + `commit` + `head`), `src/adapters/workspace/git-worktree.ts` (slice-local worktree), `src/adapters/workspace/fake.ts` (in-memory deterministic worktree). middle read-only checkout 은 phase 3 | stage_graded:scope_violation=warn (Stage 3b block) | 2026-05-05-loop (inner scope enforcement) |
 | `AGC-ISSUE-BODY` | spec-only | `docs/architecture/agent-output-format-mapping.md` | n/a (rendering 규약) | original |
 | `AGC-INVALID` | partial | `src/application/envelope.ts` (`AGC_INVALID_REASONS` enum, `AgcInvalidError`, parser/enricher/matrix classification surface). TDD strict / session_id collision / scope_violation 분기는 phase 2+ catch-up | always_hard | 2026-05-05-loop (TDD strict / session_id 충돌 추가) |
 
@@ -373,12 +373,12 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 | `SOC-OBJECTS` | spec-only | contract prose. legacy `lib/state.sh` 는 milestone/task/CP 만 — Stage 2 rewrite | always_hard | 2026-05-05-loop (Slice/DialogueSession/SessionTurn/SliceMerge 신설) |
 | `SOC-LOOPS` ★ | spec-only | contract prose | always_hard (loop_kind 분류) | 2026-05-05-loop |
 | `SOC-MILESTONE-DUAL-SLOT` ★ | spec-only | `lib/dual_track_scheduler.sh` (Stage 4) | stage_graded:dual_slot_fairness=warn (Stage 5 block) | 2026-05-05-loop |
-| `SOC-SLICE-LIFECYCLE` ★ | spec-only | `lib/slice.sh` (Stage 2) | always_hard (state machine) | 2026-05-05-loop |
+| `SOC-SLICE-LIFECYCLE` ★ | partial | `src/domain/schema/slice.ts` (7-state schema), `src/application/ready-object.ts` (`pickReadyInnerTurn`: SLICE_READY → SLICE_BUILDING + session open), `src/application/turn-worker.ts` (`runOneInnerTurn`: SLICE_BUILDING → SLICE_REVIEWING on tests_green). middle review / SLICE_INTEGRATING / SLICE_VALIDATED 는 phase 3 | always_hard (state machine) | 2026-05-05-loop |
 | `SOC-SLICE-DEPENDENCIES` ★ | spec-only | `lib/slice.sh` + Planning lead artifact validation (Stage 2) | always_hard (cycle detection) | 2026-05-05-loop |
 | `SOC-SLICE-CLASS` ★ | spec-only | `lib/slice.sh` + escalation rule lookup (Stage 4) | always_hard (escalation 평가) | 2026-05-05-loop |
 | `SOC-SESSION-LIFECYCLE` ★ | partial | `src/domain/schema/dialogue-session.ts` (`DialogueSession` 5-state schema + `Participant`), `src/domain/schema/session-turn.ts` (`SessionTurn` + `CallerRoutingDecision`). dialogue coordinator dispatch 는 phase 3 | always_hard (state machine) | 2026-05-05-loop |
 | `SOC-SESSION-TERMINATION` ★ | partial | `src/domain/schema/dialogue-session.ts` (`SessionTermination` block: `FinalizationRule`, `RequiredEvidence`, `CompositeRule`). evaluator 는 phase 3 (`termination-evaluator.ts`) | stage_graded:required_evidence_unmet=warn (Stage 3b block) | 2026-05-05-loop |
-| `SOC-SLICE-MERGE` ★ | spec-only | `lib/slice_merge.sh` (Stage 2) | always_hard (state machine) | 2026-05-05-loop |
+| `SOC-SLICE-MERGE` ★ | partial | `src/domain/schema/slice-merge.ts` (7-state schema), `src/application/turn-worker.ts` (`openSliceMergeReadyForReview`: SM_DRAFT → SM_READY_FOR_REVIEW after inner CONVERGED tests_green). SM_APPROVED / SM_MERGED / SM_STALE 분기는 phase 3 | always_hard (state machine) | 2026-05-05-loop |
 | `SOC-DUAL-MILESTONE-BRANCH` ★ | spec-only | trunk 정책 (`SOC-MERGE-POLICY` 와 결합) | always_hard | 2026-05-05-loop |
 | `SOC-CROSS-MILESTONE-REFERENCE` ★ | spec-only | `application/dialogue_coordinator.sh` 의 cross-slot stale 감지 (Stage 4) | stage_graded:telemetry_enrichment_missing=warn | 2026-05-05-loop |
 | `SOC-INTAKE` | active | `application/feature_request.sh` | always_hard (idempotency_key) | 2026-05-05-loop (M_INTAKE_QUEUED 도입) |
@@ -404,7 +404,7 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 | `RGC-DUAL-GATE-QUEUE` ★ | spec-only | `dual_track_scheduler.sh` (Stage 4) | always_hard (FIFO + idempotency) | 2026-05-05-loop |
 | `RGC-RECOVERY` | spec-only | `application/recovery.sh` (legacy-only catch-up needed) | always_hard | 2026-05-05-loop (loop-aware trigger) |
 | `RGC-FAILURE` | partial | `application/recovery.sh`, `scripts/cli/daemon.sh` | always_hard | 2026-05-05-loop (retry/escalation 운영 정책 매핑) |
-| `RGC-VERIFICATION` | partial | `src/domain/schema/verification.ts` (`VerificationRun` + `MetricRun` schemas). 실행자 (`application/verification-runner.ts`) 는 phase 2 | always_hard (deterministic_verification_authority) | 2026-05-05-loop (VerificationRun + MetricRun + required_evidence) |
+| `RGC-VERIFICATION` | partial | `src/domain/schema/verification.ts` (`VerificationRun` + `MetricRun` schemas), `src/ports/verification.ts` (`VerificationPort.runBuild/runTest/runLint/runMetric`), `src/adapters/verification/shell.ts` (실 실행), `src/adapters/verification/fake.ts` (테스트), `src/application/verification-runner.ts` (`runInnerVerification` — inner 동기 실행 + VerificationRun 영속). middle / outer 비동기 trigger 는 phase 3 | always_hard (deterministic_verification_authority) | 2026-05-05-loop (VerificationRun + MetricRun + required_evidence) |
 | `RGC-HUMAN-CONTRIBUTION` | spec-only | `application/human_signal.sh` (legacy-only catch-up needed) | always_hard (required human contribution) | 2026-05-05-loop (feature slice 한정 scope) |
 | `RGC-LEDGER` | partial | `src/domain/schema/ledger.ts` (필수 필드 schema), `src/application/ledger.ts` (`FileLedger.appendTransition` + audit_hash chain), `src/domain/audit-hash.ts` (sha256 canonical-json [prevHash, row]) | always_hard (필수 필드) | 2026-05-05-loop (slice/session/turn/loop_kind/action_kind/final_verdict 추가) |
 | `RGC-PAUSE` | active | `lib/signals.sh`, `scripts/cli/control.sh`, `application/human_signal.sh` | always_hard | original |
@@ -455,10 +455,10 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 | Anchor | Status | Implementation Surface | Enforcement | Active Since |
 |---|---|---|---|---|
 | `ARC-SCOPE` | active | contract authority | n/a | 2026-05-05-loop (AGC vs ARC 책임 분리 추가) |
-| `ARC-PORT-SIGNATURE` | spec-only | `lib/ports/llm_runner.sh` rewrite (Stage 2). legacy signature 기준 → loop-based | always_hard (signature shape) | 2026-05-05-loop (session_id/turn_index/parent_loop/agent_role_in_session/session_context_ref 필수) |
-| `ARC-CALL-SEMANTICS` | active | `scheduler/runner.sh`, `adapters/llm_runner/*` | always_hard (stateless per call) | 2026-05-05-loop (turn 단위 strict + session state 미보유) |
+| `ARC-PORT-SIGNATURE` | partial | `src/ports/llm-runner.ts` (`LlmRunnerPort` interface + `LlmRunnerInput` / `LlmRunnerResult` 시그니처), `src/ports/llm-runner-executor.ts` (`runInvoke` 4-tuple 보장). | always_hard (signature shape) | 2026-05-05-loop (session_id/turn_index/parent_loop/agent_role_in_session/session_context_ref 필수) |
+| `ARC-CALL-SEMANTICS` | partial | `src/ports/llm-runner-executor.ts` (`runInvoke` — turn 단위 stateless invoke + 4-tuple 결과), `src/adapters/llm-runner/runtime-port.ts` (`AdapterRunnerPort` — provider adapter 를 contract-shaped port 로 노출), `src/application/agent-io.ts` (`callAgent` consumer — session state 미보유 호출). | always_hard (stateless per call) | 2026-05-05-loop (turn 단위 strict + session state 미보유) |
 | `ARC-EXIT-CLASSES` | active | `lib/ports/llm_runner.sh` `lr_classify_exit` | n/a (분류) | original |
 | `ARC-IDEMPOTENCY` | spec-only | `application/caller_dispatch.sh` + ledger (Stage 2) | always_hard | 2026-05-05-loop (3-scope per-turn / per-session-outcome / per-merge) |
-| `ARC-ADAPTER-PROMPT-CONTRACT` ★ | spec-only | `adapters/llm_runner/*` catch-up (Stage 2) | always_hard (4-part layout 보존) | 2026-05-05-loop |
+| `ARC-ADAPTER-PROMPT-CONTRACT` ★ | partial | `src/adapters/llm-runner/common/prompt-relay.ts` (`assertFourPartLayout`), `src/ports/llm-runner-executor.ts` (preflight before adapter spawn), `src/adapters/llm-runner/claude-code.ts`, `src/adapters/llm-runner/codex-cli.ts`, `src/adapters/llm-runner/fake.ts` (provider adapters relay stdin verbatim) | always_hard (4-part layout 보존) | 2026-05-05-loop |
 | `ARC-ADAPTER-SUBSTITUTION` | spec-only | `TCC-AGENT-PROFILES` binding (Stage 2) | always_hard (agent_profile_id 기반) | phase-pivot |
 | `ARC-FAILURE-MODES` | active | `lib/ports/llm_runner.sh`, `scheduler/runner.sh` | n/a (분류) | original |
