@@ -37,8 +37,20 @@ export const Governance = z
 
 export type Governance = z.infer<typeof Governance>;
 
+export const Identity = z
+  .object({
+    target_id: z.string().min(1),
+    workdir_path: z.string().min(1).optional(),
+    audit_hash_seed: z.string().min(1).optional(),
+    label_prefix: z.string().min(1).optional(),
+  })
+  .strict();
+
+export type Identity = z.infer<typeof Identity>;
+
 export const TargetConfig = z
   .object({
+    identity: Identity,
     agent_profiles: z
       .object({
         atlas: ProfileCfg,

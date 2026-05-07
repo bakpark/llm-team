@@ -8,10 +8,13 @@ import {
 } from "../../src/config/runner-registry.js";
 import { parseTargetConfig } from "../../src/config/target-schema.js";
 
+const ID = { target_id: "demo-target" };
+
 describe("target-schema", () => {
   it("rejects unknown runner ids", () => {
     expect(() =>
       parseTargetConfig({
+        identity: ID,
         agent_profiles: {
           atlas: { runner: "nope" },
           forge: { runner: "claude_code" },
@@ -25,6 +28,7 @@ describe("target-schema", () => {
   it("rejects unknown keys via .strict()", () => {
     expect(() =>
       parseTargetConfig({
+        identity: ID,
         agent_profiles: {
           atlas: { runner: "claude_code", typo_key: "x" },
           forge: { runner: "claude_code" },
@@ -37,6 +41,7 @@ describe("target-schema", () => {
 
   it("accepts a fully populated profile set", () => {
     const cfg = parseTargetConfig({
+      identity: ID,
       agent_profiles: {
         atlas: { runner: "claude_code", model: "claude-opus-4-7" },
         forge: { runner: "codex_cli", model: "gpt-5.4", profile: "coder" },
@@ -45,6 +50,54 @@ describe("target-schema", () => {
       },
     });
     expect(cfg.agent_profiles.atlas.model).toBe("claude-opus-4-7");
+  });
+
+  it("requires identity.target_id", () => {
+    expect(() =>
+      parseTargetConfig({
+        agent_profiles: {
+          atlas: { runner: "claude_code" },
+          forge: { runner: "claude_code" },
+          sentinel: { runner: "claude_code" },
+          scout: { runner: "claude_code" },
+        },
+      }),
+    ).toThrow();
+  });
+
+  it("accepts identity with optional workdir_path and audit_hash_seed", () => {
+    const cfg = parseTargetConfig({
+      identity: {
+        target_id: "demo-target",
+        workdir_path: "/tmp/workdir",
+        audit_hash_seed: "seed-1",
+        label_prefix: "demo:",
+      },
+      agent_profiles: {
+        atlas: { runner: "claude_code" },
+        forge: { runner: "claude_code" },
+        sentinel: { runner: "claude_code" },
+        scout: { runner: "claude_code" },
+      },
+    });
+    expect(cfg.identity.target_id).toBe("demo-target");
+    expect(cfg.identity.workdir_path).toBe("/tmp/workdir");
+    expect(cfg.identity.audit_hash_seed).toBe("seed-1");
+    expect(cfg.identity.label_prefix).toBe("demo:");
+  });
+
+  it("rejects identity with empty target_id", () => {
+    expect(() =>
+      parseTargetConfig({
+        identity: { target_id: "" },
+        agent_profiles: {
+          atlas: { runner: "claude_code" },
+          forge: { runner: "claude_code" },
+          sentinel: { runner: "claude_code" },
+          scout: { runner: "claude_code" },
+        },
+      }),
+    ).toThrow();
   });
 });
 
@@ -74,6 +127,7 @@ describe("createAdapter", () => {
 describe("buildRunnerRegistry", () => {
   it("returns ports for the four LLM profiles only (no human)", () => {
     const cfg = parseTargetConfig({
+      identity: ID,
       agent_profiles: {
         atlas: { runner: "claude_code" },
         forge: { runner: "codex_cli" },
@@ -104,6 +158,7 @@ describe("target.governance", () => {
 
   it("accepts a fully populated governance block with defaults", () => {
     const cfg = parseTargetConfig({
+      identity: ID,
       agent_profiles: baseProfiles,
       governance: {
         human_team: "myorg/approvers",
@@ -114,7 +169,6 @@ describe("target.governance", () => {
     expect(cfg.governance?.human_team).toBe("myorg/approvers");
     expect(cfg.governance?.control_issue_number).toBe(1);
     expect(cfg.governance?.contract_change_issue_number).toBe(2);
-    // defaults
     expect(cfg.governance?.signal_command_prefix).toBe("/");
     expect(cfg.governance?.human_team_cache_ttl_seconds).toBe(300);
     expect(cfg.governance?.unauthorized_author_alert).toBe(false);
@@ -122,6 +176,7 @@ describe("target.governance", () => {
 
   it("permits explicit override of optional fields", () => {
     const cfg = parseTargetConfig({
+      identity: ID,
       agent_profiles: baseProfiles,
       governance: {
         human_team: "myorg/approvers",
@@ -139,6 +194,7 @@ describe("target.governance", () => {
 
   it("default human_team_cache_ttl_seconds matches TCC-GOVERNANCE doc value (300)", () => {
     const cfg = parseTargetConfig({
+      identity: ID,
       agent_profiles: baseProfiles,
       governance: {
         human_team: "myorg/approvers",
@@ -153,9 +209,9 @@ describe("target.governance", () => {
   it("rejects governance with missing required field", () => {
     expect(() =>
       parseTargetConfig({
+        identity: ID,
         agent_profiles: baseProfiles,
         governance: {
-          // human_team missing
           control_issue_number: 1,
           contract_change_issue_number: 2,
         },
@@ -166,6 +222,7 @@ describe("target.governance", () => {
   it("rejects unknown governance keys via .strict()", () => {
     expect(() =>
       parseTargetConfig({
+        identity: ID,
         agent_profiles: baseProfiles,
         governance: {
           human_team: "myorg/approvers",
@@ -180,6 +237,7 @@ describe("target.governance", () => {
   it("rejects non-positive issue numbers", () => {
     expect(() =>
       parseTargetConfig({
+        identity: ID,
         agent_profiles: baseProfiles,
         governance: {
           human_team: "myorg/approvers",
@@ -191,13 +249,17 @@ describe("target.governance", () => {
   });
 
   it("permits omitting the governance block entirely", () => {
-    const cfg = parseTargetConfig({ agent_profiles: baseProfiles });
+    const cfg = parseTargetConfig({
+      identity: ID,
+      agent_profiles: baseProfiles,
+    });
     expect(cfg.governance).toBeUndefined();
   });
 
   it("rejects negative human_team_cache_ttl_seconds", () => {
     expect(() =>
       parseTargetConfig({
+        identity: ID,
         agent_profiles: baseProfiles,
         governance: {
           human_team: "myorg/approvers",
@@ -212,6 +274,7 @@ describe("target.governance", () => {
   it("rejects non-integer issue numbers", () => {
     expect(() =>
       parseTargetConfig({
+        identity: ID,
         agent_profiles: baseProfiles,
         governance: {
           human_team: "myorg/approvers",
@@ -225,6 +288,7 @@ describe("target.governance", () => {
   it("rejects empty signal_command_prefix", () => {
     expect(() =>
       parseTargetConfig({
+        identity: ID,
         agent_profiles: baseProfiles,
         governance: {
           human_team: "myorg/approvers",
@@ -239,6 +303,7 @@ describe("target.governance", () => {
   it("rejects identical control_issue_number and contract_change_issue_number", () => {
     expect(() =>
       parseTargetConfig({
+        identity: ID,
         agent_profiles: baseProfiles,
         governance: {
           human_team: "myorg/approvers",
