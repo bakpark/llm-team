@@ -23,6 +23,13 @@ export interface FsStoreOptions {
   lockTimeoutMs?: number;
   /** Lockdir age beyond which the lock is treated as stale. Default 60_000ms. */
   staleLockMs?: number;
+  /**
+   * Lockdir age below which a missing keeper is interpreted as a winner mid-
+   * acquisition (mkdir succeeded but writeFile keeper not yet completed).
+   * Default 1_000ms. Must be ≪ staleLockMs so abandoned locks are still
+   * reclaimed in a timely fashion.
+   */
+  raceWindowMs?: number;
 }
 
 const LOCK_KEEPER = ".holder";
@@ -32,6 +39,7 @@ export class FsStore implements StorePort {
   private readonly fsyncDir: boolean;
   private readonly lockTimeoutMs: number;
   private readonly staleLockMs: number;
+  private readonly raceWindowMs: number;
   /** Per-path in-process serialization for appendLine. */
   private readonly appendChains = new Map<string, Promise<unknown>>();
 
@@ -40,6 +48,7 @@ export class FsStore implements StorePort {
     this.fsyncDir = opts.fsyncDir ?? true;
     this.lockTimeoutMs = opts.lockTimeoutMs ?? 5_000;
     this.staleLockMs = opts.staleLockMs ?? 60_000;
+    this.raceWindowMs = opts.raceWindowMs ?? 1_000;
   }
 
   private resolveSafe(relPath: string, allowEmpty = false): string {
@@ -152,6 +161,22 @@ export class FsStore implements StorePort {
     }
   }
 
+  async move(fromPath: string, toPath: string): Promise<void> {
+    const fromAbs = this.resolveSafe(fromPath);
+    const toAbs = this.resolveSafe(toPath);
+    await mkdir(dirname(toAbs), { recursive: true });
+    // Atomic rename within the same filesystem. POSIX rename overwrites the
+    // destination; we explicitly reject collisions to keep the contract clean.
+    try {
+      await stat(toAbs);
+      throw new Error(`move: destination exists: ${toPath}`);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+    await rename(fromAbs, toAbs);
+    if (this.fsyncDir) await this.syncDir(dirname(toAbs));
+  }
+
   async withFileLock<T>(relPath: string, fn: () => Promise<T>): Promise<T> {
     const abs = this.resolveSafe(relPath);
     const parent = dirname(abs);
@@ -196,6 +221,22 @@ export class FsStore implements StorePort {
       body = await readFile(keeper, "utf8");
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") return false;
+      // Keeper not yet written. Two cases:
+      //   (a) lock was stale and abandoned (winner crashed before keeper).
+      //   (b) lock just acquired and keeper write is in flight (race window
+      //       between mkdir and writeFile). Reclaiming in case (b) makes the
+      //       winner's writeFile fail with ENOENT/EINVAL on the parent dir.
+      // Distinguish by lockDir age: if the dir was created within
+      // raceWindowMs, assume case (b) and back off. After raceWindowMs we
+      // assume case (a) — even though staleLockMs has not elapsed, the dir
+      // shouldn't have stayed empty for over a second under normal
+      // operation, so reclaiming is safer than dead-locking for 60s.
+      try {
+        const st = await stat(lockDir);
+        if (Date.now() - st.ctimeMs < this.raceWindowMs) return false;
+      } catch {
+        return false;
+      }
       try {
         await rmdir(lockDir);
         return true;

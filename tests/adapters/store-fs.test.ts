@@ -84,4 +84,56 @@ describe("FsStore", () => {
     await store.writeAtomic("k.json", "v2");
     expect(await readFile(join(workdir, "k.json"), "utf8")).toBe("v2");
   });
+
+  it("move atomically renames a file", async () => {
+    await store.writeAtomic("src/a.json", "v1");
+    await store.move("src/a.json", "dst/b.json");
+    expect(await store.readText("src/a.json")).toBeNull();
+    expect(await store.readText("dst/b.json")).toBe("v1");
+  });
+
+  it("move rejects when destination already exists", async () => {
+    await store.writeAtomic("src/a.json", "v1");
+    await store.writeAtomic("dst/b.json", "x");
+    await expect(store.move("src/a.json", "dst/b.json")).rejects.toThrow();
+  });
+
+  it("withFileLock under heavy parallel acquisition (PR #65 P0-2 / P2-6 regression)", async () => {
+    // 20 parallel acquirers must each get a strictly serialized turn
+    // without losing critical-section state.
+    let counter = 0;
+    const tasks = Array.from({ length: 20 }, () =>
+      store.withFileLock("k.json", async () => {
+        const before = counter;
+        await new Promise((r) => setImmediate(r));
+        counter = before + 1;
+      }),
+    );
+    await Promise.all(tasks);
+    expect(counter).toBe(20);
+  });
+
+  it("orphaned lock is reclaimed within raceWindowMs (P2-6)", async () => {
+    // Custom store with short raceWindowMs so the test runs quickly. The
+    // production default is 1000ms; we use 50ms here to exercise the same
+    // code path without a long sleep.
+    const store2 = new FsStore({
+      workdir,
+      raceWindowMs: 50,
+      staleLockMs: 60_000,
+    });
+    // Simulate a crashed acquirer: an empty lockdir with no keeper.
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(join(workdir, "orphan.json.lock"));
+    // Wait past raceWindowMs so the next acquirer treats it as abandoned.
+    await new Promise((r) => setTimeout(r, 80));
+    const start = Date.now();
+    let acquired = false;
+    await store2.withFileLock("orphan.json", async () => {
+      acquired = true;
+    });
+    expect(acquired).toBe(true);
+    // Crucially: not waiting out the full 60s staleLockMs.
+    expect(Date.now() - start).toBeLessThan(5_000);
+  });
 });

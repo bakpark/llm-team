@@ -78,4 +78,29 @@ describe("persistence-layout", () => {
     );
     expect(layout.archiveOf("archive/x")).toBe("archive/x");
   });
+
+  it("phase 5a paths (slice telemetry, feature request, signals, releases)", () => {
+    const TELEM_ID = "01HZTM0000000000000000000A";
+    const REQ_ID = "01HZFR0000000000000000000A";
+    expect(layout.sliceTelemetry(TELEM_ID)).toBe(
+      `knowledge/slice_telemetry/${TELEM_ID}.json`,
+    );
+    expect(layout.featureRequest(REQ_ID)).toBe(
+      `feature_requests/${REQ_ID}.json`,
+    );
+    expect(layout.humanSignal("IC_kgD0xyz123")).toBe(
+      `human_signals/IC_kgD0xyz123.json`,
+    );
+    expect(layout.humanSignal(REQ_ID)).toBe(`human_signals/${REQ_ID}.json`);
+    expect(layout.humanSignalProcessed("IC_kgD0xyz123")).toBe(
+      `human_signals/processed/IC_kgD0xyz123.json`,
+    );
+    expect(layout.release(M_ID)).toBe(`releases/${M_ID}.json`);
+  });
+
+  it("rejects path traversal in human-signal id", () => {
+    expect(() => layout.humanSignal("../escape")).toThrow();
+    expect(() => layout.humanSignal("a/b")).toThrow();
+    expect(() => layout.humanSignal("")).toThrow();
+  });
 });
