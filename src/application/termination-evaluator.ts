@@ -193,13 +193,20 @@ function checkFinalization(
         (t) => t.agent_role_in_session === "reviewer",
       );
       if (reviewers.length === 0) return { ok: false, verdict: "" };
-      if (reviewers.every((t) => t.verdict?.result === "approve"))
-        return { ok: true, verdict: "approve" };
+      // Phase 5b.3: outer Planning reviewers vote `plan_accept` (matrix-
+      // exclusive verdict). Discovery/Specification reviewers vote
+      // `spec_accept`. Either of these — alongside the inner/middle
+      // `approve` — counts as a unanimous approval here.
+      if (reviewers.every((t) => isApproveLike(t.verdict?.result)))
+        return { ok: true, verdict: reviewers[0]!.verdict!.result };
       return { ok: false, verdict: "" };
     }
     case "quorum_then_lead": {
-      const approvals = turns.filter(
-        (t) => t.verdict?.result === "approve",
+      // Phase 5b.3: count outer `spec_accept` / `plan_accept` alongside the
+      // inner/middle `approve` verdict. quorum_then_lead is used by outer
+      // Discovery / Specification where reviewers do not emit `approve`.
+      const approvals = turns.filter((t) =>
+        isApproveLike(t.verdict?.result),
       ).length;
       const min = quorumMin ?? 1;
       if (approvals < min) return { ok: false, verdict: "" };
@@ -247,11 +254,30 @@ function checkEvidence(
         return { ok: false };
     }
   }
-  // Inner tdd_build: a passed verification implies tests_green.
+  // Inner tdd_build: a passed verification implies tests_green when no
+  // explicit lead verdict was emitted. Phase 5b.3: outer Validation also
+  // uses verification_green evidence but the lead emits an explicit
+  // milestone_package verdict (PASS / FAIL / STALE) — we must NOT override
+  // it with tests_green. The discriminator is whether the most-recent lead
+  // turn carries an explicit verdict.
   const innerLike = required.some((r) => r.kind === "verification_green");
-  if (innerLike && latest?.verification?.result === "pass")
-    return { ok: true, derivedVerdict: "tests_green" };
+  if (innerLike && latest?.verification?.result === "pass") {
+    const leadHasVerdict = lastBy(
+      turns,
+      (t) => t.agent_role_in_session === "lead",
+    )?.verdict?.result;
+    if (leadHasVerdict == null)
+      return { ok: true, derivedVerdict: "tests_green" };
+  }
   return { ok: true };
+}
+
+function isApproveLike(result: string | null | undefined): boolean {
+  return (
+    result === "approve" ||
+    result === "spec_accept" ||
+    result === "plan_accept"
+  );
 }
 
 function deriveLeadVerdict(turns: readonly TurnSummary[]): string {
