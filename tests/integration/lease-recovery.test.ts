@@ -306,6 +306,89 @@ describe("Phase 4 lease + recovery integration", () => {
     ).toBeDefined();
   });
 
+  it("slice rollback preserves current_session_id when session is still SESSION_OPEN (PR #64 P1-3)", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "preserve-"));
+    const store = new FsStore({ workdir });
+    const clock = new FixedClock(ISO_BASE);
+    const lease = new FsLease({ store, clock });
+    const logger = new NdjsonLogger({ store, clock, relPath: LOG_DAEMON_PATH });
+    const ledger = new FileLedger({ store, logger });
+    const SLICE = "01HZS00000000000000000000E";
+    const SESSION = "01HZSE0000000000000000000E";
+    mkdirSync(join(workdir, "slices"), { recursive: true });
+    mkdirSync(join(workdir, "sessions", SESSION), { recursive: true });
+    const SliceMod = await import("../../src/domain/schema/slice.js");
+    writeFileSync(
+      join(workdir, layout.slice(SLICE)),
+      JSON.stringify(
+        SliceMod.Slice.parse({
+          slice_id: SLICE,
+          milestone_id: "01HZM00000000000000000000A",
+          slice_kind: "internal",
+          value_statement: "x",
+          ac_ids: [],
+          acceptance_tests: [],
+          declared_scope: [],
+          declared_metric_threshold: null,
+          interface_break: false,
+          dependencies: [],
+          trunk_base_revision: "trunk",
+          dod_revision_pin: "dod",
+          state: "SLICE_BUILDING",
+          current_session_id: SESSION,
+          external_refs: [],
+          created_at: new Date(ISO_BASE).toISOString(),
+          updated_at: new Date(ISO_BASE).toISOString(),
+        }),
+      ),
+      "utf8",
+    );
+    writeFileSync(
+      join(workdir, layout.sessionMetadata(SESSION)),
+      JSON.stringify(
+        DialogueSession.parse({
+          session_id: SESSION,
+          parent_object_kind: "slice",
+          parent_object_id: SLICE,
+          parent_loop: "inner",
+          purpose: "tdd_build",
+          participants: [{ agent_profile_id: "forge", role: "lead" }],
+          session_termination: {
+            finalization_rule: "lead_only",
+            required_evidence: [],
+            composite_rule: "evidence_only",
+          },
+          workspace_revision_pin: "x",
+          current_turn_index: 2,
+          state: "SESSION_OPEN",
+          max_turns: 10,
+          created_at: new Date(ISO_BASE).toISOString(),
+          updated_at: new Date(ISO_BASE).toISOString(),
+        }),
+      ),
+      "utf8",
+    );
+
+    await lease.claim({
+      leaseKind: "slice_lease",
+      objectId: SLICE,
+      workerId: "killed",
+      ttlMs: 1_000,
+      ttlSource: "ttl_default",
+      targetId: TARGET,
+      aux: { kind: "slice_lease", slice_id: SLICE },
+    });
+    clock.advance(2_000);
+    await runRecoverySweep({ store, clock, ledger, lease, callerId: "sweeper", targetId: TARGET });
+
+    const reread = SliceMod.Slice.parse(
+      JSON.parse(readFileSync(join(workdir, layout.slice(SLICE)), "utf8")),
+    );
+    expect(reread.state).toBe("SLICE_READY");
+    // Preserved — next pickup resumes the same session with turn_index=2.
+    expect(reread.current_session_id).toBe(SESSION);
+  });
+
   it("idempotent sweep: re-running with no expired leases produces zero ledger rows", async () => {
     const workdir = mkdtempSync(join(tmpdir(), "lease-idem-"));
     const store = new FsStore({ workdir });

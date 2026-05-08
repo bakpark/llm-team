@@ -253,10 +253,15 @@ async function emitReanimateRow(
 
 /**
  * If the slice referenced by an expired slice_lease is still SLICE_BUILDING,
- * roll it back to SLICE_READY + clear current_session_id so the next
- * pickup can start a fresh inner session. The orphaned DialogueSession is
- * left alone — phase-3 / phase-4 reanimate it via session_lease recovery,
- * or it stays as a stale SESSION_OPEN until phase-5 wires explicit cleanup.
+ * roll it back to SLICE_READY so a fresh worker picks it up.
+ *
+ * PR #64 review P1-3 fix: preserve `current_session_id` when the linked
+ * DialogueSession is still SESSION_OPEN. The next pickReadyInnerTurn then
+ * resumes the same session — turn_index, max_turns counter, and (phase-5)
+ * failure-policy counters survive the lease bounce. If the session has
+ * already been reaped (CONVERGED / TIMEOUT / ABANDONED / AWAITING_REVALIDATION
+ * / missing) we fall back to clearing current_session_id so the next
+ * pickup opens a fresh session.
  *
  * Read-check-write under `withFileLock(slicePath)` so a live worker that
  * just transitioned the slice to SLICE_REVIEWING cannot be overwritten by
@@ -277,10 +282,15 @@ async function reanimateSliceIfNeeded(
       return null;
     }
     if (slice.state !== "SLICE_BUILDING") return null;
+    const sessionStillOpen =
+      slice.current_session_id != null &&
+      (await isSessionStillOpen(slice.current_session_id, deps));
     const updated = Slice.parse({
       ...slice,
       state: "SLICE_READY",
-      current_session_id: null,
+      // Preserve current_session_id only when the session is still
+      // resumable. Otherwise null so the next pickup opens a new one.
+      current_session_id: sessionStillOpen ? slice.current_session_id : null,
       updated_at: deps.clock.isoNow(),
     });
     await deps.store.writeAtomic(path, JSON.stringify(updated, null, 2));
@@ -326,6 +336,20 @@ async function reanimateSliceIfNeeded(
     });
     return slice.slice_id;
   });
+}
+
+async function isSessionStillOpen(
+  sessionId: string,
+  deps: Pick<RecoverySweepDeps, "store">,
+): Promise<boolean> {
+  const body = await deps.store.readText(layout.sessionMetadata(sessionId));
+  if (body == null) return false;
+  try {
+    const session = DialogueSession.parse(JSON.parse(body));
+    return session.state === "SESSION_OPEN";
+  } catch {
+    return false;
+  }
 }
 
 function leaseObjectKind(

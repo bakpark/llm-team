@@ -23,6 +23,7 @@ import type { LeaseConfig } from "../config/target-schema.js";
 import { callAgent, type AgentIoOutcome } from "./agent-io.js";
 import { idempotencyKey } from "./idempotency.js";
 import { assertCanAcquire } from "./lease-acquisition-order.js";
+import { withLeaseHeartbeat } from "./lease-heartbeat.js";
 import { resolveLeaseTtl } from "./lease-ttl-resolver.js";
 import type { LedgerAppender } from "./ledger.js";
 import {
@@ -181,6 +182,23 @@ export async function runOneInnerTurn(
     }
   }
   try {
+    // PR #64 review P0-1 fix: heartbeat keeps the slice_lease alive while
+    // the long-running callAgent + verification cycle proceeds. Without
+    // renewal the recovery sweep would roll the slice back to SLICE_READY
+    // mid-turn (TTL default 60s vs callAgent timeout 120s).
+    if (leaseClaim != null && leaseClaim.result === "acquired" && deps.lease != null) {
+      const claimed = leaseClaim.lease;
+      const wrapped = await withLeaseHeartbeat(
+        {
+          lease: deps.lease,
+          leaseId: claimed.lease_id,
+          leaseToken: claimed.lease_token,
+          ttlMs: claimed.ttl_ms,
+        },
+        async () => runOneInnerTurnInner(slice, session, turnIndex, deps),
+      );
+      return wrapped.value;
+    }
     return await runOneInnerTurnInner(slice, session, turnIndex, deps);
   } finally {
     if (leaseClaim != null && leaseClaim.result === "acquired" && deps.lease != null) {
@@ -427,16 +445,22 @@ async function runOneInnerTurnInner(
     deps,
   );
 
-  const reviewingSlice = Slice.parse({
-    ...slice,
-    state: "SLICE_REVIEWING",
-    current_session_id: null,
-    updated_at: deps.clock.isoNow(),
+  // PR #64 review P0-2 fix: wrap slice write in withFileLock so a
+  // concurrent recovery sweep cannot interleave a SLICE_READY rollback
+  // between our read and write. Symmetric to recovery.reanimateSliceIfNeeded.
+  const slicePath = layout.slice(slice.slice_id);
+  await deps.store.withFileLock(slicePath, async () => {
+    const reviewingSlice = Slice.parse({
+      ...slice,
+      state: "SLICE_REVIEWING",
+      current_session_id: null,
+      updated_at: deps.clock.isoNow(),
+    });
+    await deps.store.writeAtomic(
+      slicePath,
+      JSON.stringify(reviewingSlice, null, 2),
+    );
   });
-  await deps.store.writeAtomic(
-    layout.slice(slice.slice_id),
-    JSON.stringify(reviewingSlice, null, 2),
-  );
 
   const finalized = DialogueSession.parse({
     ...sessionAfterTurn,
