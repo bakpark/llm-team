@@ -16,6 +16,10 @@ import { HumanSignalEnvelope } from "../domain/schema/human-signal.js";
 import type { ClockPort } from "../ports/clock.js";
 import type { HumanSignalPort } from "../ports/human-signal.js";
 import type { StorePort } from "../ports/store.js";
+import {
+  bindHumanSignalToSession,
+  type HumanSignalBindingDeps,
+} from "./human-signal-binding.js";
 import { layout } from "./persistence-layout.js";
 
 export type DrainOutcome =
@@ -25,9 +29,24 @@ export type DrainOutcome =
       signal_type: string;
       target_kind: string;
       target_id: string;
+      /** Phase 5b.2: present when the drain bound the signal to a session. */
+      binding?:
+        | { kind: "appended"; session_id: string; turn_index: number }
+        | { kind: "unsupported"; reason: string };
     }
   | {
       kind: "invalid";
+      signal_id: string;
+      reason: string;
+    }
+  | {
+      /**
+       * Codex P2: binding returned `no_session` — addressed milestone has no
+       * SESSION_OPEN outer session yet. Signal is intentionally NOT marked
+       * processed so the next drain cycle re-tries once the coordinator opens
+       * the session. Operators can manually delete the file to abort.
+       */
+      kind: "deferred";
       signal_id: string;
       reason: string;
     };
@@ -36,6 +55,13 @@ export interface DrainDeps {
   store: StorePort;
   signal: HumanSignalPort;
   clock: ClockPort;
+  /**
+   * Phase 5b.2: when supplied, applied signals are bound to their addressed
+   * outer DialogueSession as a `human_approval` SessionTurn. Drain remains
+   * functional without this — phase-5a callers omit it for envelope-only
+   * persistence semantics.
+   */
+  binding?: HumanSignalBindingDeps;
 }
 
 export async function runHumanSignalDrain(
@@ -48,6 +74,39 @@ export async function runHumanSignalDrain(
     const validation = validateEnvelope(env);
     const now = deps.clock.isoNow();
     if (validation.ok) {
+      // Phase 5b.2: bind FIRST (before markProcessed) so the contribution
+      // is visible to the next coordinator pickup. If binding emits a turn,
+      // its idempotency_key is the SessionTurn's per_turn key — separate
+      // from markProcessed's processed/<id>.json marker.
+      let bindingDetail:
+        | { kind: "appended"; session_id: string; turn_index: number }
+        | { kind: "unsupported"; reason: string }
+        | undefined;
+      if (deps.binding != null) {
+        const b = await bindHumanSignalToSession(env, deps.binding);
+        if (b.kind === "no_session") {
+          // Codex P2: do NOT markProcessed — signal stays pending so the
+          // next drain cycle retries once the coordinator opens the
+          // outer session. listPending will re-emit it.
+          results.push({
+            kind: "deferred",
+            signal_id: env.signal_id,
+            reason: b.reason,
+          });
+          continue;
+        }
+        if (b.kind === "appended") {
+          bindingDetail = {
+            kind: "appended",
+            session_id: b.session_id,
+            turn_index: b.turn_index,
+          };
+        } else {
+          // unsupported — fall through to markProcessed=applied so the
+          // queue moves on (signal_type isn't bindable, e.g. pause).
+          bindingDetail = { kind: "unsupported", reason: b.reason };
+        }
+      }
       const r = await deps.signal.markProcessed({
         signalId: env.signal_id,
         state: "applied",
@@ -65,6 +124,7 @@ export async function runHumanSignalDrain(
         signal_type: env.signal_type,
         target_kind: env.target_kind,
         target_id: env.target_id,
+        ...(bindingDetail != null ? { binding: bindingDetail } : {}),
       });
     } else {
       const r = await deps.signal.markProcessed({

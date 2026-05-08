@@ -76,7 +76,7 @@ describe("dispatchOuterOutcome — Discovery", () => {
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "design_discovery",
+        phase_or_purpose: "Discovery",
         session_state: "CONVERGED",
         final_verdict: "spec_accept",
         milestone: m,
@@ -107,7 +107,7 @@ describe("dispatchOuterOutcome — Discovery", () => {
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "design_discovery",
+        phase_or_purpose: "Discovery",
         session_state: "CONVERGED",
         final_verdict: "spec_reject",
         milestone: m,
@@ -128,7 +128,7 @@ describe("dispatchOuterOutcome — Discovery", () => {
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "design_discovery",
+        phase_or_purpose: "Discovery",
         session_state: "TIMEOUT",
         final_verdict: null,
         milestone: m,
@@ -151,7 +151,7 @@ describe("dispatchOuterOutcome — Specification", () => {
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "design_specification",
+        phase_or_purpose: "Specification",
         session_state: "CONVERGED",
         final_verdict: "spec_accept",
         milestone: m,
@@ -180,7 +180,7 @@ describe("dispatchOuterOutcome — Planning", () => {
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "planning_decompose",
+        phase_or_purpose: "Planning",
         session_state: "CONVERGED",
         final_verdict: "plan_accept",
         milestone: m,
@@ -230,7 +230,7 @@ describe("dispatchOuterOutcome — Planning", () => {
       dispatchOuterOutcome(
         {
           parent_loop: "outer",
-          phase_or_purpose: "planning_decompose",
+          phase_or_purpose: "Planning",
           session_state: "CONVERGED",
           final_verdict: "plan_accept",
           milestone: m,
@@ -248,7 +248,7 @@ describe("dispatchOuterOutcome — Planning", () => {
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "planning_decompose",
+        phase_or_purpose: "Planning",
         session_state: "TIMEOUT",
         final_verdict: null,
         milestone: m,
@@ -271,7 +271,7 @@ describe("dispatchOuterOutcome — Validation", () => {
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "validation",
+        phase_or_purpose: "Validation",
         session_state: "CONVERGED",
         final_verdict: "validation_pass",
         milestone: m,
@@ -319,7 +319,7 @@ describe("dispatchOuterOutcome — Validation", () => {
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "validation",
+        phase_or_purpose: "Validation",
         session_state: "CONVERGED",
         final_verdict: "validation_fail",
         milestone: m,
@@ -345,7 +345,7 @@ describe("dispatchOuterOutcome — Validation", () => {
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "validation",
+        phase_or_purpose: "Validation",
         session_state: "TIMEOUT",
         final_verdict: null,
         milestone: m,
@@ -369,7 +369,7 @@ describe("dispatchOuterOutcome — no_match", () => {
       {
         parent_loop: "outer",
         // Invalid combo: outer + inner purpose.
-        phase_or_purpose: "design_discovery",
+        phase_or_purpose: "Discovery",
         session_state: "CONVERGED",
         final_verdict: "tests_green", // wrong verdict for outer
         milestone: m,
@@ -388,7 +388,7 @@ describe("dispatchOuterOutcome — illegal_transition guard (PR #66 P0-2)", () =
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "design_discovery",
+        phase_or_purpose: "Discovery",
         session_state: "CONVERGED",
         final_verdict: "spec_accept",
         milestone: m,
@@ -413,7 +413,7 @@ describe("dispatchOuterOutcome — illegal_transition guard (PR #66 P0-2)", () =
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "validation",
+        phase_or_purpose: "Validation",
         session_state: "CONVERGED",
         final_verdict: "validation_pass",
         milestone: m,
@@ -434,7 +434,7 @@ describe("dispatchOuterOutcome — illegal_transition guard (PR #66 P0-2)", () =
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "design_discovery",
+        phase_or_purpose: "Discovery",
         session_state: "CONVERGED",
         final_verdict: "spec_reject",
         milestone: m,
@@ -452,7 +452,7 @@ describe("dispatchOuterOutcome — idempotent re-run still emits ledger (PR #66 
     const m = await seedMilestone(d.store, "M_DISCOVERY_DRAFT");
     const args = {
       parent_loop: "outer" as const,
-      phase_or_purpose: "design_discovery" as const,
+      phase_or_purpose: "Discovery" as const,
       session_state: "CONVERGED" as const,
       final_verdict: "spec_accept",
       milestone: m,
@@ -483,7 +483,7 @@ describe("dispatchOuterOutcome — idempotent re-run still emits ledger (PR #66 
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "design_discovery",
+        phase_or_purpose: "Discovery",
         session_state: "TIMEOUT",
         final_verdict: null,
         milestone: m,
@@ -513,7 +513,7 @@ describe("dispatchOuterOutcome — validation_fail (PR #66 P0-4 + P1-5)", () => 
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "validation",
+        phase_or_purpose: "Validation",
         session_state: "CONVERGED",
         final_verdict: "validation_fail",
         milestone: m,
@@ -548,7 +548,7 @@ describe("dispatchOuterOutcome — validation_fail (PR #66 P0-4 + P1-5)", () => 
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "validation",
+        phase_or_purpose: "Validation",
         session_state: "CONVERGED",
         final_verdict: "validation_fail",
         milestone: m,
@@ -579,7 +579,7 @@ describe("dispatchOuterOutcome — missing matrix tuples (P1-8)", () => {
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "design_specification",
+        phase_or_purpose: "Specification",
         session_state: "TIMEOUT",
         final_verdict: null,
         milestone: m,
@@ -600,7 +600,7 @@ describe("dispatchOuterOutcome — missing matrix tuples (P1-8)", () => {
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "design_specification",
+        phase_or_purpose: "Specification",
         session_state: "CONVERGED",
         final_verdict: "spec_reject",
         milestone: m,
@@ -621,7 +621,7 @@ describe("dispatchOuterOutcome — missing matrix tuples (P1-8)", () => {
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "design_discovery",
+        phase_or_purpose: "Discovery",
         session_state: "ABANDONED",
         final_verdict: null,
         milestone: m,
@@ -642,7 +642,7 @@ describe("dispatchOuterOutcome — missing matrix tuples (P1-8)", () => {
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "planning_decompose",
+        phase_or_purpose: "Planning",
         session_state: "CONVERGED",
         final_verdict: "request_changes",
         milestone: m,
@@ -666,7 +666,7 @@ describe("dispatchOuterOutcome — missing matrix tuples (P1-8)", () => {
     const r = await dispatchOuterOutcome(
       {
         parent_loop: "outer",
-        phase_or_purpose: "validation",
+        phase_or_purpose: "Validation",
         session_state: "CONVERGED",
         final_verdict: "validation_stale",
         milestone: m,
@@ -693,7 +693,7 @@ describe("dispatchOuterOutcome — plan_accept DAG edge cases (P1-8)", () => {
       dispatchOuterOutcome(
         {
           parent_loop: "outer",
-          phase_or_purpose: "planning_decompose",
+          phase_or_purpose: "Planning",
           session_state: "CONVERGED",
           final_verdict: "plan_accept",
           milestone: m,
@@ -713,7 +713,7 @@ describe("dispatchOuterOutcome — plan_accept DAG edge cases (P1-8)", () => {
       dispatchOuterOutcome(
         {
           parent_loop: "outer",
-          phase_or_purpose: "planning_decompose",
+          phase_or_purpose: "Planning",
           session_state: "CONVERGED",
           final_verdict: "plan_accept",
           milestone: m,

@@ -57,10 +57,11 @@ describe("DISPATCH_MATRIX", () => {
   });
 
   it("returns null for unknown tuples", () => {
+    // inner tdd_build doesn't accept spec_accept verdict.
     expect(
       lookupDispatch({
-        parent_loop: "outer",
-        phase_or_purpose: "Discovery",
+        parent_loop: "inner",
+        phase_or_purpose: "tdd_build",
         session_state: "CONVERGED",
         final_verdict: "spec_accept",
       }),
@@ -70,86 +71,86 @@ describe("DISPATCH_MATRIX", () => {
   it("includes all Phase 5b.1 outer-loop tuples", () => {
     const cases: Array<{
       phase_or_purpose:
-        | "design_discovery"
-        | "design_specification"
-        | "planning_decompose"
-        | "validation";
+        | "Discovery"
+        | "Specification"
+        | "Planning"
+        | "Validation";
       session_state: "CONVERGED" | "TIMEOUT" | "ABANDONED";
       final_verdict: string | null;
       expected: string;
     }> = [
       // Discovery
       {
-        phase_or_purpose: "design_discovery",
+        phase_or_purpose: "Discovery",
         session_state: "CONVERGED",
         final_verdict: "spec_accept",
         expected: "promote_milestone_to_specification",
       },
       {
-        phase_or_purpose: "design_discovery",
+        phase_or_purpose: "Discovery",
         session_state: "CONVERGED",
         final_verdict: "spec_reject",
         expected: "park_milestone_awaiting_human",
       },
       {
-        phase_or_purpose: "design_discovery",
+        phase_or_purpose: "Discovery",
         session_state: "TIMEOUT",
         final_verdict: null,
         expected: "recover_milestone_to_draft",
       },
       // Specification
       {
-        phase_or_purpose: "design_specification",
+        phase_or_purpose: "Specification",
         session_state: "CONVERGED",
         final_verdict: "spec_accept",
         expected: "promote_milestone_to_spec_approved",
       },
       {
-        phase_or_purpose: "design_specification",
+        phase_or_purpose: "Specification",
         session_state: "CONVERGED",
         final_verdict: "spec_reject",
         expected: "park_milestone_awaiting_human",
       },
       // Planning
       {
-        phase_or_purpose: "planning_decompose",
+        phase_or_purpose: "Planning",
         session_state: "CONVERGED",
         final_verdict: "plan_accept",
         expected: "persist_slice_dag_and_promote",
       },
       {
-        phase_or_purpose: "planning_decompose",
+        phase_or_purpose: "Planning",
         session_state: "CONVERGED",
         final_verdict: "request_changes",
         expected: "noop_planning_request_changes",
       },
       {
-        phase_or_purpose: "planning_decompose",
+        phase_or_purpose: "Planning",
         session_state: "TIMEOUT",
         final_verdict: null,
         expected: "escalate_milestone",
       },
       // Validation
       {
-        phase_or_purpose: "validation",
+        phase_or_purpose: "Validation",
         session_state: "CONVERGED",
         final_verdict: "validation_pass",
         expected: "finalize_milestone_done",
       },
       {
-        phase_or_purpose: "validation",
+        phase_or_purpose: "Validation",
         session_state: "CONVERGED",
         final_verdict: "validation_fail",
         expected: "recover_milestone_to_building",
       },
       {
-        phase_or_purpose: "validation",
+        phase_or_purpose: "Validation",
         session_state: "CONVERGED",
         final_verdict: "validation_stale",
         expected: "noop_validation_stale",
       },
       {
-        phase_or_purpose: "validation",
+        phase_or_purpose: "Validation",
         session_state: "ABANDONED",
         final_verdict: null,
         expected: "escalate_milestone",

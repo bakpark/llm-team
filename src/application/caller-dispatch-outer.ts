@@ -56,10 +56,10 @@ export interface OuterDispatchDeps {
 export interface OuterDispatchInput {
   parent_loop: "outer";
   phase_or_purpose:
-    | "design_discovery"
-    | "design_specification"
-    | "planning_decompose"
-    | "validation";
+    | "Discovery"
+    | "Specification"
+    | "Planning"
+    | "Validation";
   session_state: "CONVERGED" | "TIMEOUT" | "ABANDONED";
   final_verdict: string | null;
   milestone: MilestoneT;
@@ -288,12 +288,12 @@ async function runOuterEffect(
     }
     case "park_milestone_awaiting_human": {
       const target: MilestoneState =
-        input.phase_or_purpose === "design_discovery"
+        input.phase_or_purpose === "Discovery"
           ? "M_DISCOVERY_AWAITING_HUMAN"
           : "M_SPECIFICATION_AWAITING_HUMAN";
       await transitionMilestoneInLock(liveMilestone, target, deps, {
         phase:
-          input.phase_or_purpose === "design_discovery"
+          input.phase_or_purpose === "Discovery"
             ? "Discovery"
             : "Specification",
         sessionId: input.sessionId,
@@ -308,12 +308,12 @@ async function runOuterEffect(
     }
     case "recover_milestone_to_draft": {
       const target: MilestoneState =
-        input.phase_or_purpose === "design_discovery"
+        input.phase_or_purpose === "Discovery"
           ? "M_DISCOVERY_DRAFT"
           : "M_SPECIFICATION_DRAFT";
       await transitionMilestoneInLock(liveMilestone, target, deps, {
         phase:
-          input.phase_or_purpose === "design_discovery"
+          input.phase_or_purpose === "Discovery"
             ? "Discovery"
             : "Specification",
         sessionId: input.sessionId,
@@ -536,13 +536,13 @@ function phaseFor(
   purpose: OuterDispatchInput["phase_or_purpose"],
 ): "Discovery" | "Specification" | "Planning" | "Validation" {
   switch (purpose) {
-    case "design_discovery":
+    case "Discovery":
       return "Discovery";
-    case "design_specification":
+    case "Specification":
       return "Specification";
-    case "planning_decompose":
+    case "Planning":
       return "Planning";
-    case "validation":
+    case "Validation":
       return "Validation";
   }
 }
