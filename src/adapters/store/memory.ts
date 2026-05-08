@@ -52,6 +52,16 @@ export class MemoryStore implements StorePort {
     return Array.from(out).sort();
   }
 
+  async move(fromPath: string, toPath: string): Promise<void> {
+    if (!this.entries.has(fromPath))
+      throw new Error(`move: source not found: ${fromPath}`);
+    if (this.entries.has(toPath))
+      throw new Error(`move: destination exists: ${toPath}`);
+    const body = this.entries.get(fromPath)!;
+    this.entries.set(toPath, body);
+    this.entries.delete(fromPath);
+  }
+
   async exists(relPath: string): Promise<boolean> {
     if (this.entries.has(relPath)) return true;
     const prefix = relPath.endsWith("/") ? relPath : relPath + "/";

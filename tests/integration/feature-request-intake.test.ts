@@ -136,6 +136,90 @@ describe("feature_request_promote (Phase 5a)", () => {
     expect(second.request_id).toBe(REQ_A);
   });
 
+  it("filename ↔ payload request_id mismatch is skipped (gpt5.5 medium)", async () => {
+    const store = new MemoryStore();
+    const clock = new FixedClock(Date.parse(ISO_BASE));
+    const logger = new CollectingLogger();
+    const ledger = new FileLedger({ store, logger });
+
+    // Drop a file named after REQ_A but containing REQ_B as request_id.
+    const fr = FeatureRequest.parse({
+      request_id: REQ_B,
+      title: "x",
+      submitted_by: "alice",
+      submitted_at: ISO_BASE,
+      state: "queued",
+    });
+    await store.writeAtomic(
+      layout.featureRequest(REQ_A),
+      JSON.stringify(fr, null, 2),
+    );
+
+    const out = await runFeatureRequestIntake({
+      store,
+      clock,
+      ledger,
+      callerId: "test-caller",
+      targetId: "demo",
+    });
+    expect(out.kind).toBe("noop");
+
+    // No milestone created.
+    const lines =
+      (await store.readText(LEDGER_TRANSITIONS_PATH))?.trim() ?? "";
+    expect(lines).toBe("");
+  });
+
+  it("crash-resume: promoting state replays milestone write idempotently (P1-3)", async () => {
+    const store = new MemoryStore();
+    const clock = new FixedClock(Date.parse(ISO_BASE));
+    const logger = new CollectingLogger();
+    const ledger = new FileLedger({ store, logger });
+
+    // Simulate a crash mid-flight: state=promoting, milestone_id assigned,
+    // but the milestone file was never written.
+    const stuckMilestoneId = "01HZM00000000000000000000Z";
+    const fr = FeatureRequest.parse({
+      request_id: REQ_A,
+      title: "stuck",
+      submitted_by: "alice",
+      submitted_at: ISO_BASE,
+      state: "promoting",
+      promoted_milestone_id: stuckMilestoneId,
+    });
+    await store.writeAtomic(
+      layout.featureRequest(REQ_A),
+      JSON.stringify(fr, null, 2),
+    );
+
+    const out = await runFeatureRequestIntake({
+      store,
+      clock,
+      ledger,
+      callerId: "test-caller",
+      targetId: "demo",
+    });
+
+    expect(out.kind).toBe("promoted");
+    if (out.kind !== "promoted") return;
+    // Resume reuses the leased milestone_id — does NOT generate a new one.
+    expect(out.milestone_id).toBe(stuckMilestoneId);
+
+    const m = Milestone.parse(
+      JSON.parse(
+        (await store.readText(layout.milestone(stuckMilestoneId)))!,
+      ),
+    );
+    expect(m.milestone_id).toBe(stuckMilestoneId);
+    expect(m.intake_source_id).toBe(REQ_A);
+
+    // No duplicate milestone — only one row in the ledger.
+    const ledgerLines = (await store.readText(LEDGER_TRANSITIONS_PATH))!
+      .trim()
+      .split("\n");
+    expect(ledgerLines.length).toBe(1);
+  });
+
   it("idempotent: a record already in promoted state is skipped", async () => {
     const store = new MemoryStore();
     const clock = new FixedClock(Date.parse(ISO_BASE));

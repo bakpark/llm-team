@@ -190,9 +190,10 @@ describe("HumanSignal envelope", () => {
 });
 
 describe("FeatureRequest schema", () => {
-  it("has 3 states", () => {
+  it("has 4 states (incl. promoting intermediate per P1-3)", () => {
     expect(FeatureRequestState.options).toEqual([
       "queued",
+      "promoting",
       "promoted",
       "rejected",
     ]);

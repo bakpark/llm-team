@@ -48,13 +48,17 @@ export async function runHumanSignalDrain(
     const validation = validateEnvelope(env);
     const now = deps.clock.isoNow();
     if (validation.ok) {
-      await deps.signal.markProcessed({
+      const r = await deps.signal.markProcessed({
         signalId: env.signal_id,
         state: "applied",
         reason: null,
         contributionId: null,
         appliedAt: now,
       });
+      // P0-2: skip outcome emission when a parallel drain already marked
+      // this signal as processed inside its lock — otherwise both drains
+      // would emit `applied` for the same signal_id.
+      if (r.alreadyProcessed) continue;
       results.push({
         kind: "applied",
         signal_id: env.signal_id,
@@ -63,13 +67,14 @@ export async function runHumanSignalDrain(
         target_id: env.target_id,
       });
     } else {
-      await deps.signal.markProcessed({
+      const r = await deps.signal.markProcessed({
         signalId: env.signal_id,
         state: "invalid",
         reason: validation.reason,
         contributionId: null,
         appliedAt: now,
       });
+      if (r.alreadyProcessed) continue;
       results.push({
         kind: "invalid",
         signal_id: env.signal_id,

@@ -23,6 +23,14 @@ export interface StorePort {
   exists(relPath: string): Promise<boolean>;
 
   /**
+   * Atomically move a file from `fromPath` to `toPath`. Used for quarantine
+   * + state-bucket transitions. POSIX rename atomicity within a single
+   * filesystem; cross-FS moves are not supported. Throws if `fromPath` is
+   * absent or `toPath` already exists.
+   */
+  move(fromPath: string, toPath: string): Promise<void>;
+
+  /**
    * Run `fn` while holding an exclusive cross-process lock keyed by `relPath`.
    * Reads / writes performed inside `fn` are not themselves serialized — the
    * caller controls the critical section. The lock is best-effort across

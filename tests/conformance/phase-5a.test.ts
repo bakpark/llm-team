@@ -82,11 +82,12 @@ describe("Phase 5a — module surface contract", () => {
     expect(m.SignalType.options.length).toBe(11);
   });
 
-  it("feature-request schema exports FeatureRequest 3-state", async () => {
+  it("feature-request schema exports FeatureRequest 4-state (incl. promoting per PR#65 P1-3)", async () => {
     const m = await import("../../src/domain/schema/feature-request.js");
     expect(typeof m.FeatureRequest.parse).toBe("function");
     expect(m.FeatureRequestState.options).toEqual([
       "queued",
+      "promoting",
       "promoted",
       "rejected",
     ]);

@@ -12,8 +12,18 @@ import { UlidString } from "../ids.js";
  * `intake_state` 는 본 record 가 idempotent 하게 처리되도록 한다.
  */
 
+/**
+ * `promoting` is an intermediate state used by `feature_request_promote` to
+ * make the milestone-creation step crash-safe. The transition is:
+ *
+ *   queued → promoting (lease milestone_id) → promoted (milestone written)
+ *
+ * On retry, a `promoting` record resumes from the milestone write step and
+ * re-uses the same milestone_id (idempotent rewrite via writeAtomic).
+ */
 export const FeatureRequestState = z.enum([
   "queued",
+  "promoting",
   "promoted",
   "rejected",
 ]);

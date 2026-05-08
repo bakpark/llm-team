@@ -127,7 +127,7 @@ describe("human-signal drain (Phase 5a)", () => {
     expect(out.map((o) => o.signal_id)).toEqual(["earlier", "later"]);
   });
 
-  it("concurrent drops + drains do not lose signals", async () => {
+  it("concurrent drops + drains do not lose or duplicate signals (P0-2 regression)", async () => {
     const store = new FsStore({ workdir: workdir() });
     const sig = new FsHumanSignal(store);
     const clock = new FixedClock(Date.parse("2026-05-08T00:00:00.000Z"));
@@ -146,19 +146,74 @@ describe("human-signal drain (Phase 5a)", () => {
     );
     await Promise.all(drops);
 
-    // Two parallel drain invocations must collectively process exactly 10
-    // envelopes (each may return 0–10 depending on timing, but the union
-    // covers all signals once).
-    const [a, b] = await Promise.all([
-      runHumanSignalDrain({ store, signal: sig, clock }),
-      runHumanSignalDrain({ store, signal: sig, clock }),
-    ]);
-    const seen = new Set([...a, ...b].map((o) => o.signal_id));
-    expect(seen.size).toBe(10);
+    // Force interleaving: both drains share the same pending snapshot so
+    // markProcessed lock + already-processed check is exercised.
+    const drainWithYield = async () => {
+      // Yield once before draining so that the two drain loops actually
+      // interleave inside the for-loop instead of one running to completion.
+      await new Promise((r) => setImmediate(r));
+      return runHumanSignalDrain({ store, signal: sig, clock });
+    };
+    const [a, b] = await Promise.all([drainWithYield(), drainWithYield()]);
+
+    // Total outcomes must equal 10 — neither lost (< 10) nor duplicated
+    // (> 10). Per signal_id we expect exactly one outcome emission.
+    const all = [...a, ...b];
+    expect(all.length).toBe(10);
+    const ids = all.map((o) => o.signal_id);
+    expect(new Set(ids).size).toBe(10);
 
     // After both drains, processed/ holds 10 records and listPending is empty.
     const pending = await sig.listPending();
     expect(pending).toEqual([]);
+  });
+
+  it("filename ↔ envelope.signal_id mismatch is quarantined (P0-1)", async () => {
+    const store = new FsStore({ workdir: workdir() });
+    const sig = new FsHumanSignal(store);
+    const clock = new FixedClock(Date.parse("2026-05-08T00:00:00.000Z"));
+
+    // Manually write a file named foo.json containing signal_id="bar".
+    const envelope = env({
+      signal_id: "bar",
+      signal_type: "approve",
+      related_object_id: "01HZSM0000000000000000000A",
+    });
+    await store.writeAtomic(
+      "human_signals/foo.json",
+      JSON.stringify(envelope, null, 2),
+    );
+
+    // First drain must NOT process it; instead it gets quarantined.
+    const out = await runHumanSignalDrain({ store, signal: sig, clock });
+    expect(out).toEqual([]);
+
+    // foo.json moved to quarantine/, no processed/ entries.
+    expect(await store.exists("human_signals/foo.json")).toBe(false);
+    expect(await store.exists("human_signals/quarantine/foo.json")).toBe(true);
+    expect(await store.exists("human_signals/processed/bar.json")).toBe(false);
+
+    // Re-drain is also a noop (quarantine path is outside scan).
+    const out2 = await runHumanSignalDrain({ store, signal: sig, clock });
+    expect(out2).toEqual([]);
+  });
+
+  it("corrupt envelope is quarantined (P1-4)", async () => {
+    const store = new FsStore({ workdir: workdir() });
+    const sig = new FsHumanSignal(store);
+    const clock = new FixedClock(Date.parse("2026-05-08T00:00:00.000Z"));
+
+    await store.writeAtomic(
+      "human_signals/garbage.json",
+      "{ not valid json",
+    );
+
+    const out = await runHumanSignalDrain({ store, signal: sig, clock });
+    expect(out).toEqual([]);
+    expect(await store.exists("human_signals/garbage.json")).toBe(false);
+    expect(await store.exists("human_signals/quarantine/garbage.json")).toBe(
+      true,
+    );
   });
 
   it("processed marker uses processing_state field", async () => {

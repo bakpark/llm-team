@@ -67,13 +67,45 @@ export async function runFeatureRequestIntake(
         reason: `feature_request parse failed: ${(e as Error).message}`,
       } as const;
     }
-    if (live.state !== "queued") {
+    if (live.state !== "queued" && live.state !== "promoting") {
       return { kind: "noop", reason: "no_queued_requests" } as const;
     }
 
     const now = deps.clock.isoNow();
+
+    // P1-3 atomicity: 4-step crash-safe protocol.
+    //   queued → write FR=promoting + milestone_id (lease)
+    //          → writeAtomic milestone (idempotent rewrite on retry)
+    //          → write FR=promoted
+    //          → ledger row (idempotency_key dedups duplicates)
+    //
+    // On retry, state=promoting resumes from the milestone write step using
+    // the same milestone_id — the milestone file write is idempotent, and
+    // the ledger row's idempotency_key dedups any subsequent append.
+    let milestoneId: string;
+    if (live.state === "promoting") {
+      if (live.promoted_milestone_id == null) {
+        return {
+          kind: "error",
+          reason: "promoting state without promoted_milestone_id",
+        } as const;
+      }
+      milestoneId = live.promoted_milestone_id;
+    } else {
+      milestoneId = newMonotonicId(deps.clock.now());
+      const promoting: FeatureRequestT = FeatureRequest.parse({
+        ...live,
+        state: "promoting",
+        promoted_milestone_id: milestoneId,
+      });
+      await deps.store.writeAtomic(
+        requestPath,
+        JSON.stringify(promoting, null, 2),
+      );
+    }
+
     const milestone: MilestoneT = Milestone.parse({
-      milestone_id: newMonotonicId(deps.clock.now()),
+      milestone_id: milestoneId,
       target_id: deps.targetId,
       title: live.title,
       state: "M_INTAKE_QUEUED",
@@ -153,11 +185,21 @@ async function listQueuedRequests(
   const out: FeatureRequestT[] = [];
   for (const name of names) {
     if (!name.endsWith(".json")) continue;
+    const id = name.slice(0, -".json".length);
     const body = await store.readText(`feature_requests/${name}`);
     if (body == null) continue;
     try {
       const parsed = FeatureRequest.parse(JSON.parse(body));
-      if (parsed.state === "queued") out.push(parsed);
+      // Filename ↔ payload request_id consistency: a mismatch (foo.json
+      // containing {request_id:"bar"}) would otherwise route the milestone
+      // through layout.featureRequest(bar) while leaving foo.json pinned in
+      // the queue. Skip mismatched files — they are operator drops gone
+      // wrong, not legitimate requests. The next cycle re-evaluates.
+      if (parsed.request_id !== id) continue;
+      // Both `queued` and `promoting` are pickup-eligible: `promoting`
+      // means a prior cycle crashed mid-flight; resume to finish.
+      if (parsed.state === "queued" || parsed.state === "promoting")
+        out.push(parsed);
     } catch {
       // Skip corrupt files; future cycle will re-attempt.
     }

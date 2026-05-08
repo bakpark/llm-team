@@ -82,6 +82,11 @@ export const layout = {
       throw new Error("signal_id must match [A-Za-z0-9._:-]+");
     return `human_signals/processed/${signalId}.json`;
   },
+  humanSignalQuarantine(filename: string): string {
+    if (!/^[A-Za-z0-9._:-]+\.json$/.test(filename))
+      throw new Error("filename must match [A-Za-z0-9._:-]+.json");
+    return `human_signals/quarantine/${filename}`;
+  },
   release(milestoneId: string): string {
     return `releases/${requireUlid("milestone_id", milestoneId)}.json`;
   },

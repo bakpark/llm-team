@@ -21,6 +21,10 @@ export interface HumanSignalPort {
    * 단일 signal 을 caller 가 처리 완료로 표시한다.
    * `applied` (operational write 발생) / `stale` (revision mismatch) /
    * `invalid` (envelope 검증 실패) 를 reason 과 함께 영속화한다.
+   *
+   * Adapter 는 lock 안에서 processed/&lt;signal_id&gt;.json 의 존재를 재확인하여
+   * 중복 마킹을 차단한다. 반환된 `alreadyProcessed=true` 는 동시 drain 에 의해
+   * 이미 처리됐다는 신호 — caller 는 이 경우 outcome 을 emit 하지 않는다.
    */
   markProcessed(input: {
     signalId: string;
@@ -28,5 +32,5 @@ export interface HumanSignalPort {
     reason: string | null;
     contributionId: string | null;
     appliedAt: string;
-  }): Promise<void>;
+  }): Promise<{ alreadyProcessed: boolean }>;
 }

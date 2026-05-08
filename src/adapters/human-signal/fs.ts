@@ -4,13 +4,21 @@
  * Layout:
  *   workdir/human_signals/<signal_id>.json            # raw envelope dropped by human
  *   workdir/human_signals/processed/<signal_id>.json  # post-processing record
+ *   workdir/human_signals/quarantine/<filename>       # corrupt or filename-mismatched
  *
- * Atomic write (rename-after-write) is delegated to StorePort.writeAtomic —
- * the same FsStore primitive that protects every other persistent object.
+ * Atomic write (rename-after-write) is delegated to StorePort.writeAtomic /
+ * StorePort.move — the same FsStore primitives that protect every other
+ * persistent object.
  *
- * Idempotency: a signal_id appearing in `processed/` is treated as resolved
- * and excluded from `listPending`. Concurrent drains are serialized via the
- * StorePort's per-path withFileLock.
+ * Idempotency invariants:
+ *   1. processed/<id>.json existence ⇒ resolved (excluded from listPending).
+ *   2. markProcessed re-reads processed/ inside its lock — concurrent drains
+ *      cannot both record `applied` for the same signal_id.
+ *   3. listPending validates filename ↔ envelope.signal_id consistency. A
+ *      mismatch (foo.json containing {signal_id: "bar"}) would otherwise leave
+ *      foo.json eternally pending after processed/bar.json is written; such
+ *      files are atomically moved to quarantine/.
+ *   4. Unparseable envelopes are also quarantined to prevent permanent pending.
  */
 import {
   HumanSignalEnvelope,
@@ -46,16 +54,29 @@ export class FsHumanSignal implements HumanSignalPort {
       if (!name.endsWith(".json")) continue;
       const id = name.slice(0, -".json".length);
       if (processed.has(id)) continue;
-      const body = await this.store.readText(`human_signals/${name}`);
+
+      const rawPath = `human_signals/${name}`;
+      const body = await this.store.readText(rawPath);
       if (body == null) continue;
+
+      let env: HumanSignalEnvelope;
       try {
-        const env = HumanSignalEnvelope.parse(JSON.parse(body));
-        out.push(env);
+        env = HumanSignalEnvelope.parse(JSON.parse(body));
       } catch {
-        // Corrupt envelope — caller will record invalid via markProcessed
-        // when it re-reads with stricter validation. Skip in listing for
-        // now to avoid blocking the queue.
+        // P1-4: corrupt envelope → quarantine so it doesn't pin the queue.
+        await this.quarantine(rawPath, name);
+        continue;
       }
+
+      // P0-1: filename ↔ envelope.signal_id consistency. A mismatch would
+      // mean processed/<env.signal_id>.json gets written but the original
+      // file (named after a different id) stays pending forever.
+      if (env.signal_id !== id) {
+        await this.quarantine(rawPath, name);
+        continue;
+      }
+
+      out.push(env);
     }
     out.sort((a, b) => a.created_at.localeCompare(b.created_at));
     return out;
@@ -67,15 +88,20 @@ export class FsHumanSignal implements HumanSignalPort {
     reason: string | null;
     contributionId: string | null;
     appliedAt: string;
-  }): Promise<void> {
+  }): Promise<{ alreadyProcessed: boolean }> {
     const rawPath = layout.humanSignal(input.signalId);
     const procPath = layout.humanSignalProcessed(input.signalId);
 
     return this.store.withFileLock(procPath, async () => {
+      // P0-2: re-check processed/ inside the lock so two parallel drains can
+      // never both record `applied` for the same signal.
+      const existing = await this.store.readText(procPath);
+      if (existing != null) {
+        return { alreadyProcessed: true } as const;
+      }
+
       const body = await this.store.readText(rawPath);
       if (body == null) {
-        // Raw envelope may have been deleted; still write a stub processed
-        // record so future drains do not re-process this id.
         const stub = HumanSignalRecord.parse({
           envelope: {
             signal_id: input.signalId,
@@ -92,7 +118,7 @@ export class FsHumanSignal implements HumanSignalPort {
           contribution_id: input.contributionId,
         });
         await this.store.writeAtomic(procPath, JSON.stringify(stub, null, 2));
-        return;
+        return { alreadyProcessed: false } as const;
       }
       const env = HumanSignalEnvelope.parse(JSON.parse(body));
       const rec = HumanSignalRecord.parse({
@@ -103,6 +129,18 @@ export class FsHumanSignal implements HumanSignalPort {
         contribution_id: input.contributionId,
       });
       await this.store.writeAtomic(procPath, JSON.stringify(rec, null, 2));
+      return { alreadyProcessed: false } as const;
     });
+  }
+
+  private async quarantine(rawPath: string, filename: string): Promise<void> {
+    const target = layout.humanSignalQuarantine(filename);
+    try {
+      await this.store.move(rawPath, target);
+    } catch {
+      // Another concurrent drain may have moved or processed it; that's
+      // benign — both quarantine and processed paths terminate the file's
+      // pending status.
+    }
   }
 }
