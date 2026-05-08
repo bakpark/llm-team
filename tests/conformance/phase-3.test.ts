@@ -126,8 +126,13 @@ describe("Phase 3 — DISPATCH_MATRIX phase-3 coverage", () => {
 
   it("every matrix-referenced effect has a runEffect handler (PR #62 P0-2 executor coverage)", async () => {
     const { DISPATCH_MATRIX } = await import("../../src/domain/dispatch-matrix.js");
+    // Phase 5b.1: outer-loop effects routed via caller-dispatch-outer.ts.
     const callerDispatchSrc = readFileSync(
       resolve(REPO_ROOT, "src/application/caller-dispatch.ts"),
+      "utf8",
+    );
+    const callerDispatchOuterSrc = readFileSync(
+      resolve(REPO_ROOT, "src/application/caller-dispatch-outer.ts"),
       "utf8",
     );
     const referenced = new Set<string>();
@@ -135,9 +140,11 @@ describe("Phase 3 — DISPATCH_MATRIX phase-3 coverage", () => {
       for (const effect of entry.effects) referenced.add(effect.kind);
     }
     for (const kind of referenced) {
+      const inSlice = callerDispatchSrc.includes(`case "${kind}"`);
+      const inOuter = callerDispatchOuterSrc.includes(`case "${kind}"`);
       expect(
-        callerDispatchSrc.includes(`case "${kind}"`),
-        `caller-dispatch.runEffect missing handler for effect kind "${kind}"`,
+        inSlice || inOuter,
+        `no runEffect handler for effect kind "${kind}" (checked caller-dispatch.ts + caller-dispatch-outer.ts)`,
       ).toBe(true);
     }
   });

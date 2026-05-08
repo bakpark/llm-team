@@ -21,7 +21,28 @@ export type DispatchEffect =
   /** Middle approve: SM → SM_APPROVED + SLICE → SLICE_INTEGRATING + integrate trunk. */
   | { kind: "promote_slice_merge_to_approved_then_integrate" }
   /** Middle request_changes: SM → SM_REQUEST_CHANGES → SM_CLOSED + SLICE → SLICE_BUILDING. */
-  | { kind: "reset_slice_for_rebuild" };
+  | { kind: "reset_slice_for_rebuild" }
+  // ---- Phase 5b.1 outer-loop effects ----
+  /** Outer Discovery spec_accept → M_DISCOVERY_DRAFT → M_SPECIFICATION_DRAFT. */
+  | { kind: "promote_milestone_to_specification" }
+  /** Outer Specification spec_accept → M_SPECIFICATION_DRAFT → M_SPEC_APPROVED + Discovery slot release. */
+  | { kind: "promote_milestone_to_spec_approved" }
+  /** Outer Discovery/Specification spec_reject when human required → M_*_AWAITING_HUMAN. */
+  | { kind: "park_milestone_awaiting_human" }
+  /** Outer Discovery/Specification TIMEOUT/ABANDONED → keep DRAFT (failure-policy 가 ESCALATED 분리). */
+  | { kind: "recover_milestone_to_draft" }
+  /** Outer Planning plan_accept → M_DELIVERY_PLANNING → M_DELIVERY_BUILDING + slice DAG persist. */
+  | { kind: "persist_slice_dag_and_promote" }
+  /** Outer Planning request_changes → keep M_DELIVERY_PLANNING (lead 재호출 trigger은 coordinator). */
+  | { kind: "noop_planning_request_changes" }
+  /** Outer Validation validation_pass → M_DONE + Context Summary persist. */
+  | { kind: "finalize_milestone_done" }
+  /** Outer Validation validation_fail → M_DELIVERY_BUILDING 회수 + 책임 slice SLICE_READY. */
+  | { kind: "recover_milestone_to_building" }
+  /** Outer Validation validation_stale → M_DELIVERY_VALIDATING 회수 (재 trigger 은 coordinator). */
+  | { kind: "noop_validation_stale" }
+  /** Outer Validation TIMEOUT/ABANDONED → milestone ESCALATED. */
+  | { kind: "escalate_milestone" };
 
 export interface DispatchEntry {
   parent_loop: ParentLoop;
@@ -95,6 +116,130 @@ export const DISPATCH_MATRIX: readonly DispatchEntry[] = [
     session_state: "ABANDONED",
     final_verdict: null,
     effects: [{ kind: "close_slice_merge_blocked" }],
+  },
+  // ---- Phase 5b.1 outer-loop entries ----
+  // Outer Discovery (purpose="design").
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "design_discovery",
+    session_state: "CONVERGED",
+    final_verdict: "spec_accept",
+    effects: [{ kind: "promote_milestone_to_specification" }],
+  },
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "design_discovery",
+    session_state: "CONVERGED",
+    final_verdict: "spec_reject",
+    effects: [{ kind: "park_milestone_awaiting_human" }],
+  },
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "design_discovery",
+    session_state: "TIMEOUT",
+    final_verdict: null,
+    effects: [{ kind: "recover_milestone_to_draft" }],
+  },
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "design_discovery",
+    session_state: "ABANDONED",
+    final_verdict: null,
+    effects: [{ kind: "recover_milestone_to_draft" }],
+  },
+  // Outer Specification (purpose="design_specification").
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "design_specification",
+    session_state: "CONVERGED",
+    final_verdict: "spec_accept",
+    effects: [{ kind: "promote_milestone_to_spec_approved" }],
+  },
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "design_specification",
+    session_state: "CONVERGED",
+    final_verdict: "spec_reject",
+    effects: [{ kind: "park_milestone_awaiting_human" }],
+  },
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "design_specification",
+    session_state: "TIMEOUT",
+    final_verdict: null,
+    effects: [{ kind: "recover_milestone_to_draft" }],
+  },
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "design_specification",
+    session_state: "ABANDONED",
+    final_verdict: null,
+    effects: [{ kind: "recover_milestone_to_draft" }],
+  },
+  // Outer Planning (purpose="planning_decompose").
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "planning_decompose",
+    session_state: "CONVERGED",
+    final_verdict: "plan_accept",
+    effects: [{ kind: "persist_slice_dag_and_promote" }],
+  },
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "planning_decompose",
+    session_state: "CONVERGED",
+    final_verdict: "request_changes",
+    effects: [{ kind: "noop_planning_request_changes" }],
+  },
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "planning_decompose",
+    session_state: "TIMEOUT",
+    final_verdict: null,
+    effects: [{ kind: "escalate_milestone" }],
+  },
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "planning_decompose",
+    session_state: "ABANDONED",
+    final_verdict: null,
+    effects: [{ kind: "escalate_milestone" }],
+  },
+  // Outer Validation (purpose="validation").
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "validation",
+    session_state: "CONVERGED",
+    final_verdict: "validation_pass",
+    effects: [{ kind: "finalize_milestone_done" }],
+  },
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "validation",
+    session_state: "CONVERGED",
+    final_verdict: "validation_fail",
+    effects: [{ kind: "recover_milestone_to_building" }],
+  },
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "validation",
+    session_state: "CONVERGED",
+    final_verdict: "validation_stale",
+    effects: [{ kind: "noop_validation_stale" }],
+  },
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "validation",
+    session_state: "TIMEOUT",
+    final_verdict: null,
+    effects: [{ kind: "escalate_milestone" }],
+  },
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "validation",
+    session_state: "ABANDONED",
+    final_verdict: null,
+    effects: [{ kind: "escalate_milestone" }],
   },
 ];
 

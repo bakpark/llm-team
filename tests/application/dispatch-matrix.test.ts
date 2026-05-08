@@ -67,6 +67,106 @@ describe("DISPATCH_MATRIX", () => {
     ).toBeNull();
   });
 
+  it("includes all Phase 5b.1 outer-loop tuples", () => {
+    const cases: Array<{
+      phase_or_purpose:
+        | "design_discovery"
+        | "design_specification"
+        | "planning_decompose"
+        | "validation";
+      session_state: "CONVERGED" | "TIMEOUT" | "ABANDONED";
+      final_verdict: string | null;
+      expected: string;
+    }> = [
+      // Discovery
+      {
+        phase_or_purpose: "design_discovery",
+        session_state: "CONVERGED",
+        final_verdict: "spec_accept",
+        expected: "promote_milestone_to_specification",
+      },
+      {
+        phase_or_purpose: "design_discovery",
+        session_state: "CONVERGED",
+        final_verdict: "spec_reject",
+        expected: "park_milestone_awaiting_human",
+      },
+      {
+        phase_or_purpose: "design_discovery",
+        session_state: "TIMEOUT",
+        final_verdict: null,
+        expected: "recover_milestone_to_draft",
+      },
+      // Specification
+      {
+        phase_or_purpose: "design_specification",
+        session_state: "CONVERGED",
+        final_verdict: "spec_accept",
+        expected: "promote_milestone_to_spec_approved",
+      },
+      {
+        phase_or_purpose: "design_specification",
+        session_state: "CONVERGED",
+        final_verdict: "spec_reject",
+        expected: "park_milestone_awaiting_human",
+      },
+      // Planning
+      {
+        phase_or_purpose: "planning_decompose",
+        session_state: "CONVERGED",
+        final_verdict: "plan_accept",
+        expected: "persist_slice_dag_and_promote",
+      },
+      {
+        phase_or_purpose: "planning_decompose",
+        session_state: "CONVERGED",
+        final_verdict: "request_changes",
+        expected: "noop_planning_request_changes",
+      },
+      {
+        phase_or_purpose: "planning_decompose",
+        session_state: "TIMEOUT",
+        final_verdict: null,
+        expected: "escalate_milestone",
+      },
+      // Validation
+      {
+        phase_or_purpose: "validation",
+        session_state: "CONVERGED",
+        final_verdict: "validation_pass",
+        expected: "finalize_milestone_done",
+      },
+      {
+        phase_or_purpose: "validation",
+        session_state: "CONVERGED",
+        final_verdict: "validation_fail",
+        expected: "recover_milestone_to_building",
+      },
+      {
+        phase_or_purpose: "validation",
+        session_state: "CONVERGED",
+        final_verdict: "validation_stale",
+        expected: "noop_validation_stale",
+      },
+      {
+        phase_or_purpose: "validation",
+        session_state: "ABANDONED",
+        final_verdict: null,
+        expected: "escalate_milestone",
+      },
+    ];
+    for (const c of cases) {
+      const entry = lookupDispatch({
+        parent_loop: "outer",
+        phase_or_purpose: c.phase_or_purpose,
+        session_state: c.session_state,
+        final_verdict: c.final_verdict,
+      });
+      expect(entry, JSON.stringify(c)).not.toBeNull();
+      expect(entry?.effects.map((e) => e.kind)).toContain(c.expected);
+    }
+  });
+
   it("each entry has at least one effect", () => {
     for (const e of DISPATCH_MATRIX) {
       expect(e.effects.length, JSON.stringify(e)).toBeGreaterThan(0);
