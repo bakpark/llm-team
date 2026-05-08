@@ -196,6 +196,19 @@ export class FsStore implements StorePort {
       body = await readFile(keeper, "utf8");
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") return false;
+      // Keeper not yet written. Two cases:
+      //   (a) lock was stale and abandoned (winner crashed before keeper).
+      //   (b) lock just acquired and keeper write is in flight (race window
+      //       between mkdir and writeFile). Reclaiming in case (b) makes the
+      //       winner's writeFile fail with ENOENT/EINVAL on the parent dir.
+      // Distinguish by lockDir age: if the dir was created within
+      // staleLockMs, assume case (b) and back off.
+      try {
+        const st = await stat(lockDir);
+        if (Date.now() - st.ctimeMs < this.staleLockMs) return false;
+      } catch {
+        return false;
+      }
       try {
         await rmdir(lockDir);
         return true;

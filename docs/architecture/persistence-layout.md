@@ -49,6 +49,16 @@ workdir/
       <milestone_id>.json           # KAC-CONTEXT-SUMMARY
     refactor_proposals/
       <proposal_id>.json            # KAC-REFACTOR-BACKLOG
+    slice_telemetry/
+      <telemetry_id>.json           # KAC-SLICE-TELEMETRY (Discovery N+1 inject 용)
+  feature_requests/
+    <request_id>.json               # 사람이 drop 한 feature-request — feature_request_promote 가 소비
+  human_signals/
+    <signal_id>.json                # RGC-SIGNALS envelope (FS drop 채널, atomic rename)
+    processed/
+      <signal_id>.json              # human_signal_drain 처리 후 영속화 (idempotency)
+  releases/
+    <milestone_id>.json             # outer Validation pass 시 release 산출물 (Phase 5c)
   workspaces/
     <slice_id>/                     # inner tdd_build worktree (격리). turn worker 가 관리
 ```
@@ -69,6 +79,9 @@ workdir/
 | `metric_run_id` | Caller | ULID |
 | `decision_id` | Caller (knowledge writer) | ULID |
 | `proposal_id` | Caller (RefactorBacklog writer) | ULID |
+| `telemetry_id` | Caller (slice telemetry emitter) | ULID |
+| `request_id` (feature request) | Caller (feature_request_promote) | ULID |
+| `signal_id` | source 별 — `github_comment` 은 comment.node_id, FS drop 은 caller-issued ULID | source-defined |
 | `workspace_commit` (SHA) | turn worker post-validate (git commit) | git commit SHA1/SHA256 (저장소 설정) |
 | `slice_merge_id` | Caller (SliceMerge create operation) | ULID |
 | `external_refs[].id` | 외부 시스템 | 외부 시스템 어댑터의 발급값 (예: GitHub Issue 번호) — 내부에서 발급하지 않음 |

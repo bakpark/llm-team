@@ -70,6 +70,82 @@ export const LeaseConfig = z
 
 export type LeaseConfig = z.infer<typeof LeaseConfig>;
 
+/**
+ * TCC-SLICE-CLASS-RULES — internal slice 가 자동 feature 게이트로 승격되는
+ * 6 rule. 각 rule 은 default-on (target operator 가 disable 가능). path/glob
+ * 또는 threshold 의 default 는 target operator 가 정의해야 한다.
+ */
+
+const PathGlobList = z.array(z.string().min(1));
+
+const InterfaceBreakRule = z
+  .object({
+    enabled: z.boolean().default(true),
+    protected_apis: PathGlobList.default(() => []),
+  })
+  .strict();
+
+const SchemaOrMigrationChangeRule = z
+  .object({
+    enabled: z.boolean().default(true),
+    paths: PathGlobList.default(() => []),
+  })
+  .strict();
+
+const SecuritySensitivePathRule = z
+  .object({
+    enabled: z.boolean().default(true),
+    paths: PathGlobList.default(() => []),
+  })
+  .strict();
+
+const PerfCriticalPathRule = z
+  .object({
+    enabled: z.boolean().default(true),
+    paths: PathGlobList.default(() => []),
+    regression_threshold: z.number().nullable().default(null),
+  })
+  .strict();
+
+const ExistingTestCoverageRule = z
+  .object({
+    enabled: z.boolean().default(true),
+    threshold: z.number().min(0).max(1).default(0.7),
+  })
+  .strict();
+
+const MetricRunnerUnavailableRule = z
+  .object({
+    enabled: z.boolean().default(true),
+  })
+  .strict();
+
+export const InternalEscalationRules = z
+  .object({
+    interface_break: InterfaceBreakRule.default(() =>
+      InterfaceBreakRule.parse({}),
+    ),
+    schema_or_migration_change: SchemaOrMigrationChangeRule.default(() =>
+      SchemaOrMigrationChangeRule.parse({}),
+    ),
+    security_sensitive_path: SecuritySensitivePathRule.default(() =>
+      SecuritySensitivePathRule.parse({}),
+    ),
+    perf_critical_path: PerfCriticalPathRule.default(() =>
+      PerfCriticalPathRule.parse({}),
+    ),
+    existing_test_coverage_below_threshold:
+      ExistingTestCoverageRule.default(() =>
+        ExistingTestCoverageRule.parse({}),
+      ),
+    metric_runner_unavailable: MetricRunnerUnavailableRule.default(() =>
+      MetricRunnerUnavailableRule.parse({}),
+    ),
+  })
+  .strict();
+
+export type InternalEscalationRules = z.infer<typeof InternalEscalationRules>;
+
 export const Identity = z
   .object({
     target_id: z.string().min(1),
@@ -102,6 +178,7 @@ export const TargetConfig = z
       .strict(),
     governance: Governance.optional(),
     lease: LeaseConfig.optional(),
+    internal_escalation_rules: InternalEscalationRules.optional(),
   })
   .strict();
 

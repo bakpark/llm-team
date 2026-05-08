@@ -66,6 +66,25 @@ export const layout = {
   refactorProposal(proposalId: string): string {
     return `knowledge/refactor_proposals/${requireUlid("proposal_id", proposalId)}.json`;
   },
+  sliceTelemetry(telemetryId: string): string {
+    return `knowledge/slice_telemetry/${requireUlid("telemetry_id", telemetryId)}.json`;
+  },
+  featureRequest(requestId: string): string {
+    return `feature_requests/${requireUlid("request_id", requestId)}.json`;
+  },
+  humanSignal(signalId: string): string {
+    if (!/^[A-Za-z0-9._:-]+$/.test(signalId))
+      throw new Error("signal_id must match [A-Za-z0-9._:-]+");
+    return `human_signals/${signalId}.json`;
+  },
+  humanSignalProcessed(signalId: string): string {
+    if (!/^[A-Za-z0-9._:-]+$/.test(signalId))
+      throw new Error("signal_id must match [A-Za-z0-9._:-]+");
+    return `human_signals/processed/${signalId}.json`;
+  },
+  release(milestoneId: string): string {
+    return `releases/${requireUlid("milestone_id", milestoneId)}.json`;
+  },
   workspaceRoot(sliceId: string): string {
     return `workspaces/${requireUlid("slice_id", sliceId)}`;
   },
