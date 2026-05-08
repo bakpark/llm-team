@@ -16,6 +16,10 @@ import { HumanSignalEnvelope } from "../domain/schema/human-signal.js";
 import type { ClockPort } from "../ports/clock.js";
 import type { HumanSignalPort } from "../ports/human-signal.js";
 import type { StorePort } from "../ports/store.js";
+import {
+  bindHumanSignalToSession,
+  type HumanSignalBindingDeps,
+} from "./human-signal-binding.js";
 import { layout } from "./persistence-layout.js";
 
 export type DrainOutcome =
@@ -25,6 +29,11 @@ export type DrainOutcome =
       signal_type: string;
       target_kind: string;
       target_id: string;
+      /** Phase 5b.2: present when the drain bound the signal to a session. */
+      binding?:
+        | { kind: "appended"; session_id: string; turn_index: number }
+        | { kind: "no_session"; reason: string }
+        | { kind: "unsupported"; reason: string };
     }
   | {
       kind: "invalid";
@@ -36,6 +45,13 @@ export interface DrainDeps {
   store: StorePort;
   signal: HumanSignalPort;
   clock: ClockPort;
+  /**
+   * Phase 5b.2: when supplied, applied signals are bound to their addressed
+   * outer DialogueSession as a `human_approval` SessionTurn. Drain remains
+   * functional without this — phase-5a callers omit it for envelope-only
+   * persistence semantics.
+   */
+  binding?: HumanSignalBindingDeps;
 }
 
 export async function runHumanSignalDrain(
@@ -48,6 +64,24 @@ export async function runHumanSignalDrain(
     const validation = validateEnvelope(env);
     const now = deps.clock.isoNow();
     if (validation.ok) {
+      // Phase 5b.2: bind FIRST (before markProcessed) so the contribution
+      // is visible to the next coordinator pickup. If binding emits a turn,
+      // its idempotency_key is the SessionTurn's per_turn key — separate
+      // from markProcessed's processed/<id>.json marker.
+      let bindingDetail: DrainOutcome extends { binding?: infer B } ? B : never =
+        undefined as never;
+      if (deps.binding != null) {
+        const b = await bindHumanSignalToSession(env, deps.binding);
+        if (b.kind === "appended") {
+          bindingDetail = {
+            kind: "appended",
+            session_id: b.session_id,
+            turn_index: b.turn_index,
+          } as never;
+        } else {
+          bindingDetail = b as never;
+        }
+      }
       const r = await deps.signal.markProcessed({
         signalId: env.signal_id,
         state: "applied",
@@ -65,6 +99,7 @@ export async function runHumanSignalDrain(
         signal_type: env.signal_type,
         target_kind: env.target_kind,
         target_id: env.target_id,
+        ...(bindingDetail !== undefined ? { binding: bindingDetail } : {}),
       });
     } else {
       const r = await deps.signal.markProcessed({
