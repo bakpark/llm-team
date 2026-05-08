@@ -7,11 +7,14 @@
  * Compaction (size/wallclock trigger) + slice telemetry emit + Refactor
  * Backlog 6-state lifecycle 는 phase 5c 에서 별도 모듈로 wire.
  *
- * Audit hash 는 record body 자체에 대한 sha256(canonical) 을 그대로 사용한다
- * (ledger 의 chain hash 와는 별개 — 본 record 는 KAC-MANIFEST entry 의
- * revision_pin 으로 사용되므로 record body 의 무결성만 보장하면 충분).
+ * audit_hash 는 record body 자체의 sha256(canonical-json) 만 사용한다 — ledger
+ * 의 chain hash 와 의도적으로 다르다. KAC-MANIFEST consumer 가 body 만으로
+ * revision_pin 을 재계산해 무결성 검증할 수 있어야 한다. (PR #66 P1-6 fix:
+ * 이전 구현은 `computeAuditHash(GENESIS, body)` 로 64-char "0" prefix 를
+ * 추가해 body-only 재계산과 불일치했음.)
  */
-import { computeAuditHash, AUDIT_HASH_GENESIS } from "../domain/audit-hash.js";
+import { createHash } from "node:crypto";
+import { canonicalJson } from "../domain/audit-hash.js";
 import { newMonotonicId } from "../domain/ids.js";
 import {
   ContextSummary,
@@ -57,7 +60,7 @@ export async function recordDecision(
     affected_slices: input.affected_slices ?? [],
     supersedes: input.supersedes ?? null,
   };
-  const audit_hash = computeAuditHash(AUDIT_HASH_GENESIS, body);
+  const audit_hash = bodyAuditHash(body);
   const entry: DecisionEntryT = DecisionEntry.parse({ ...body, audit_hash });
   await deps.store.writeAtomic(
     layout.decision(decision_id),
@@ -93,7 +96,7 @@ export async function snapshotContextSummary(
     architectural_debt_indicators: input.architectural_debt_indicators ?? [],
     generated_at,
   };
-  const audit_hash = computeAuditHash(AUDIT_HASH_GENESIS, body);
+  const audit_hash = bodyAuditHash(body);
   const summary: ContextSummaryT = ContextSummary.parse({
     ...body,
     audit_hash,
@@ -105,4 +108,12 @@ export async function snapshotContextSummary(
     JSON.stringify(summary, null, 2),
   );
   return summary;
+}
+
+/**
+ * Body-only sha256 of the canonical-json record. KAC-MANIFEST consumer can
+ * verify revision_pin = sha256(canonicalJson(record_without_audit_hash)).
+ */
+export function bodyAuditHash(body: unknown): string {
+  return createHash("sha256").update(canonicalJson(body)).digest("hex");
 }

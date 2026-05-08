@@ -90,6 +90,9 @@ export const layout = {
   release(milestoneId: string): string {
     return `releases/${requireUlid("milestone_id", milestoneId)}.json`;
   },
+  milestoneSpec(milestoneId: string): string {
+    return `milestones/${requireUlid("milestone_id", milestoneId)}/spec.md`;
+  },
   workspaceRoot(sliceId: string): string {
     return `workspaces/${requireUlid("slice_id", sliceId)}`;
   },

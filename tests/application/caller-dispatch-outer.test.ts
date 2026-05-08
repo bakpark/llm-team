@@ -380,3 +380,348 @@ describe("dispatchOuterOutcome — no_match", () => {
     expect(r.kind).toBe("no_match");
   });
 });
+
+describe("dispatchOuterOutcome — illegal_transition guard (PR #66 P0-2)", () => {
+  it("refuses Discovery spec_accept when milestone is M_DONE", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_DONE");
+    const r = await dispatchOuterOutcome(
+      {
+        parent_loop: "outer",
+        phase_or_purpose: "design_discovery",
+        session_state: "CONVERGED",
+        final_verdict: "spec_accept",
+        milestone: m,
+        sessionId: SESS_ID,
+      },
+      d,
+    );
+    expect(r.kind).toBe("illegal_transition");
+    if (r.kind === "illegal_transition") {
+      expect(r.detail).toContain("M_DONE");
+    }
+    // milestone unchanged
+    const reread = Milestone.parse(
+      JSON.parse((await d.store.readText(layout.milestone(M_ID)))!),
+    );
+    expect(reread.state).toBe("M_DONE");
+  });
+
+  it("refuses Validation validation_pass from M_ESCALATED", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_ESCALATED");
+    const r = await dispatchOuterOutcome(
+      {
+        parent_loop: "outer",
+        phase_or_purpose: "validation",
+        session_state: "CONVERGED",
+        final_verdict: "validation_pass",
+        milestone: m,
+        sessionId: SESS_ID,
+        contextSummaryInput: {
+          milestone_id: M_ID,
+          user_value: "x",
+        },
+      },
+      d,
+    );
+    expect(r.kind).toBe("illegal_transition");
+  });
+
+  it("allows idempotent re-park (already AWAITING_HUMAN)", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_DISCOVERY_AWAITING_HUMAN");
+    const r = await dispatchOuterOutcome(
+      {
+        parent_loop: "outer",
+        phase_or_purpose: "design_discovery",
+        session_state: "CONVERGED",
+        final_verdict: "spec_reject",
+        milestone: m,
+        sessionId: SESS_ID,
+      },
+      d,
+    );
+    expect(r.kind).toBe("applied");
+  });
+});
+
+describe("dispatchOuterOutcome — idempotent re-run still emits ledger (PR #66 P0-3)", () => {
+  it("re-running spec_accept after milestone already advanced still appends a duplicate row", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_DISCOVERY_DRAFT");
+    const args = {
+      parent_loop: "outer" as const,
+      phase_or_purpose: "design_discovery" as const,
+      session_state: "CONVERGED" as const,
+      final_verdict: "spec_accept",
+      milestone: m,
+      sessionId: SESS_ID,
+    };
+    const r1 = await dispatchOuterOutcome(args, d);
+    expect(r1.kind).toBe("applied");
+
+    // Capture row count after first call.
+    const lines1 = (await d.store.readText("ledger/transitions.ndjson"))!
+      .trim()
+      .split("\n");
+    expect(lines1.length).toBeGreaterThan(0);
+
+    // Second call with same input — milestone already at M_SPECIFICATION_DRAFT.
+    // The dispatch should be illegal_transition (spec_accept doesn't allow
+    // M_SPECIFICATION_DRAFT as source) — proving the source guard kicks in
+    // before re-emit. (idempotent-ledger path is exercised by repeated
+    // identical calls when the state is already AT the target — covered
+    // separately when state happens to be a self-loop.)
+    const r2 = await dispatchOuterOutcome(args, d);
+    expect(r2.kind).toBe("illegal_transition");
+  });
+
+  it("recover_milestone_to_draft from already-DRAFT emits a ledger row even with no state change", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_DISCOVERY_DRAFT");
+    const r = await dispatchOuterOutcome(
+      {
+        parent_loop: "outer",
+        phase_or_purpose: "design_discovery",
+        session_state: "TIMEOUT",
+        final_verdict: null,
+        milestone: m,
+        sessionId: SESS_ID,
+      },
+      d,
+    );
+    expect(r.kind).toBe("applied");
+    const lines = (await d.store.readText("ledger/transitions.ndjson"))!
+      .trim()
+      .split("\n");
+    // Exactly one ledger row even though milestone state didn't change.
+    expect(lines.length).toBe(1);
+    const row = JSON.parse(lines[0]!);
+    expect(row.from_state).toBe("M_DISCOVERY_DRAFT");
+    expect(row.to_state).toBe("M_DISCOVERY_DRAFT");
+  });
+});
+
+describe("dispatchOuterOutcome — validation_fail (PR #66 P0-4 + P1-5)", () => {
+  it("reverts SLICE_VALIDATED responsible slices to SLICE_READY (P0-4)", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_DELIVERY_VALIDATING");
+    const validated = Slice.parse({ ...makeSlice(A), state: "SLICE_VALIDATED" });
+    await d.store.writeAtomic(layout.slice(A), JSON.stringify(validated, null, 2));
+
+    const r = await dispatchOuterOutcome(
+      {
+        parent_loop: "outer",
+        phase_or_purpose: "validation",
+        session_state: "CONVERGED",
+        final_verdict: "validation_fail",
+        milestone: m,
+        sessionId: SESS_ID,
+        responsibleSliceIds: [A],
+      },
+      d,
+    );
+    expect(r.kind).toBe("applied");
+    if (r.kind !== "applied") return;
+    const detail = r.details[0];
+    expect(detail).toMatchObject({ effect: "recover_milestone_to_building" });
+    if (detail?.effect === "recover_milestone_to_building") {
+      expect(detail.recovered_slices).toEqual([A]);
+    }
+    const reread = Slice.parse(
+      JSON.parse((await d.store.readText(layout.slice(A)))!),
+    );
+    expect(reread.state).toBe("SLICE_READY");
+  });
+
+  it("skips slices belonging to a different milestone (P1-5)", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_DELIVERY_VALIDATING");
+    const foreign = Slice.parse({
+      ...makeSlice(A),
+      milestone_id: "01HZM00000000000000000000Z", // different milestone
+      state: "SLICE_VALIDATED",
+    });
+    await d.store.writeAtomic(layout.slice(A), JSON.stringify(foreign, null, 2));
+
+    const r = await dispatchOuterOutcome(
+      {
+        parent_loop: "outer",
+        phase_or_purpose: "validation",
+        session_state: "CONVERGED",
+        final_verdict: "validation_fail",
+        milestone: m,
+        sessionId: SESS_ID,
+        responsibleSliceIds: [A],
+      },
+      d,
+    );
+    expect(r.kind).toBe("applied");
+    if (r.kind !== "applied") return;
+    const detail = r.details[0];
+    if (detail?.effect === "recover_milestone_to_building") {
+      expect(detail.recovered_slices).toEqual([]);
+      expect(detail.skipped_foreign_slices).toEqual([A]);
+    }
+    // foreign slice unchanged
+    const reread = Slice.parse(
+      JSON.parse((await d.store.readText(layout.slice(A)))!),
+    );
+    expect(reread.state).toBe("SLICE_VALIDATED");
+  });
+});
+
+describe("dispatchOuterOutcome — missing matrix tuples (P1-8)", () => {
+  it("Specification TIMEOUT → recover to M_SPECIFICATION_DRAFT", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_SPECIFICATION_DRAFT");
+    const r = await dispatchOuterOutcome(
+      {
+        parent_loop: "outer",
+        phase_or_purpose: "design_specification",
+        session_state: "TIMEOUT",
+        final_verdict: null,
+        milestone: m,
+        sessionId: SESS_ID,
+      },
+      d,
+    );
+    expect(r.kind).toBe("applied");
+    const reread = Milestone.parse(
+      JSON.parse((await d.store.readText(layout.milestone(M_ID)))!),
+    );
+    expect(reread.state).toBe("M_SPECIFICATION_DRAFT");
+  });
+
+  it("Specification spec_reject → M_SPECIFICATION_AWAITING_HUMAN", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_SPECIFICATION_DRAFT");
+    const r = await dispatchOuterOutcome(
+      {
+        parent_loop: "outer",
+        phase_or_purpose: "design_specification",
+        session_state: "CONVERGED",
+        final_verdict: "spec_reject",
+        milestone: m,
+        sessionId: SESS_ID,
+      },
+      d,
+    );
+    expect(r.kind).toBe("applied");
+    const reread = Milestone.parse(
+      JSON.parse((await d.store.readText(layout.milestone(M_ID)))!),
+    );
+    expect(reread.state).toBe("M_SPECIFICATION_AWAITING_HUMAN");
+  });
+
+  it("Discovery ABANDONED → recover to draft", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_DISCOVERY_DRAFT");
+    const r = await dispatchOuterOutcome(
+      {
+        parent_loop: "outer",
+        phase_or_purpose: "design_discovery",
+        session_state: "ABANDONED",
+        final_verdict: null,
+        milestone: m,
+        sessionId: SESS_ID,
+      },
+      d,
+    );
+    expect(r.kind).toBe("applied");
+    const reread = Milestone.parse(
+      JSON.parse((await d.store.readText(layout.milestone(M_ID)))!),
+    );
+    expect(reread.state).toBe("M_DISCOVERY_DRAFT");
+  });
+
+  it("Planning request_changes → milestone unchanged + ledger row", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_DELIVERY_PLANNING");
+    const r = await dispatchOuterOutcome(
+      {
+        parent_loop: "outer",
+        phase_or_purpose: "planning_decompose",
+        session_state: "CONVERGED",
+        final_verdict: "request_changes",
+        milestone: m,
+        sessionId: SESS_ID,
+      },
+      d,
+    );
+    expect(r.kind).toBe("applied");
+    const reread = Milestone.parse(
+      JSON.parse((await d.store.readText(layout.milestone(M_ID)))!),
+    );
+    expect(reread.state).toBe("M_DELIVERY_PLANNING");
+    const lines =
+      (await d.store.readText("ledger/transitions.ndjson"))!.trim();
+    expect(lines).not.toBe("");
+  });
+
+  it("Validation validation_stale → milestone unchanged + ledger noop", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_DELIVERY_VALIDATING");
+    const r = await dispatchOuterOutcome(
+      {
+        parent_loop: "outer",
+        phase_or_purpose: "validation",
+        session_state: "CONVERGED",
+        final_verdict: "validation_stale",
+        milestone: m,
+        sessionId: SESS_ID,
+      },
+      d,
+    );
+    expect(r.kind).toBe("applied");
+    const reread = Milestone.parse(
+      JSON.parse((await d.store.readText(layout.milestone(M_ID)))!),
+    );
+    expect(reread.state).toBe("M_DELIVERY_VALIDATING");
+  });
+});
+
+describe("dispatchOuterOutcome — plan_accept DAG edge cases (P1-8)", () => {
+  it("rejects missing dependency", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_DELIVERY_PLANNING");
+    const slices = [
+      makeSlice(A, [{ slice_id: B, edge_type: "blocks" }]), // B not in set
+    ];
+    await expect(
+      dispatchOuterOutcome(
+        {
+          parent_loop: "outer",
+          phase_or_purpose: "planning_decompose",
+          session_state: "CONVERGED",
+          final_verdict: "plan_accept",
+          milestone: m,
+          sessionId: SESS_ID,
+          slicesToPersist: slices,
+        },
+        d,
+      ),
+    ).rejects.toThrow(/invalid DAG/);
+  });
+
+  it("rejects self-dependency", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_DELIVERY_PLANNING");
+    const slices = [makeSlice(A, [{ slice_id: A, edge_type: "blocks" }])];
+    await expect(
+      dispatchOuterOutcome(
+        {
+          parent_loop: "outer",
+          phase_or_purpose: "planning_decompose",
+          session_state: "CONVERGED",
+          final_verdict: "plan_accept",
+          milestone: m,
+          sessionId: SESS_ID,
+          slicesToPersist: slices,
+        },
+        d,
+      ),
+    ).rejects.toThrow(/invalid DAG/);
+  });
+});

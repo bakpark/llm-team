@@ -2,21 +2,22 @@
  * SOC-DISPATCH-MATRIX outer-loop effect executor (Phase 5b.1).
  *
  * Slice-anchored effects (inner / middle review) live in
- * `caller-dispatch.ts`. Milestone-anchored outer-loop effects live here:
+ * `caller-dispatch.ts`. Milestone-anchored outer-loop effects live here.
  *
- *   - promote_milestone_to_specification        Discovery spec_accept
- *   - promote_milestone_to_spec_approved        Specification spec_accept
- *   - park_milestone_awaiting_human             Discovery/Specification spec_reject
- *   - recover_milestone_to_draft                Discovery/Specification TIMEOUT/ABANDONED
- *   - persist_slice_dag_and_promote             Planning plan_accept
- *   - noop_planning_request_changes             Planning request_changes
- *   - finalize_milestone_done                   Validation validation_pass
- *   - recover_milestone_to_building             Validation validation_fail
- *   - noop_validation_stale                     Validation validation_stale
- *   - escalate_milestone                        Validation TIMEOUT/ABANDONED
+ * Atomicity (PR #66 P0-1 fix): every outer dispatch runs inside a single
+ * `withFileLock(milestonePath)` so slice writes + Decision Log + Spec CP +
+ * milestone state transition are observed atomically. A crash between any
+ * two of these steps leaves the milestone state unchanged; the next cycle's
+ * dispatch retries from the same source state.
  *
- * 본 모듈은 store/ledger 만 다루며 LLM 호출이나 manifest 빌드는 하지 않는다.
- * dialogue-coordinator 가 outer session 종착 시점에 invoke 한다.
+ * Source-state guard (PR #66 P0-2 fix): each effect declares its
+ * `ALLOWED_SOURCE_STATES`. A stale outcome cannot pull a milestone in
+ * M_DONE / M_ESCALATED / *_AWAITING_HUMAN backwards.
+ *
+ * Ledger always emits (PR #66 P0-3 fix): even when the milestone is already
+ * at the target state (idempotent re-run), `appendTransition` is called so
+ * the audit trail is complete. The ledger's idempotency_key dedups the row
+ * as `duplicate` rather than producing a silent gap.
  */
 import { newMonotonicId } from "../domain/ids.js";
 import {
@@ -66,15 +67,14 @@ export interface OuterDispatchInput {
 
   /**
    * Discovery / Specification: Spec CP body (markdown / canonical text).
-   * Persisted under milestones/<id>/spec.json (5b.1 minimal — phase 6b 의
-   * GitHub adapter 가 doc 디렉토리 commit 으로 확장).
+   * Persisted under `layout.milestoneSpec(milestone_id)` (5b.1 minimal —
+   * phase 6b 의 GitHub adapter 가 doc 디렉토리 commit 으로 확장).
    */
   specProposalBody?: string;
 
   /**
    * Planning plan_accept: slice DAG decomposition. cycle/missing 검증 후
-   * writeAtomic + join condition 평가. Caller 는 RefactorBacklog 의 CURATED →
-   * SCHEDULED + internal slice promotion 도 함께 수행한다 (5c).
+   * writeAtomic + join condition 평가. RefactorBacklog promotion은 5c.
    */
   slicesToPersist?: readonly SliceT[];
 
@@ -84,14 +84,14 @@ export interface OuterDispatchInput {
   responsibleSliceIds?: readonly string[];
 
   /**
-   * Validation validation_pass: ContextSummary 본문 (Caller 가 lead artifact
-   * 를 후처리해 만든 것 — 5b.1 은 단순 echo).
+   * Validation validation_pass: ContextSummary 본문.
    */
   contextSummaryInput?: SnapshotContextSummaryInput;
 }
 
 export type OuterDispatchResult =
   | { kind: "no_match"; detail: string }
+  | { kind: "illegal_transition"; detail: string }
   | { kind: "applied"; effects: DispatchEffect[]; details: OuterDispatchDetail[] };
 
 export type OuterDispatchDetail =
@@ -130,12 +130,67 @@ export type OuterDispatchDetail =
       effect: "recover_milestone_to_building";
       milestone_state: "M_DELIVERY_BUILDING";
       recovered_slices: readonly string[];
+      skipped_foreign_slices: readonly string[];
     }
   | {
       effect: "noop_validation_stale";
       milestone_state: "M_DELIVERY_VALIDATING";
     }
   | { effect: "escalate_milestone"; milestone_state: "M_ESCALATED" };
+
+/**
+ * Effect 별 허용 source state. 명시되지 않은 (effect, source) 조합은
+ * `illegal_transition` 으로 거부된다.
+ */
+const ALLOWED_SOURCE_STATES: Record<string, ReadonlyArray<MilestoneState>> = {
+  promote_milestone_to_specification: ["M_DISCOVERY_DRAFT"],
+  promote_milestone_to_spec_approved: ["M_SPECIFICATION_DRAFT"],
+  park_milestone_awaiting_human: [
+    "M_DISCOVERY_DRAFT",
+    "M_SPECIFICATION_DRAFT",
+    // idempotent re-park (already AWAITING_HUMAN)
+    "M_DISCOVERY_AWAITING_HUMAN",
+    "M_SPECIFICATION_AWAITING_HUMAN",
+  ],
+  recover_milestone_to_draft: [
+    "M_DISCOVERY_AWAITING_HUMAN",
+    "M_SPECIFICATION_AWAITING_HUMAN",
+    // idempotent re-draft
+    "M_DISCOVERY_DRAFT",
+    "M_SPECIFICATION_DRAFT",
+  ],
+  persist_slice_dag_and_promote: [
+    "M_DELIVERY_PLANNING",
+    // idempotent re-run after partial crash
+    "M_DELIVERY_BUILDING",
+  ],
+  noop_planning_request_changes: ["M_DELIVERY_PLANNING"],
+  finalize_milestone_done: [
+    "M_DELIVERY_VALIDATING",
+    // idempotent re-finalize
+    "M_DONE",
+  ],
+  recover_milestone_to_building: [
+    "M_DELIVERY_VALIDATING",
+    // idempotent re-revert
+    "M_DELIVERY_BUILDING",
+  ],
+  noop_validation_stale: ["M_DELIVERY_VALIDATING"],
+  escalate_milestone: [
+    // any non-terminal — explicit listing keeps the guard auditable.
+    "M_INTAKE_QUEUED",
+    "M_DISCOVERY_DRAFT",
+    "M_DISCOVERY_AWAITING_HUMAN",
+    "M_SPECIFICATION_DRAFT",
+    "M_SPECIFICATION_AWAITING_HUMAN",
+    "M_SPEC_APPROVED",
+    "M_DELIVERY_PLANNING",
+    "M_DELIVERY_BUILDING",
+    "M_DELIVERY_VALIDATING",
+    // idempotent re-escalate
+    "M_ESCALATED",
+  ],
+};
 
 export async function dispatchOuterOutcome(
   input: OuterDispatchInput,
@@ -153,26 +208,66 @@ export async function dispatchOuterOutcome(
       detail: `no DISPATCH_MATRIX entry for (loop=outer, purpose=${input.phase_or_purpose}, state=${input.session_state}, verdict=${input.final_verdict ?? "<null>"})`,
     };
   }
-  const details: OuterDispatchDetail[] = [];
-  for (const effect of entry.effects) {
-    details.push(await runOuterEffect(effect, input, deps));
-  }
-  return { kind: "applied", effects: entry.effects, details };
+
+  // PR #66 P0-1: take the milestone lock once and run every effect inside
+  // it. Slice writes, Decision Log entries, Spec CP, and the milestone
+  // state transition all observe the same lock.
+  const milestonePath = layout.milestone(input.milestone.milestone_id);
+  return deps.store.withFileLock(milestonePath, async () => {
+    const fresh = await deps.store.readText(milestonePath);
+    if (fresh == null) {
+      return {
+        kind: "illegal_transition",
+        detail: `milestone ${input.milestone.milestone_id} disappeared mid-dispatch`,
+      };
+    }
+    const live = Milestone.parse(JSON.parse(fresh));
+
+    // PR #66 P0-2: validate source state for every effect before any
+    // mutation. Refuse the dispatch if even one effect is illegal.
+    for (const eff of entry.effects) {
+      const allowed = ALLOWED_SOURCE_STATES[eff.kind];
+      if (allowed == null) {
+        return {
+          kind: "illegal_transition",
+          detail: `effect ${eff.kind} has no ALLOWED_SOURCE_STATES entry`,
+        };
+      }
+      if (!allowed.includes(live.state)) {
+        return {
+          kind: "illegal_transition",
+          detail: `effect ${eff.kind} not allowed from milestone state ${live.state}`,
+        };
+      }
+    }
+
+    const details: OuterDispatchDetail[] = [];
+    for (const effect of entry.effects) {
+      details.push(await runOuterEffect(effect, input, live, deps));
+    }
+    return { kind: "applied", effects: entry.effects, details };
+  });
 }
 
 async function runOuterEffect(
   effect: DispatchEffect,
   input: OuterDispatchInput,
+  liveMilestone: MilestoneT,
   deps: OuterDispatchDeps,
 ): Promise<OuterDispatchDetail> {
   switch (effect.kind) {
     case "promote_milestone_to_specification": {
       const specPersistedAt = await persistSpecProposal(input, deps);
-      await transitionMilestone(input.milestone, "M_SPECIFICATION_DRAFT", deps, {
-        phase: "Discovery",
-        sessionId: input.sessionId,
-        finalVerdict: input.final_verdict,
-      });
+      await transitionMilestoneInLock(
+        liveMilestone,
+        "M_SPECIFICATION_DRAFT",
+        deps,
+        {
+          phase: "Discovery",
+          sessionId: input.sessionId,
+          finalVerdict: input.final_verdict,
+        },
+      );
       return {
         effect: "promote_milestone_to_specification",
         milestone_state: "M_SPECIFICATION_DRAFT",
@@ -181,7 +276,7 @@ async function runOuterEffect(
     }
     case "promote_milestone_to_spec_approved": {
       await persistSpecProposal(input, deps);
-      await transitionMilestone(input.milestone, "M_SPEC_APPROVED", deps, {
+      await transitionMilestoneInLock(liveMilestone, "M_SPEC_APPROVED", deps, {
         phase: "Specification",
         sessionId: input.sessionId,
         finalVerdict: input.final_verdict,
@@ -196,7 +291,7 @@ async function runOuterEffect(
         input.phase_or_purpose === "design_discovery"
           ? "M_DISCOVERY_AWAITING_HUMAN"
           : "M_SPECIFICATION_AWAITING_HUMAN";
-      await transitionMilestone(input.milestone, target, deps, {
+      await transitionMilestoneInLock(liveMilestone, target, deps, {
         phase:
           input.phase_or_purpose === "design_discovery"
             ? "Discovery"
@@ -216,7 +311,7 @@ async function runOuterEffect(
         input.phase_or_purpose === "design_discovery"
           ? "M_DISCOVERY_DRAFT"
           : "M_SPECIFICATION_DRAFT";
-      await transitionMilestone(input.milestone, target, deps, {
+      await transitionMilestoneInLock(liveMilestone, target, deps, {
         phase:
           input.phase_or_purpose === "design_discovery"
             ? "Discovery"
@@ -236,20 +331,20 @@ async function runOuterEffect(
       const validation = validateSliceDag(slices);
       if (!validation.ok) {
         // Per SOC-SLICE-DEPENDENCIES Cycle Detection: lead contribution FAIL.
-        // Caller routes back to request_changes — but the lookup already
-        // routed us to this effect. Refuse the dispatch by throwing; the
-        // coordinator should validate before invoking dispatch.
+        // Caller should validate before invoking dispatch; throw to surface
+        // the contract violation.
         throw new Error(
           `persist_slice_dag_and_promote: invalid DAG: ${JSON.stringify(validation.errors)}`,
         );
       }
 
-      // 1. Write each slice atomically with state=SLICE_PENDING.
+      // 1. Write each slice atomically with state=SLICE_PENDING. Idempotent
+      //    on retry — same slice_id rewrites are safe.
       for (const s of slices) {
         const pending = Slice.parse({
           ...s,
           state: "SLICE_PENDING",
-          milestone_id: input.milestone.milestone_id,
+          milestone_id: liveMilestone.milestone_id,
           updated_at: deps.clock.isoNow(),
         });
         await deps.store.writeAtomic(
@@ -258,19 +353,18 @@ async function runOuterEffect(
         );
       }
 
-      // 2. Compute initial join condition: any slice with no `blocks` deps
-      //    (or already-SLICE_VALIDATED deps, which can't happen for fresh
-      //    slices) is promoted SLICE_PENDING → SLICE_READY.
+      // 2. Compute initial join condition: blocks-free slices → SLICE_READY.
       const states = new Map<string, string>();
       for (const s of slices) states.set(s.slice_id, "SLICE_PENDING");
       const ready = computeReadySlices({ slices, states });
+      const sliceById = new Map(slices.map((s) => [s.slice_id, s]));
       const readyIds: string[] = [];
       for (const id of ready) {
-        const s = slices.find((x) => x.slice_id === id)!;
+        const s = sliceById.get(id)!;
         const r = Slice.parse({
           ...s,
           state: "SLICE_READY",
-          milestone_id: input.milestone.milestone_id,
+          milestone_id: liveMilestone.milestone_id,
           updated_at: deps.clock.isoNow(),
         });
         await deps.store.writeAtomic(
@@ -280,21 +374,26 @@ async function runOuterEffect(
         readyIds.push(id);
       }
 
-      // 3. Persist Decision Log entry (KAC-DECISION-LOG / product_decision).
+      // 3. Decision Log entry (KAC-DECISION-LOG / product_decision).
       await recordDecision(deps, {
         decision_kind: "product_decision",
         decision: `Planning accepted: ${slices.length} slice(s) decomposed`,
-        rationale: `outer Planning plan_accept for milestone ${input.milestone.milestone_id}`,
-        affected_milestones: [input.milestone.milestone_id],
+        rationale: `outer Planning plan_accept for milestone ${liveMilestone.milestone_id}`,
+        affected_milestones: [liveMilestone.milestone_id],
         affected_slices: slices.map((s) => s.slice_id),
       });
 
       // 4. Milestone → M_DELIVERY_BUILDING.
-      await transitionMilestone(input.milestone, "M_DELIVERY_BUILDING", deps, {
-        phase: "Planning",
-        sessionId: input.sessionId,
-        finalVerdict: input.final_verdict,
-      });
+      await transitionMilestoneInLock(
+        liveMilestone,
+        "M_DELIVERY_BUILDING",
+        deps,
+        {
+          phase: "Planning",
+          sessionId: input.sessionId,
+          finalVerdict: input.final_verdict,
+        },
+      );
       return {
         effect: "persist_slice_dag_and_promote",
         milestone_state: "M_DELIVERY_BUILDING",
@@ -303,13 +402,19 @@ async function runOuterEffect(
       };
     }
     case "noop_planning_request_changes": {
-      // No state change — emit a ledger row so audit trail exists.
-      await emitOuterLedgerRow(input.milestone, "M_DELIVERY_PLANNING", deps, {
-        phase: "Planning",
-        sessionId: input.sessionId,
-        finalVerdict: input.final_verdict,
-        result: "noop",
-      });
+      // Keep state, emit ledger row for audit trail.
+      await emitMilestoneLedgerRow(
+        liveMilestone.state,
+        liveMilestone,
+        liveMilestone.state,
+        deps,
+        {
+          phase: "Planning",
+          sessionId: input.sessionId,
+          finalVerdict: input.final_verdict,
+          result: "noop",
+        },
+      );
       return {
         effect: "noop_planning_request_changes",
         milestone_state: "M_DELIVERY_PLANNING",
@@ -320,10 +425,10 @@ async function runOuterEffect(
         throw new Error("finalize_milestone_done requires contextSummaryInput");
       const summary = await snapshotContextSummary(deps, {
         ...input.contextSummaryInput,
-        milestone_id: input.milestone.milestone_id,
+        milestone_id: liveMilestone.milestone_id,
       });
-      await transitionMilestone(
-        input.milestone,
+      await transitionMilestoneInLock(
+        liveMilestone,
         "M_DONE",
         deps,
         {
@@ -340,53 +445,77 @@ async function runOuterEffect(
       };
     }
     case "recover_milestone_to_building": {
+      // PR #66 P0-4 + P1-5 + P1-7 fix: revert any responsible slice that is
+      // not already SLICE_READY (incl. SLICE_VALIDATED), filter foreign-
+      // milestone slices, and lock each slice path for the read-modify-write.
       const recovered: string[] = [];
+      const skipped: string[] = [];
       for (const sid of input.responsibleSliceIds ?? []) {
-        const path = layout.slice(sid);
-        const body = await deps.store.readText(path);
-        if (body == null) continue;
-        const live = Slice.parse(JSON.parse(body));
-        if (
-          live.state !== "SLICE_VALIDATED" &&
-          live.state !== "SLICE_READY"
-        ) {
+        const slicePath = layout.slice(sid);
+        await deps.store.withFileLock(slicePath, async () => {
+          const body = await deps.store.readText(slicePath);
+          if (body == null) {
+            skipped.push(sid);
+            return;
+          }
+          const live = Slice.parse(JSON.parse(body));
+          if (live.milestone_id !== liveMilestone.milestone_id) {
+            // P1-5: refuse to revert slices that belong to another milestone.
+            skipped.push(sid);
+            return;
+          }
+          if (live.state === "SLICE_READY") return; // idempotent
           const reverted = Slice.parse({
             ...live,
             state: "SLICE_READY",
             current_session_id: null,
             updated_at: deps.clock.isoNow(),
           });
-          await deps.store.writeAtomic(path, JSON.stringify(reverted, null, 2));
+          await deps.store.writeAtomic(
+            slicePath,
+            JSON.stringify(reverted, null, 2),
+          );
           recovered.push(sid);
-        }
+        });
       }
-      await transitionMilestone(input.milestone, "M_DELIVERY_BUILDING", deps, {
-        phase: "Validation",
-        sessionId: input.sessionId,
-        finalVerdict: input.final_verdict,
-      });
+      await transitionMilestoneInLock(
+        liveMilestone,
+        "M_DELIVERY_BUILDING",
+        deps,
+        {
+          phase: "Validation",
+          sessionId: input.sessionId,
+          finalVerdict: input.final_verdict,
+        },
+      );
       return {
         effect: "recover_milestone_to_building",
         milestone_state: "M_DELIVERY_BUILDING",
         recovered_slices: recovered,
+        skipped_foreign_slices: skipped,
       };
     }
     case "noop_validation_stale": {
-      await emitOuterLedgerRow(input.milestone, "M_DELIVERY_VALIDATING", deps, {
-        phase: "Validation",
-        sessionId: input.sessionId,
-        finalVerdict: input.final_verdict,
-        result: "noop",
-      });
+      await emitMilestoneLedgerRow(
+        liveMilestone.state,
+        liveMilestone,
+        liveMilestone.state,
+        deps,
+        {
+          phase: "Validation",
+          sessionId: input.sessionId,
+          finalVerdict: input.final_verdict,
+          result: "noop",
+        },
+      );
       return {
         effect: "noop_validation_stale",
         milestone_state: "M_DELIVERY_VALIDATING",
       };
     }
     case "escalate_milestone": {
-      await transitionMilestone(input.milestone, "M_ESCALATED", deps, {
-        phase:
-          input.phase_or_purpose === "validation" ? "Validation" : "Planning",
+      await transitionMilestoneInLock(liveMilestone, "M_ESCALATED", deps, {
+        phase: phaseFor(input.phase_or_purpose),
         sessionId: input.sessionId,
         finalVerdict: input.final_verdict,
         result: "escalated",
@@ -403,18 +532,46 @@ async function runOuterEffect(
   }
 }
 
+function phaseFor(
+  purpose: OuterDispatchInput["phase_or_purpose"],
+): "Discovery" | "Specification" | "Planning" | "Validation" {
+  switch (purpose) {
+    case "design_discovery":
+      return "Discovery";
+    case "design_specification":
+      return "Specification";
+    case "planning_decompose":
+      return "Planning";
+    case "validation":
+      return "Validation";
+  }
+}
+
 async function persistSpecProposal(
   input: OuterDispatchInput,
   deps: OuterDispatchDeps,
 ): Promise<string | null> {
   if (input.specProposalBody == null) return null;
-  const path = `milestones/${input.milestone.milestone_id}/spec.md`;
-  await deps.store.writeAtomic(path, input.specProposalBody);
+  await deps.store.writeAtomic(
+    layout.milestoneSpec(input.milestone.milestone_id),
+    input.specProposalBody,
+  );
   return deps.clock.isoNow();
 }
 
-async function transitionMilestone(
-  milestone: MilestoneT,
+/**
+ * Caller MUST already hold `withFileLock(milestonePath)`. This helper does
+ * not re-acquire the lock — it does the milestone read-state-write inline
+ * so the caller can sequence side effects (slices, decisions, etc.) inside
+ * the same critical section.
+ *
+ * PR #66 P0-3 fix: the ledger row is always emitted (even on idempotent
+ * re-run where state is unchanged). The ledger's per_session_outcome
+ * idempotency_key dedups duplicates as `result=duplicate` rather than
+ * leaving an audit gap.
+ */
+async function transitionMilestoneInLock(
+  liveMilestone: MilestoneT,
   toState: MilestoneState,
   deps: OuterDispatchDeps,
   ctx: {
@@ -425,26 +582,24 @@ async function transitionMilestone(
   },
   patch?: { context_summary_id?: string },
 ): Promise<MilestoneT> {
-  const path = layout.milestone(milestone.milestone_id);
-  return deps.store.withFileLock(path, async () => {
-    const fresh = await deps.store.readText(path);
-    if (fresh == null)
-      throw new Error(
-        `milestone ${milestone.milestone_id} disappeared mid-dispatch`,
-      );
-    const live = Milestone.parse(JSON.parse(fresh));
-    if (live.state === toState) return live; // idempotent
-    const updated = Milestone.parse({
-      ...live,
-      state: toState,
-      context_summary_id:
-        patch?.context_summary_id ?? live.context_summary_id ?? null,
-      updated_at: deps.clock.isoNow(),
-    });
-    await deps.store.writeAtomic(path, JSON.stringify(updated, null, 2));
-    await emitMilestoneLedgerRow(live.state, updated, toState, deps, ctx);
-    return updated;
+  const path = layout.milestone(liveMilestone.milestone_id);
+  const fromState = liveMilestone.state;
+  if (liveMilestone.state === toState && patch?.context_summary_id == null) {
+    // Idempotent re-run. Skip writeAtomic (no content change) but still
+    // emit the ledger row so the audit trail is complete.
+    await emitMilestoneLedgerRow(fromState, liveMilestone, toState, deps, ctx);
+    return liveMilestone;
+  }
+  const updated = Milestone.parse({
+    ...liveMilestone,
+    state: toState,
+    context_summary_id:
+      patch?.context_summary_id ?? liveMilestone.context_summary_id ?? null,
+    updated_at: deps.clock.isoNow(),
   });
+  await deps.store.writeAtomic(path, JSON.stringify(updated, null, 2));
+  await emitMilestoneLedgerRow(fromState, updated, toState, deps, ctx);
+  return updated;
 }
 
 async function emitMilestoneLedgerRow(
@@ -499,18 +654,4 @@ async function emitMilestoneLedgerRow(
     result_detail: null,
     timestamp: deps.clock.isoNow(),
   });
-}
-
-async function emitOuterLedgerRow(
-  milestone: MilestoneT,
-  state: MilestoneState,
-  deps: OuterDispatchDeps,
-  ctx: {
-    phase: "Discovery" | "Specification" | "Planning" | "Validation";
-    sessionId: string;
-    finalVerdict: string | null;
-    result?: "applied" | "noop";
-  },
-): Promise<void> {
-  await emitMilestoneLedgerRow(state, milestone, state, deps, ctx);
 }
