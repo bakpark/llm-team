@@ -299,6 +299,13 @@ async function runEffect(
         sliceState: "SLICE_BUILDING",
       };
     }
+    default:
+      // Outer-loop effects flow through `caller-dispatch-outer.ts`; if one
+      // shows up here the coordinator routed an outer outcome through the
+      // wrong dispatcher. Fail loud rather than silently no-op.
+      throw new Error(
+        `caller-dispatch: unsupported effect kind=${(effect as { kind: string }).kind}; outer effects must use dispatchOuterOutcome`,
+      );
   }
 }
 
