@@ -32,11 +32,21 @@ export type DrainOutcome =
       /** Phase 5b.2: present when the drain bound the signal to a session. */
       binding?:
         | { kind: "appended"; session_id: string; turn_index: number }
-        | { kind: "no_session"; reason: string }
         | { kind: "unsupported"; reason: string };
     }
   | {
       kind: "invalid";
+      signal_id: string;
+      reason: string;
+    }
+  | {
+      /**
+       * Codex P2: binding returned `no_session` — addressed milestone has no
+       * SESSION_OPEN outer session yet. Signal is intentionally NOT marked
+       * processed so the next drain cycle re-tries once the coordinator opens
+       * the session. Operators can manually delete the file to abort.
+       */
+      kind: "deferred";
       signal_id: string;
       reason: string;
     };
@@ -68,18 +78,33 @@ export async function runHumanSignalDrain(
       // is visible to the next coordinator pickup. If binding emits a turn,
       // its idempotency_key is the SessionTurn's per_turn key — separate
       // from markProcessed's processed/<id>.json marker.
-      let bindingDetail: DrainOutcome extends { binding?: infer B } ? B : never =
-        undefined as never;
+      let bindingDetail:
+        | { kind: "appended"; session_id: string; turn_index: number }
+        | { kind: "unsupported"; reason: string }
+        | undefined;
       if (deps.binding != null) {
         const b = await bindHumanSignalToSession(env, deps.binding);
+        if (b.kind === "no_session") {
+          // Codex P2: do NOT markProcessed — signal stays pending so the
+          // next drain cycle retries once the coordinator opens the
+          // outer session. listPending will re-emit it.
+          results.push({
+            kind: "deferred",
+            signal_id: env.signal_id,
+            reason: b.reason,
+          });
+          continue;
+        }
         if (b.kind === "appended") {
           bindingDetail = {
             kind: "appended",
             session_id: b.session_id,
             turn_index: b.turn_index,
-          } as never;
+          };
         } else {
-          bindingDetail = b as never;
+          // unsupported — fall through to markProcessed=applied so the
+          // queue moves on (signal_type isn't bindable, e.g. pause).
+          bindingDetail = { kind: "unsupported", reason: b.reason };
         }
       }
       const r = await deps.signal.markProcessed({
@@ -99,7 +124,7 @@ export async function runHumanSignalDrain(
         signal_type: env.signal_type,
         target_kind: env.target_kind,
         target_id: env.target_id,
-        ...(bindingDetail !== undefined ? { binding: bindingDetail } : {}),
+        ...(bindingDetail != null ? { binding: bindingDetail } : {}),
       });
     } else {
       const r = await deps.signal.markProcessed({

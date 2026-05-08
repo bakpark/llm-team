@@ -146,7 +146,7 @@ describe("AWAITING_HUMAN end-to-end (Phase 5b.2)", () => {
     expect(updatedSession.state).toBe("SESSION_OPEN");
   });
 
-  it("milestone target without an open session → drain emits binding=no_session", async () => {
+  it("milestone target without an open session → drain defers (signal stays pending for retry)", async () => {
     const d = deps();
     const m = await seedDraftMilestone(d);
     // Park to AWAITING_HUMAN but don't open an outer session.
@@ -189,9 +189,10 @@ describe("AWAITING_HUMAN end-to-end (Phase 5b.2)", () => {
         targetId: "demo",
       },
     });
-    expect(out[0]?.kind).toBe("applied");
-    if (out[0]?.kind === "applied") {
-      expect(out[0].binding?.kind).toBe("no_session");
-    }
+    expect(out[0]?.kind).toBe("deferred");
+    // Signal is NOT marked processed — listPending should still see it.
+    const stillPending = await sigStore.listPending();
+    expect(stillPending.length).toBe(1);
+    expect(stillPending[0]?.signal_id).toBe("human-sig-1");
   });
 });

@@ -30,11 +30,16 @@ import {
   type DialogueSession as DialogueSessionT,
 } from "../domain/schema/dialogue-session.js";
 import type { HumanSignalEnvelope } from "../domain/schema/human-signal.js";
+import {
+  Milestone,
+  type Milestone as MilestoneT,
+} from "../domain/schema/milestone.js";
 import { SessionTurn } from "../domain/schema/session-turn.js";
 import type { ClockPort } from "../ports/clock.js";
 import type { StorePort } from "../ports/store.js";
 import { enrichEnvelope, validateEnvelope } from "./envelope.js";
 import type { LedgerAppender } from "./ledger.js";
+import { outerPhaseForState, type OuterPhase } from "./outer-session.js";
 import { layout } from "./persistence-layout.js";
 
 export interface HumanSignalBindingDeps {
@@ -89,6 +94,10 @@ async function findOuterSession(
   } catch {
     return null;
   }
+  // Codex P2: collect candidates and pick most-recently-updated SESSION_OPEN
+  // for determinism when multiple outer sessions exist for one milestone
+  // (e.g. re-opens after AWAITING_HUMAN cycles).
+  const candidates: DialogueSessionT[] = [];
   for (const dir of dirs) {
     const body = await store.readText(layout.sessionMetadata(dir));
     if (body == null) continue;
@@ -100,33 +109,51 @@ async function findOuterSession(
         sess.state === "SESSION_OPEN" &&
         sess.parent_loop === "outer"
       ) {
-        return sess;
+        candidates.push(sess);
       }
     } catch {
       // skip
     }
   }
-  return null;
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  return candidates[0]!;
 }
 
-function phaseFromPurpose(
+/**
+ * Derive the AGC outer phase label from the parent milestone's state.
+ * Codex P1: previously this was based on session.purpose, but
+ * Discovery/Specification share `purpose="design"` so Specification
+ * sessions were getting phase="Discovery" labels in the persisted
+ * envelope. The dispatcher (5b.3) keys on this field, so the wrong label
+ * would route to the wrong dispatch row.
+ *
+ * Caller (binding) reads the milestone fresh from store — this is the
+ * single source of truth for the phase label.
+ */
+async function resolvePhaseForBinding(
+  store: StorePort,
   session: DialogueSessionT,
-): "Discovery" | "Specification" | "Planning" | "Validation" | null {
-  switch (session.purpose) {
-    case "design":
-      // 'design' is shared by Discovery + Specification — caller can attach
-      // the actual outer phase via runtime_metadata; for binding we infer
-      // by parent milestone state which the dispatcher already keys on.
-      // Default to "Discovery" here; the dispatch matrix doesn't consult
-      // this field for human_approval routing (turns are aggregated).
-      return "Discovery";
-    case "planning_decompose":
-      return "Planning";
-    case "validation":
-      return "Validation";
-    default:
-      return null;
+): Promise<OuterPhase | null> {
+  if (session.parent_loop !== "outer") return null;
+  if (session.purpose === "planning_decompose") return "Planning";
+  if (session.purpose === "validation") return "Validation";
+  // session.purpose === "design" → Discovery vs Specification: derive from
+  // parent milestone state.
+  if (session.parent_object_kind !== "milestone") return null;
+  const body = await store.readText(layout.milestone(session.parent_object_id));
+  if (body == null) return null;
+  let milestone: MilestoneT;
+  try {
+    milestone = Milestone.parse(JSON.parse(body));
+  } catch {
+    return null;
   }
+  const phase = outerPhaseForState(milestone.state);
+  // outerPhaseForState may return Planning/Validation but we already handled
+  // those above; here we only care about Discovery vs Specification.
+  if (phase === "Discovery" || phase === "Specification") return phase;
+  return null;
 }
 
 export async function bindHumanSignalToSession(
@@ -149,11 +176,13 @@ export async function bindHumanSignalToSession(
     };
   }
 
-  const phase = phaseFromPurpose(session);
+  // Codex P1: derive phase from milestone state, not session.purpose, since
+  // Discovery + Specification share purpose="design".
+  const phase = await resolvePhaseForBinding(deps.store, session);
   if (phase == null) {
     return {
       kind: "unsupported",
-      reason: `outer session purpose=${session.purpose} has no AGC phase mapping`,
+      reason: `outer session purpose=${session.purpose} (parent_object_id=${session.parent_object_id}) has no AGC phase mapping`,
     };
   }
 
@@ -244,19 +273,14 @@ export async function bindHumanSignalToSession(
       verification_result_ref: null,
       recorded_at: deps.clock.isoNow(),
     });
-    await deps.store.writeAtomic(
-      layout.sessionTurn(live.session_id, turn_index),
-      JSON.stringify(turn, null, 2),
-    );
 
-    // Advance session.current_turn_index atomically.
-    const advanced = DialogueSession.parse({
-      ...live,
-      current_turn_index: turn_index + 1,
-      updated_at: deps.clock.isoNow(),
-    });
-    await deps.store.writeAtomic(metaPath, JSON.stringify(advanced, null, 2));
-
+    // Codex P1: ledger append BEFORE the SessionTurn + metadata writes.
+    // Per_turn idempotency_key dedups duplicate retries as
+    // result=duplicate. If ledger fails here, no SessionTurn is persisted
+    // and the next drain re-tries with the same key (lock + re-read of
+    // sessionMetadata sees current_turn_index unchanged). This prevents
+    // the silent audit-row gap the prior ordering produced when
+    // writeAtomic(metaPath) succeeded but ledger failed.
     await deps.ledger.appendTransition({
       transition_id: newMonotonicId(deps.clock.now()),
       target_id: deps.targetId,
@@ -289,6 +313,19 @@ export async function bindHumanSignalToSession(
       result_detail: null,
       timestamp: deps.clock.isoNow(),
     });
+
+    await deps.store.writeAtomic(
+      layout.sessionTurn(live.session_id, turn_index),
+      JSON.stringify(turn, null, 2),
+    );
+
+    // Advance session.current_turn_index atomically.
+    const advanced = DialogueSession.parse({
+      ...live,
+      current_turn_index: turn_index + 1,
+      updated_at: deps.clock.isoNow(),
+    });
+    await deps.store.writeAtomic(metaPath, JSON.stringify(advanced, null, 2));
 
     return {
       kind: "appended",
