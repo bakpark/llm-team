@@ -195,7 +195,7 @@ async function main(argv: readonly string[]): Promise<number> {
 
     do {
       // Every cycle starts with a recovery sweep (RGC-RECOVERY).
-      await runRecoverySweep({
+      const sweep = await runRecoverySweep({
         store,
         clock,
         ledger,
@@ -203,6 +203,24 @@ async function main(argv: readonly string[]): Promise<number> {
         callerId: args.callerId,
         targetId: cfg.identity.target_id,
       });
+      // PR #64 review P2-5: surface non-empty sweep results so operators
+      // can see when recovery actually fires (otherwise it was invisible).
+      if (
+        sweep.expiredLeases.length > 0 ||
+        sweep.reanimatedSlices.length > 0 ||
+        sweep.reanimatedSessions.length > 0
+      ) {
+        logger.log({
+          level: "warn",
+          event: "recovery.swept",
+          fields: {
+            role: args.role,
+            expired_leases: sweep.expiredLeases.length,
+            reanimated_slices: sweep.reanimatedSlices,
+            reanimated_sessions: sweep.reanimatedSessions,
+          },
+        });
+      }
       let outcomeJson: string;
       switch (args.role) {
         case "turn-worker": {
@@ -220,6 +238,8 @@ async function main(argv: readonly string[]): Promise<number> {
               testCommands,
               environmentFingerprint: `node${process.version}`,
             },
+            lease,
+            leaseConfig: cfg.lease,
           });
           outcomeJson = JSON.stringify({ role: args.role, outcome });
           break;

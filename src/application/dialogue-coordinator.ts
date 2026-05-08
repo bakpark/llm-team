@@ -38,6 +38,7 @@ import {
   type DispatchResult,
 } from "./caller-dispatch.js";
 import { assertCanAcquire } from "./lease-acquisition-order.js";
+import { withLeaseHeartbeat } from "./lease-heartbeat.js";
 import { resolveLeaseTtl } from "./lease-ttl-resolver.js";
 import type { LeasePort } from "../ports/lease.js";
 import type { LeaseConfig } from "../config/target-schema.js";
@@ -177,6 +178,23 @@ export async function runOneMiddleReviewTurn(
     }
   }
   try {
+    // PR #64 review P0-1 fix: heartbeat keeps the session_lease alive
+    // through the long-running review turn (sentinel callAgent + middle
+    // review's per_merge dispatch effects).
+    if (leaseClaim != null && leaseClaim.result === "acquired" && deps.lease != null) {
+      const claimed = leaseClaim.lease;
+      const wrapped = await withLeaseHeartbeat(
+        {
+          lease: deps.lease,
+          leaseId: claimed.lease_id,
+          leaseToken: claimed.lease_token,
+          ttlMs: claimed.ttl_ms,
+        },
+        async () =>
+          runMiddleReviewTurnInner(slice, sliceMerge, session, turnIndex, deps),
+      );
+      return wrapped.value;
+    }
     return await runMiddleReviewTurnInner(slice, sliceMerge, session, turnIndex, deps);
   } finally {
     if (leaseClaim != null && leaseClaim.result === "acquired" && deps.lease != null) {
@@ -579,16 +597,20 @@ export async function pickReadyMiddleReview(
         JSON.stringify(updatedSm, null, 2),
       );
       // Mark slice.current_session_id so concurrent inner-cycle pickups can't
-      // claim it.
-      const updatedSlice = Slice.parse({
-        ...slice,
-        current_session_id: session.session_id,
-        updated_at: deps.clock.isoNow(),
+      // claim it. PR #64 review P0-2 fix: wrap in withFileLock for symmetry
+      // with recovery.reanimateSliceIfNeeded.
+      const slicePath = layout.slice(slice.slice_id);
+      const updatedSlice = await deps.store.withFileLock(slicePath, async () => {
+        const fresh = await deps.store.readText(slicePath);
+        const live = fresh != null ? Slice.parse(JSON.parse(fresh)) : slice;
+        const updated = Slice.parse({
+          ...live,
+          current_session_id: session.session_id,
+          updated_at: deps.clock.isoNow(),
+        });
+        await deps.store.writeAtomic(slicePath, JSON.stringify(updated, null, 2));
+        return updated;
       });
-      await deps.store.writeAtomic(
-        layout.slice(updatedSlice.slice_id),
-        JSON.stringify(updatedSlice, null, 2),
-      );
       return {
         slice: updatedSlice,
         sliceMerge: updatedSm,

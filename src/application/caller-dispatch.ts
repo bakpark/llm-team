@@ -384,8 +384,30 @@ async function transitionSliceState(
     clear_current_session?: boolean;
   },
 ): Promise<SliceT> {
+  // PR #64 review P0-2 fix: wrap the read-check-write in withFileLock so
+  // recovery.reanimateSliceIfNeeded (which already holds the same lock)
+  // and this transition cannot interleave. Without symmetric locking, a
+  // recovery that observed SLICE_BUILDING could overwrite the live
+  // worker's SLICE_REVIEWING write.
+  const slicePath = layout.slice(slice.slice_id);
+  return deps.store.withFileLock(slicePath, async () => {
+    return doTransitionSliceState(slicePath, slice, toState, deps, context);
+  });
+}
+
+async function doTransitionSliceState(
+  slicePath: string,
+  slice: SliceT,
+  toState: SliceState,
+  deps: DispatchDeps,
+  context: {
+    loop_kind: ParentLoop;
+    session_id: string;
+    clear_current_session?: boolean;
+  },
+): Promise<SliceT> {
   // Re-read for freshness so concurrent reviewers can't overwrite the slice.
-  const body = await deps.store.readText(layout.slice(slice.slice_id));
+  const body = await deps.store.readText(slicePath);
   if (body == null)
     throw new Error(`slice ${slice.slice_id} disappeared mid-dispatch`);
   const live = Slice.parse(JSON.parse(body));
