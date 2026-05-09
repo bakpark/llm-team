@@ -64,22 +64,32 @@ jobs:
       - name: Detect required secrets
         id: gate
         env:
-          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CLAUDE_CREDENTIAL_BASE64: ${{ secrets.CLAUDE_CREDENTIAL_BASE64 }}
-          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CODEX_CREDENTIAL_BASE64: ${{ secrets.CODEX_CREDENTIAL_BASE64 }}
         run: |
           set -euo pipefail
           claude_present="false"
           codex_present="false"
-          if [ -n "${CLAUDE_API_KEY:-}" ] || [ -n "${CLAUDE_CREDENTIAL_BASE64:-}" ]; then
+          claude_base64_present="false"
+          codex_base64_present="false"
+          if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${CLAUDE_CREDENTIAL_BASE64:-}" ]; then
             claude_present="true"
           fi
-          if [ -n "${CODEX_API_KEY:-}" ] || [ -n "${CODEX_CREDENTIAL_BASE64:-}" ]; then
+          if [ -n "${OPENAI_API_KEY:-}" ] || [ -n "${CODEX_CREDENTIAL_BASE64:-}" ]; then
             codex_present="true"
+          fi
+          if [ -n "${CLAUDE_CREDENTIAL_BASE64:-}" ]; then
+            claude_base64_present="true"
+          fi
+          if [ -n "${CODEX_CREDENTIAL_BASE64:-}" ]; then
+            codex_base64_present="true"
           fi
           echo "claude_present=${claude_present}" >> "$GITHUB_OUTPUT"
           echo "codex_present=${codex_present}" >> "$GITHUB_OUTPUT"
+          echo "claude_base64_present=${claude_base64_present}" >> "$GITHUB_OUTPUT"
+          echo "codex_base64_present=${codex_base64_present}" >> "$GITHUB_OUTPUT"
           if [ "${claude_present}" = "true" ] && [ "${codex_present}" = "true" ]; then
             echo "secrets_ready=true" >> "$GITHUB_OUTPUT"
           else
@@ -99,14 +109,14 @@ jobs:
             echo ""
             echo "Register at least one of the following pairs in GitHub Secrets:"
             echo ""
-            echo "- CLAUDE_API_KEY  or CLAUDE_CREDENTIAL_BASE64"
-            echo "- CODEX_API_KEY   or CODEX_CREDENTIAL_BASE64"
+            echo "- ANTHROPIC_API_KEY or CLAUDE_CREDENTIAL_BASE64"
+            echo "- OPENAI_API_KEY    or CODEX_CREDENTIAL_BASE64"
             echo ""
             echo "GH_TOKEN is supplied by the runner automatically."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Materialize Claude credential file
-        if: steps.gate.outputs.secrets_ready == 'true' && env.CLAUDE_CREDENTIAL_BASE64 != ''
+        if: steps.gate.outputs.secrets_ready == 'true' && steps.gate.outputs.claude_base64_present == 'true'
         env:
           CLAUDE_CREDENTIAL_BASE64: ${{ secrets.CLAUDE_CREDENTIAL_BASE64 }}
         run: |
@@ -117,7 +127,7 @@ jobs:
           chmod 0600 "${HOME}/.config/claude/credentials"
 
       - name: Materialize Codex credential file
-        if: steps.gate.outputs.secrets_ready == 'true' && env.CODEX_CREDENTIAL_BASE64 != ''
+        if: steps.gate.outputs.secrets_ready == 'true' && steps.gate.outputs.codex_base64_present == 'true'
         env:
           CODEX_CREDENTIAL_BASE64: ${{ secrets.CODEX_CREDENTIAL_BASE64 }}
         run: |
@@ -148,7 +158,7 @@ jobs:
           total="$(awk -v d="${today}" -F'"' '
             /"ts"/ {
               for (i=1;i<=NF;i++) if ($i=="ts") ts=$(i+2);
-              for (i=1;i<=NF;i++) if ($i=="usd") usd=$(i+2);
+              for (i=1;i<=NF;i++) if ($i=="estimated_usd") usd=$(i+2);
               if (substr(ts,1,10)==d) sum+=usd+0;
             }
             END { printf "%.4f", sum+0 }
@@ -176,8 +186,8 @@ jobs:
           LLM_TEAM_E2E: '1'
           LLM_TEAM_LIVE_HEALTHCHECK: '1'
           GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
-          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
-          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: npm test
 
       - name: Generate ledger summary (best-effort)
