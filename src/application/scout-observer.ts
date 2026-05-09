@@ -539,19 +539,33 @@ export interface ScoutScannerSweepResult extends ScoutScanResult {
   scannedSliceCount: number;
 }
 
+/**
+ * Lock path for the scout-scanner sweep critical section. PR #80 review
+ * (P1, gpt5.5): although the production daemon role is currently the only
+ * caller and per-role lockdir already excludes a sibling daemon, the sweep
+ * function is exported and may be reused by other wirings. Wrap scan +
+ * scoutScan (read-before-write fingerprint dedup + PROPOSED append) in a
+ * scope-level `withFileLock` so concurrent callers cannot both pass dedup
+ * and double-append the same candidate.
+ */
+const SCOUT_SCANNER_SWEEP_LOCK_PATH =
+  "knowledge/refactor_proposals/.scout-scanner-sweep.lock";
+
 export async function runScoutScannerSweep(
   input: ScoutScannerSweepInput,
   deps: ScoutScannerSweepDeps,
 ): Promise<ScoutScannerSweepResult> {
-  const slices = await loadInProgressSlices(deps.store);
-  const result = await scoutScan(
-    { scan: () => input.scan(slices) },
-    deps,
-  );
-  return {
-    ...result,
-    scannedSliceCount: slices.length,
-  };
+  return deps.store.withFileLock(SCOUT_SCANNER_SWEEP_LOCK_PATH, async () => {
+    const slices = await loadInProgressSlices(deps.store);
+    const result = await scoutScan(
+      { scan: () => input.scan(slices) },
+      deps,
+    );
+    return {
+      ...result,
+      scannedSliceCount: slices.length,
+    };
+  });
 }
 
 async function loadInProgressSlices(
