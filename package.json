@@ -13,7 +13,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "healthcheck": "tsx src/cli/healthcheck.ts",
-    "healthcheck:stage1": "tsx src/cli/healthcheck.ts --stage 1"
+    "healthcheck:stage1": "tsx src/cli/healthcheck.ts --stage 1",
+    "healthcheck:stage2": "tsx src/cli/healthcheck.ts --stage 2",
+    "healthcheck:stage3": "tsx src/cli/healthcheck.ts --stage 3"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

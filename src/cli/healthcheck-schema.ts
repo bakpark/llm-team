@@ -69,3 +69,55 @@ export const HealthcheckResult = z
   })
   .strict();
 export type HealthcheckResult = z.infer<typeof HealthcheckResult>;
+
+/**
+ * Phase prod-3 — Live Provider Healthcheck additions.
+ *
+ * Stage 3 may invoke real LLM CLIs (claude / codex) when opted in via
+ * `LLM_TEAM_LIVE_HEALTHCHECK=1`. Each live invocation appends a single line
+ * to a ndjson cost ledger so subsequent runs can enforce a daily cap.
+ *
+ * The ledger lives outside the trunk working tree (default
+ * `~/.llm-team/healthcheck-cost-ledger.ndjson`) so `git status` never
+ * surfaces it.
+ */
+export const CostLedgerEntry = z
+  .object({
+    /** ISO timestamp of the live call. */
+    ts: z.string().min(1),
+    /** Stable kind discriminator (e.g. `claude.smoke`, `codex.default.smoke`). */
+    kind: z.string().min(1),
+    /** Estimated USD cost charged against the cap. */
+    estimated_usd: z.number().min(0),
+    /** Optional run directory path (for traceability). */
+    run_dir: z.string().optional(),
+  })
+  .strict();
+export type CostLedgerEntry = z.infer<typeof CostLedgerEntry>;
+
+/**
+ * `verified-auth-model.json` — written after Stage 3 completes.
+ *
+ * `status` records the live-probe outcome per surface; `cli_version` and
+ * `model` are best-effort strings extracted from CLI output.
+ */
+export const VerifiedAuthSurface = z
+  .object({
+    status: z.enum(["PASS", "FAIL", "SKIP"]),
+    cli_version: z.string().optional(),
+    model: z.string().optional(),
+    detail: z.string().optional(),
+  })
+  .strict();
+export type VerifiedAuthSurface = z.infer<typeof VerifiedAuthSurface>;
+
+export const VerifiedAuthModel = z
+  .object({
+    generatedAt: z.string().min(1),
+    claude: VerifiedAuthSurface,
+    codex: VerifiedAuthSurface,
+    codex_qwen: VerifiedAuthSurface,
+    gh: VerifiedAuthSurface,
+  })
+  .strict();
+export type VerifiedAuthModel = z.infer<typeof VerifiedAuthModel>;

@@ -23,7 +23,7 @@
  *   tsx src/cli/healthcheck.ts --stage 1 [--target <path>] [--out <dir>]
  *     [--json]
  */
-import { spawnSync, type SpawnSyncOptions } from "node:child_process";
+import { spawn as nodeSpawn, spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -33,6 +33,12 @@ import {
   type HealthcheckItem,
   type HealthcheckStage,
 } from "./healthcheck-schema.js";
+import { runStage2, type Stage2Fetch } from "./healthcheck-stage2.js";
+import {
+  runStage3,
+  type Stage3Spawn,
+  type Stage3SpawnInput,
+} from "./healthcheck-stage3.js";
 
 export type RunCmd = (
   cmd: string,
@@ -65,6 +71,26 @@ export interface HealthcheckEnv {
   env?: NodeJS.ProcessEnv;
   cwd?: string;
   now?: () => Date;
+  /** Stage 2 — HTTP probe (qwen ping). Defaults to global `fetch`. */
+  fetch?: Stage2Fetch;
+  /** Stage 3 — child spawn (mocked in tests). Defaults to a real spawn that
+   * honors `stdinFromDevNull` for codex invocations. */
+  stage3Spawn?: Stage3Spawn;
+  /** Stage 3 — workdir override for RUN_DIR / cost ledger (tests). */
+  stage3Workdir?: string;
+  /** Stage 3 — homedir override (tests). */
+  stage3Home?: string;
+  /** Stage 3 — readLedger override (tests). */
+  stage3ReadLedger?: (path: string) => string;
+  /** Stage 3 — appendLedger override (tests). */
+  stage3AppendLedger?: (path: string, line: string) => void;
+  /** Stage 3 — mkdir override (tests). */
+  stage3Mkdir?: (
+    path: string,
+    opts: { recursive: true; mode?: number },
+  ) => void;
+  /** Stage 3 — writeFile override (tests). */
+  stage3WriteFile?: (path: string, content: string) => void;
 }
 
 export function parseArgs(argv: readonly string[]): HealthcheckArgs {
@@ -401,36 +427,107 @@ export function runStage1(opts: {
   return { items, auth_models };
 }
 
-export function runHealthcheck(
+export async function runHealthcheck(
   args: HealthcheckArgs,
   envCfg: HealthcheckEnv = {},
-): HealthcheckResult {
+): Promise<HealthcheckResult> {
   const run = envCfg.run ?? defaultRunCmd;
   const env = envCfg.env ?? process.env;
   const cwd = envCfg.cwd ?? process.cwd();
   const now = envCfg.now ?? (() => new Date());
   const generatedAt = now().toISOString();
 
-  if (args.stage === 2 || args.stage === 3) {
-    const placeholder: HealthcheckResult = {
-      stage: args.stage,
-      items: [
-        {
-          id: `M-${args.stage}-placeholder`,
-          status: "SKIP",
-          detail: `stage ${args.stage} is implemented in phase-prod-3`,
-          anchor: `M-${args.stage}-0`,
-        },
-      ],
-      passed: true,
+  if (args.stage === 2) {
+    const out = await runStage2({
+      env,
+      run,
+      fetch: envCfg.fetch ?? (typeof fetch !== "undefined" ? defaultFetch : undefined),
+      now,
+    });
+    const passed = out.items.every((it) => it.status !== "FAIL");
+    const result: HealthcheckResult = {
+      stage: 2,
+      items: out.items,
+      passed,
       generatedAt,
+      // stage 2 does not re-classify CLI auth models; preserve neutral state.
       auth_models: {
         claude: "UNKNOWN_UNTIL_STAGE3",
         codex: "UNKNOWN_UNTIL_STAGE3",
-        gh: "unknown",
+        gh: env.GH_TOKEN && env.GH_TOKEN.length > 0 ? "env_token" : "unknown",
       },
     };
-    return HealthcheckResult.parse(placeholder);
+    return HealthcheckResult.parse(result);
+  }
+
+  if (args.stage === 3) {
+    // Default-SKIP gate: without `LLM_TEAM_LIVE_HEALTHCHECK=1`, stage 3 must
+    // not spawn anything AND must not run stage 2's network probes (qwen
+    // ping, gh rate_limit). Return a SKIP-only result so an unauthenticated
+    // host on a CI runner cannot accidentally fail this stage.
+    if (env.LLM_TEAM_LIVE_HEALTHCHECK !== "1") {
+      const skipItem: HealthcheckItem = {
+        id: "M-3-opt-in",
+        status: "SKIP",
+        detail:
+          "LLM_TEAM_LIVE_HEALTHCHECK not set to '1'; stage 3 (and its stage-2 prerequisites) skipped (no spawn, no network)",
+        anchor: "M-3-0",
+      };
+      const result: HealthcheckResult = {
+        stage: 3,
+        items: [skipItem],
+        passed: true,
+        generatedAt,
+        auth_models: {
+          claude: "UNKNOWN_UNTIL_STAGE3",
+          codex: "UNKNOWN_UNTIL_STAGE3",
+          gh: env.GH_TOKEN && env.GH_TOKEN.length > 0 ? "env_token" : "unknown",
+        },
+      };
+      return HealthcheckResult.parse(result);
+    }
+    // Stage 3 needs the qwen ping outcome to gate codex-qwen smoke. Run
+    // stage 2 first as a prerequisite (its own probes also surface in the
+    // stage-3 result so an operator sees the full picture).
+    const s2 = await runStage2({
+      env,
+      run,
+      fetch: envCfg.fetch ?? (typeof fetch !== "undefined" ? defaultFetch : undefined),
+      now,
+    });
+    const s3 = await runStage3({
+      env,
+      spawn: envCfg.stage3Spawn ?? defaultStage3Spawn,
+      qwenPassed: s2.qwenPassed,
+      now,
+      readLedger: envCfg.stage3ReadLedger,
+      appendLedger: envCfg.stage3AppendLedger,
+      mkdir: envCfg.stage3Mkdir,
+      writeFile: envCfg.stage3WriteFile,
+      home: envCfg.stage3Home,
+      workdir: envCfg.stage3Workdir,
+    });
+    const items = [...s2.items, ...s3.items];
+    const passed = items.every((it) => it.status !== "FAIL");
+    const surface = (id: string): AuthModel => {
+      const it = s3.items.find((x) => x.anchor === id);
+      if (!it) return "UNKNOWN_UNTIL_STAGE3";
+      if (it.status === "PASS") return "interactive_only";
+      if (it.status === "FAIL") return "unknown";
+      return "UNKNOWN_UNTIL_STAGE3";
+    };
+    const result: HealthcheckResult = {
+      stage: 3,
+      items,
+      passed,
+      generatedAt,
+      auth_models: {
+        claude: surface("M-3-claude"),
+        codex: surface("M-3-codex"),
+        gh: env.GH_TOKEN && env.GH_TOKEN.length > 0 ? "env_token" : "unknown",
+      },
+    };
+    return HealthcheckResult.parse(result);
   }
 
   const { items, auth_models } = runStage1({
@@ -448,6 +545,60 @@ export function runHealthcheck(
   };
   return HealthcheckResult.parse(result);
 }
+
+/**
+ * Default Stage 2 fetch — uses the Node 20+ global `fetch`.
+ */
+const defaultFetch: Stage2Fetch = (url, init) =>
+  // eslint-disable-next-line no-undef
+  fetch(url, init).then((r) => ({
+    status: r.status,
+    text: () => r.text(),
+  }));
+
+/**
+ * Default Stage 3 spawn — wraps `child_process.spawn` and honors
+ * `stdinFromDevNull` (codex contract).
+ */
+const defaultStage3Spawn: Stage3Spawn = (input: Stage3SpawnInput) =>
+  new Promise((resolveSpawn) => {
+    const stdinSpec = input.stdinFromDevNull ? "ignore" : "pipe";
+    const child = nodeSpawn(input.cmd, [...input.args], {
+      cwd: input.cwd,
+      stdio: [stdinSpec, "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const t = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+    }, input.timeoutMs);
+    child.stdout?.on("data", (d) => {
+      stdout += d.toString("utf8");
+    });
+    child.stderr?.on("data", (d) => {
+      stderr += d.toString("utf8");
+    });
+    if (!input.stdinFromDevNull && input.stdin != null && child.stdin) {
+      child.stdin.end(input.stdin, "utf8");
+    } else if (!input.stdinFromDevNull && child.stdin) {
+      child.stdin.end();
+    }
+    child.on("close", (code) => {
+      clearTimeout(t);
+      resolveSpawn({ status: code, stdout, stderr, timedOut });
+    });
+    child.on("error", (err) => {
+      clearTimeout(t);
+      resolveSpawn({
+        status: null,
+        stdout,
+        stderr: stderr + `\nspawn error: ${err.message}`,
+        timedOut,
+      });
+    });
+  });
 
 function writeOutFile(
   result: HealthcheckResult,
@@ -478,7 +629,7 @@ export async function main(
 ): Promise<number> {
   const stdout = deps.stdout ?? ((s: string) => process.stdout.write(s));
   const args = parseArgs(argv);
-  const result = runHealthcheck(args, deps);
+  const result = await runHealthcheck(args, deps);
   if (!deps.skipOutFile) writeOutFile(result, args, deps.cwd ?? process.cwd());
   if (args.json) {
     stdout(`${JSON.stringify(result)}\n`);
