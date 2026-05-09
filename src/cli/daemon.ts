@@ -187,12 +187,19 @@ async function main(argv: readonly string[]): Promise<number> {
     // from cfg.agent_profiles via buildRunnerRegistry. The legacy
     // --fake-llm-fixtures flag is preserved as a test-only override so
     // existing fixture-driven integration tests keep working.
+    //
+    // PR #73 review (P1): the production registry path explicitly opts out
+    // of the test-only `fake` runner. Integration tests that exercise the
+    // production wiring with `runner: "fake"` set
+    // `LLM_TEAM_ALLOW_FAKE_RUNNER=1`; production deployments never set it,
+    // so a smuggled `runner: "fake"` in target.json fails fast.
     const needsLlmRunner =
       args.role !== "recovery" && args.role !== "dual-track-scheduler";
+    const allowFake = process.env.LLM_TEAM_ALLOW_FAKE_RUNNER === "1";
     const llmRunner = args.fakeLlmFixtures
       ? new AdapterRunnerPort(new FakeAdapter({ fixtureDir: args.fakeLlmFixtures }))
       : needsLlmRunner
-        ? new MultiProfileLlmRunner(buildRunnerRegistry(cfg))
+        ? new MultiProfileLlmRunner(buildRunnerRegistry(cfg, { allowFake }))
         : null;
 
     const workspace = args.fakeWorkspace

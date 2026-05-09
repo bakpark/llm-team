@@ -57,14 +57,21 @@ function captureStdout(): { restore: () => void; lines: () => string[] } {
 
 describe("Phase 7a — runner CLI production LLM runner wiring (G1-1)", () => {
   let prevFixtureDir: string | undefined;
+  let prevAllowFake: string | undefined;
 
   beforeEach(() => {
     prevFixtureDir = process.env.LLM_TEAM_FAKE_FIXTURE_DIR;
+    prevAllowFake = process.env.LLM_TEAM_ALLOW_FAKE_RUNNER;
+    // PR #73 review (P1): test-only opt-in for `runner: "fake"` in the
+    // production CLI wiring path.
+    process.env.LLM_TEAM_ALLOW_FAKE_RUNNER = "1";
   });
 
   afterEach(() => {
     if (prevFixtureDir == null) delete process.env.LLM_TEAM_FAKE_FIXTURE_DIR;
     else process.env.LLM_TEAM_FAKE_FIXTURE_DIR = prevFixtureDir;
+    if (prevAllowFake == null) delete process.env.LLM_TEAM_ALLOW_FAKE_RUNNER;
+    else process.env.LLM_TEAM_ALLOW_FAKE_RUNNER = prevAllowFake;
   });
 
   it("--once --agent-profile forge boots from cfg without --fake-llm-fixtures", async () => {

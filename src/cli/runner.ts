@@ -146,11 +146,15 @@ async function main(argv: readonly string[]): Promise<number> {
     // Phase 7a (G1-1): production wiring assembles a MultiProfileLlmRunner
     // from cfg.agent_profiles via buildRunnerRegistry. The legacy
     // --fake-llm-fixtures flag is preserved as a test-only override.
+    //
+    // PR #73 review (P1): production registry opts out of `runner: "fake"`.
+    // `LLM_TEAM_ALLOW_FAKE_RUNNER=1` is the test-only opt-in.
+    const allowFake = process.env.LLM_TEAM_ALLOW_FAKE_RUNNER === "1";
     const llmRunner = args.fakeLlmFixtures
       ? new AdapterRunnerPort(
           new FakeAdapter({ fixtureDir: args.fakeLlmFixtures }),
         )
-      : new MultiProfileLlmRunner(buildRunnerRegistry(cfg));
+      : new MultiProfileLlmRunner(buildRunnerRegistry(cfg, { allowFake }));
 
     const workspace = args.fakeWorkspace
       ? new FakeWorkspace(resolve(workdir, "workspaces"))

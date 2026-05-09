@@ -112,15 +112,22 @@ describe("createAdapter", () => {
     expect(a).toBeInstanceOf(CodexCliAdapter);
   });
 
-  it("returns FakeAdapter when LLM_TEAM_FAKE_FIXTURE_DIR is set", () => {
+  it("returns FakeAdapter when allowFake:true and LLM_TEAM_FAKE_FIXTURE_DIR is set", () => {
     process.env.LLM_TEAM_FAKE_FIXTURE_DIR = "/tmp/fake";
-    const a = createAdapter({ runner: "fake" });
+    const a = createAdapter({ runner: "fake" }, { allowFake: true });
     expect(a).toBeInstanceOf(FakeAdapter);
   });
 
-  it("throws for fake runner without LLM_TEAM_FAKE_FIXTURE_DIR", () => {
+  it("throws for fake runner without LLM_TEAM_FAKE_FIXTURE_DIR (allowFake:true)", () => {
     delete process.env.LLM_TEAM_FAKE_FIXTURE_DIR;
-    expect(() => createAdapter({ runner: "fake" })).toThrow();
+    expect(() =>
+      createAdapter({ runner: "fake" }, { allowFake: true }),
+    ).toThrow(/LLM_TEAM_FAKE_FIXTURE_DIR/);
+  });
+
+  it("PR #73 review (P1): rejects fake runner in production path (allowFake omitted)", () => {
+    process.env.LLM_TEAM_FAKE_FIXTURE_DIR = "/tmp/fake";
+    expect(() => createAdapter({ runner: "fake" })).toThrow(/test-only/);
   });
 });
 

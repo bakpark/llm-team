@@ -65,14 +65,22 @@ function captureStdout(): { restore: () => void; lines: () => string[] } {
 
 describe("Phase 7a — daemon production LLM runner wiring (G1-1)", () => {
   let prevFixtureDir: string | undefined;
+  let prevAllowFake: string | undefined;
 
   beforeEach(() => {
     prevFixtureDir = process.env.LLM_TEAM_FAKE_FIXTURE_DIR;
+    prevAllowFake = process.env.LLM_TEAM_ALLOW_FAKE_RUNNER;
+    // PR #73 review (P1): production wiring rejects `runner: "fake"` unless
+    // the test harness opts in. These integration tests use fake runners
+    // to avoid spawning real CLIs, so opt in here.
+    process.env.LLM_TEAM_ALLOW_FAKE_RUNNER = "1";
   });
 
   afterEach(() => {
     if (prevFixtureDir == null) delete process.env.LLM_TEAM_FAKE_FIXTURE_DIR;
     else process.env.LLM_TEAM_FAKE_FIXTURE_DIR = prevFixtureDir;
+    if (prevAllowFake == null) delete process.env.LLM_TEAM_ALLOW_FAKE_RUNNER;
+    else process.env.LLM_TEAM_ALLOW_FAKE_RUNNER = prevAllowFake;
   });
 
   it("turn-worker --once boots from cfg.agent_profiles without --fake-llm-fixtures", async () => {
