@@ -1,0 +1,73 @@
+# Phase prod-5 — PR build.
+#
+# Trigger surface:
+#   - pull_request           (any branch → any base)
+#   - push to main           (post-merge guard)
+#
+# Contract: typecheck + build + default test must pass without any LLM
+# secret. The default `npm test` skips both LLM_TEAM_E2E live e2e suites
+# and LLM_TEAM_LIVE_HEALTHCHECK stage-3 healthcheck (see vitest
+# `describe.skipIf` gates), so this workflow is safe to run on forks.
+#
+# The lease/acquisition-order regression suites run as part of the default
+# `npm test`, so no separate step is needed.
+
+name: pr-build
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests (default — e2e/live skip)
+        run: npm test

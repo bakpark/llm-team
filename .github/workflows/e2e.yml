@@ -1,0 +1,226 @@
+# Phase prod-5 — manual / nightly live e2e.
+#
+# Trigger surface:
+#   - workflow_dispatch  (operator runs on demand, optionally overrides
+#                         daily_cost_cap_usd)
+#   - schedule           (UTC 17:00 ≈ KST 02:00)
+#
+# Secret guard: every job that would issue a live LLM call gates on
+# whether the operator registered a Claude credential (env-token or
+# base64 file) AND a Codex credential. When neither secret is present
+# the job emits a SKIP summary and exits 0 — this preserves the planning
+# contract that "secret 미존재 시 skip-with-summary".
+#
+# Cost cap: the workflow input `daily_cost_cap_usd` (default 1.00) is
+# forwarded as `LLM_TEAM_LIVE_DAILY_COST_CAP_USD`. When the daily ledger
+# total already exceeds the cap, the e2e job emits a SKIP summary and
+# exits 0 (not a failure).
+#
+# Artifacts: cycle-bundles/, healthcheck/, ledger-summary.json (when
+# produced) are uploaded via actions/upload-artifact@v4 with `if: always()`
+# so failure paths still preserve diagnostics.
+#
+# Sandbox cleanup is best-effort and runs in a final `if: always()` step
+# (no destructive action against the trunk worktree).
+
+name: e2e
+
+on:
+  workflow_dispatch:
+    inputs:
+      daily_cost_cap_usd:
+        description: 'Daily live-cost cap (USD). Default 1.00.'
+        required: false
+        default: '1.00'
+  schedule:
+    - cron: '0 17 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: live e2e
+    runs-on: ubuntu-latest
+    env:
+      LLM_TEAM_LIVE_DAILY_COST_CAP_USD: ${{ github.event.inputs.daily_cost_cap_usd || '1.00' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Phase prod-3 verified_auth_model determines which secret name is
+      # canonical; the workflow accepts either env-token or base64
+      # credential file for both Claude and Codex. At least one of each
+      # must exist for the e2e step to run.
+      - name: Detect required secrets
+        id: gate
+        env:
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+          CLAUDE_CREDENTIAL_BASE64: ${{ secrets.CLAUDE_CREDENTIAL_BASE64 }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          CODEX_CREDENTIAL_BASE64: ${{ secrets.CODEX_CREDENTIAL_BASE64 }}
+        run: |
+          set -euo pipefail
+          claude_present="false"
+          codex_present="false"
+          if [ -n "${CLAUDE_API_KEY:-}" ] || [ -n "${CLAUDE_CREDENTIAL_BASE64:-}" ]; then
+            claude_present="true"
+          fi
+          if [ -n "${CODEX_API_KEY:-}" ] || [ -n "${CODEX_CREDENTIAL_BASE64:-}" ]; then
+            codex_present="true"
+          fi
+          echo "claude_present=${claude_present}" >> "$GITHUB_OUTPUT"
+          echo "codex_present=${codex_present}" >> "$GITHUB_OUTPUT"
+          if [ "${claude_present}" = "true" ] && [ "${codex_present}" = "true" ]; then
+            echo "secrets_ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "secrets_ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: SKIP — required secrets missing
+        if: steps.gate.outputs.secrets_ready != 'true'
+        run: |
+          {
+            echo "## e2e SKIPPED"
+            echo ""
+            echo "Required live-LLM secrets are not registered."
+            echo ""
+            echo "- claude credential present: ${{ steps.gate.outputs.claude_present }}"
+            echo "- codex  credential present: ${{ steps.gate.outputs.codex_present }}"
+            echo ""
+            echo "Register at least one of the following pairs in GitHub Secrets:"
+            echo ""
+            echo "- CLAUDE_API_KEY  or CLAUDE_CREDENTIAL_BASE64"
+            echo "- CODEX_API_KEY   or CODEX_CREDENTIAL_BASE64"
+            echo ""
+            echo "GH_TOKEN is supplied by the runner automatically."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Materialize Claude credential file
+        if: steps.gate.outputs.secrets_ready == 'true' && env.CLAUDE_CREDENTIAL_BASE64 != ''
+        env:
+          CLAUDE_CREDENTIAL_BASE64: ${{ secrets.CLAUDE_CREDENTIAL_BASE64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.config/claude"
+          chmod 0700 "${HOME}/.config/claude"
+          printf "%s" "${CLAUDE_CREDENTIAL_BASE64}" | base64 -d > "${HOME}/.config/claude/credentials"
+          chmod 0600 "${HOME}/.config/claude/credentials"
+
+      - name: Materialize Codex credential file
+        if: steps.gate.outputs.secrets_ready == 'true' && env.CODEX_CREDENTIAL_BASE64 != ''
+        env:
+          CODEX_CREDENTIAL_BASE64: ${{ secrets.CODEX_CREDENTIAL_BASE64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.config/codex"
+          chmod 0700 "${HOME}/.config/codex"
+          printf "%s" "${CODEX_CREDENTIAL_BASE64}" | base64 -d > "${HOME}/.config/codex/credentials"
+          chmod 0600 "${HOME}/.config/codex/credentials"
+
+      - name: Pre-flight cost cap probe
+        id: cap
+        if: steps.gate.outputs.secrets_ready == 'true'
+        env:
+          LLM_TEAM_LIVE_DAILY_COST_CAP_USD: ${{ env.LLM_TEAM_LIVE_DAILY_COST_CAP_USD }}
+        run: |
+          set -euo pipefail
+          ledger="${HOME}/.llm-team/healthcheck-cost-ledger.ndjson"
+          cap="${LLM_TEAM_LIVE_DAILY_COST_CAP_USD}"
+          if [ ! -f "${ledger}" ]; then
+            echo "cap_exceeded=false" >> "$GITHUB_OUTPUT"
+            echo "Daily ledger absent — cap not exceeded (cap=${cap})."
+            exit 0
+          fi
+          today="$(date -u +%Y-%m-%d)"
+          # Minimal pre-flight — the production cost cap enforcement lives
+          # in the healthcheck stage-3 module; this step only short-circuits
+          # the e2e job when the cap was clearly already breached.
+          total="$(awk -v d="${today}" -F'"' '
+            /"ts"/ {
+              for (i=1;i<=NF;i++) if ($i=="ts") ts=$(i+2);
+              for (i=1;i<=NF;i++) if ($i=="usd") usd=$(i+2);
+              if (substr(ts,1,10)==d) sum+=usd+0;
+            }
+            END { printf "%.4f", sum+0 }
+          ' "${ledger}")"
+          echo "Daily total so far: ${total} USD (cap ${cap})."
+          # Compare with awk to avoid floating point pitfalls in shell.
+          if awk -v t="${total}" -v c="${cap}" 'BEGIN { exit !(t+0 >= c+0) }'; then
+            echo "cap_exceeded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "cap_exceeded=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: SKIP — daily cost cap exceeded
+        if: steps.gate.outputs.secrets_ready == 'true' && steps.cap.outputs.cap_exceeded == 'true'
+        run: |
+          {
+            echo "## e2e SKIPPED — daily cost cap exceeded"
+            echo ""
+            echo "Cap: ${LLM_TEAM_LIVE_DAILY_COST_CAP_USD} USD"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run live e2e suite
+        if: steps.gate.outputs.secrets_ready == 'true' && steps.cap.outputs.cap_exceeded != 'true'
+        env:
+          LLM_TEAM_E2E: '1'
+          LLM_TEAM_LIVE_HEALTHCHECK: '1'
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+        run: npm test
+
+      - name: Generate ledger summary (best-effort)
+        if: always()
+        run: |
+          set +e
+          ledger=""
+          for candidate in \
+            "${HOME}/.llm-team/healthcheck-cost-ledger.ndjson" \
+            "$(pwd)/cycle-bundles/ledger.ndjson"; do
+            if [ -f "${candidate}" ]; then
+              ledger="${candidate}"
+              break
+            fi
+          done
+          if [ -n "${ledger}" ]; then
+            mkdir -p artifacts
+            npx tsx src/cli/ledger-summary.ts \
+              --ledger "${ledger}" \
+              --out artifacts/ledger-summary.json \
+              --format json
+          else
+            echo "no ledger.ndjson found — skipping ledger-summary"
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: |
+            cycle-bundles/
+            healthcheck/
+            artifacts/ledger-summary.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Sandbox workdir cleanup (best-effort)
+        if: always()
+        run: |
+          set +e
+          # Sandbox workdirs created via createE2eRun() live under
+          # ${TMPDIR:-/tmp} with the prefix `llm-team-e2e-`. Best-effort
+          # cleanup — never fails the job.
+          find "${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'llm-team-e2e-*' -exec rm -rf {} + 2>/dev/null
+          true
