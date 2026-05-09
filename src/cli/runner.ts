@@ -3,7 +3,9 @@ import { readFile } from "node:fs/promises";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { FakeAdapter } from "../adapters/llm-runner/fake.js";
+import { MultiProfileLlmRunner } from "../adapters/llm-runner/multi-profile.js";
 import { AdapterRunnerPort } from "../adapters/llm-runner/runtime-port.js";
+import { buildRunnerRegistry } from "../config/runner-registry.js";
 import { NdjsonLogger } from "../adapters/logger/ndjson.js";
 import { FsStore } from "../adapters/store/fs.js";
 import { FakeVerification } from "../adapters/verification/fake.js";
@@ -141,15 +143,14 @@ async function main(argv: readonly string[]): Promise<number> {
       auditHashSeed: cfg.identity.audit_hash_seed,
     });
 
+    // Phase 7a (G1-1): production wiring assembles a MultiProfileLlmRunner
+    // from cfg.agent_profiles via buildRunnerRegistry. The legacy
+    // --fake-llm-fixtures flag is preserved as a test-only override.
     const llmRunner = args.fakeLlmFixtures
       ? new AdapterRunnerPort(
           new FakeAdapter({ fixtureDir: args.fakeLlmFixtures }),
         )
-      : (() => {
-          throw new Error(
-            "phase 2 CLI requires --fake-llm-fixtures (real adapters wired in later phases)",
-          );
-        })();
+      : new MultiProfileLlmRunner(buildRunnerRegistry(cfg));
 
     const workspace = args.fakeWorkspace
       ? new FakeWorkspace(resolve(workdir, "workspaces"))
