@@ -43,7 +43,11 @@ function workdir() {
 }
 
 describe("human-signal drain (Phase 5a)", () => {
-  it("drains a single approve signal and marks it processed", async () => {
+  it("defers a single approve signal when no binding caller is supplied", async () => {
+    // PR #74 codex P0 (gpt5.5): bindable signals (approve/reject/request_rework)
+    // drained without binding deps stay pending and emit `deferred` so the
+    // outer-coordinator's next cycle picks them up. Pre-PR-74 behavior was
+    // markProcessed=applied which silently consumed the signal.
     const store = new FsStore({ workdir: workdir() });
     const sig = new FsHumanSignal(store);
     const clock = new FixedClock(Date.parse("2026-05-08T00:00:00.000Z"));
@@ -59,11 +63,12 @@ describe("human-signal drain (Phase 5a)", () => {
 
     const out = await runHumanSignalDrain({ store, signal: sig, clock });
     expect(out.length).toBe(1);
-    expect(out[0]?.kind).toBe("applied");
+    expect(out[0]?.kind).toBe("deferred");
 
-    // Second drain returns nothing — already in processed/.
-    const out2 = await runHumanSignalDrain({ store, signal: sig, clock });
-    expect(out2).toEqual([]);
+    // Signal stays pending — listPending re-emits on next cycle.
+    const stillPending = await sig.listPending();
+    expect(stillPending.length).toBe(1);
+    expect(stillPending[0]?.signal_id).toBe("sig-1");
   });
 
   it("rejects approve without related_object_id as invalid", async () => {
@@ -132,14 +137,16 @@ describe("human-signal drain (Phase 5a)", () => {
     const sig = new FsHumanSignal(store);
     const clock = new FixedClock(Date.parse("2026-05-08T00:00:00.000Z"));
 
-    // Drop 10 envelopes concurrently.
+    // PR #74 codex P0: use a non-bindable signal type so the markProcessed
+    // lock guard is exercised here. Bindable types (approve/reject/request_rework)
+    // are deferred when no binding caller is supplied — see the dedicated
+    // "defers a single approve signal" test above.
     const drops = Array.from({ length: 10 }, (_, i) =>
       dropSignal(
         store,
         env({
           signal_id: `sig-${i}`,
-          signal_type: "approve",
-          related_object_id: "01HZSM0000000000000000000A",
+          signal_type: "request_recover",
           created_at: `2026-05-08T0${i}:00:00.000Z`,
         }),
       ),
@@ -221,12 +228,13 @@ describe("human-signal drain (Phase 5a)", () => {
     const sig = new FsHumanSignal(store);
     const clock = new FixedClock(Date.parse("2026-05-08T00:00:00.000Z"));
 
+    // PR #74 codex P0: use a non-bindable signal so the drain marks it
+    // processed (bindable types defer without a binding caller).
     await dropSignal(
       store,
       env({
         signal_id: "sig-1",
-        signal_type: "approve",
-        related_object_id: "01HZSM0000000000000000000A",
+        signal_type: "request_recover",
       }),
     );
     await runHumanSignalDrain({ store, signal: sig, clock });

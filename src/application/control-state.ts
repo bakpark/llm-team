@@ -72,6 +72,18 @@ export type ApplyControlOutcome =
   | { kind: "transitioned"; from: ControlState; to: ControlState }
   | { kind: "noop"; state: ControlState; reason: string };
 
+/**
+ * PR #74 codex P1 (gpt5.5): when an audit context is supplied, a successful
+ * control transition emits a `pause_resume` ledger row with `result=applied`
+ * so PAUSED→RUNNING etc. are visible in the audit trail (the prelude only
+ * emits `result=noop` when the gate blocks pickup).
+ */
+export interface ControlAuditContext {
+  ledger: LedgerAppender;
+  callerId: string;
+  targetId: string;
+}
+
 const NEXT_STATE: Record<
   "pause" | "resume" | "stop",
   (from: ControlState) => ControlState | { reason: string }
@@ -92,6 +104,7 @@ export async function applyControlSignal(
   store: StorePort,
   clock: ClockPort,
   signal: HumanSignalEnvelope,
+  audit?: ControlAuditContext,
 ): Promise<ApplyControlOutcome> {
   const t = signal.signal_type;
   if (t !== "pause" && t !== "resume" && t !== "stop") {
@@ -101,7 +114,7 @@ export async function applyControlSignal(
       reason: `signal_type=${t} is not a control signal`,
     };
   }
-  return store.withFileLock(CONTROL_STATE_PATH, async () => {
+  const outcome = await store.withFileLock(CONTROL_STATE_PATH, async () => {
     const current = await readControlState(store, clock);
     if (current.signal_id === signal.signal_id) {
       return {
@@ -138,6 +151,52 @@ export async function applyControlSignal(
       to: candidate,
     } as const;
   });
+  // PR #74 codex P1: emit an `applied` ledger row for actual transitions
+  // so the audit trail captures pause/resume/stop firings (the prelude only
+  // emits `noop` rows for non-RUNNING gate hits).
+  if (outcome.kind === "transitioned" && audit != null) {
+    const idem = idempotencyKey({
+      scope: "pause_resume",
+      parts: {
+        signal_id: signal.signal_id,
+        from: outcome.from,
+        to: outcome.to,
+      },
+    });
+    await audit.ledger.appendTransition({
+      transition_id: newMonotonicId(clock.now()),
+      target_id: audit.targetId,
+      object_id: "system",
+      object_kind: "system",
+      from_state: outcome.from,
+      to_state: outcome.to,
+      loop_kind: null,
+      phase: null,
+      slice_id: null,
+      slice_kind: null,
+      dod_revision: null,
+      session_id: null,
+      turn_index: null,
+      slot_kind: null,
+      agent_profile_id: null,
+      contribution_kind: null,
+      action_kind: "pause_resume",
+      final_verdict: null,
+      caller_id: audit.callerId,
+      manifest_id: null,
+      input_revision_pins: [],
+      output_hash: null,
+      verification_run_id: null,
+      metric_run_id: null,
+      idempotency_key: idem,
+      lease_token: null,
+      lease_kind: null,
+      result: "applied",
+      result_detail: `signal_type=${t}:signal_id=${signal.signal_id}`,
+      timestamp: clock.isoNow(),
+    });
+  }
+  return outcome;
 }
 
 export interface DaemonPreludeDeps {

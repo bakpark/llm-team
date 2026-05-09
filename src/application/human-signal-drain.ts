@@ -19,6 +19,7 @@ import type { StorePort } from "../ports/store.js";
 import {
   applyControlSignal,
   type ApplyControlOutcome,
+  type ControlAuditContext,
 } from "./control-state.js";
 import {
   bindHumanSignalToSession,
@@ -76,6 +77,12 @@ export interface DrainDeps {
    * surface is preserved.
    */
   applyControlState?: boolean;
+  /**
+   * PR #74 codex P1: when supplied alongside `applyControlState=true`, an
+   * actual pause/resume/stop transition emits a `pause_resume` ledger row
+   * with `result=applied` for audit-trail completeness.
+   */
+  controlAudit?: ControlAuditContext;
 }
 
 export async function runHumanSignalDrain(
@@ -88,6 +95,18 @@ export async function runHumanSignalDrain(
     const validation = validateEnvelope(env);
     const now = deps.clock.isoNow();
     if (validation.ok) {
+      // PR #74 codex P0 (gpt5.5): bindable signals (approve / reject /
+      // request_rework) MUST NOT be markProcessed=applied by a non-binding
+      // role — otherwise the outer-coordinator never sees them. Stay
+      // pending so the next outer-coordinator drain cycle picks them up.
+      if (BINDABLE_SIGNAL_TYPES[env.signal_type] === true && deps.binding == null) {
+        results.push({
+          kind: "deferred",
+          signal_id: env.signal_id,
+          reason: "no_binding_caller",
+        });
+        continue;
+      }
       // Phase 7b: control signals (pause / resume / stop) drive the
       // persisted control-state machine BEFORE markProcessed so a daemon
       // pickup that races with markProcessed still sees the new state.
@@ -97,7 +116,12 @@ export async function runHumanSignalDrain(
         env.signal_type === "resume" ||
         env.signal_type === "stop";
       if (isControl && deps.applyControlState === true) {
-        controlDetail = await applyControlSignal(deps.store, deps.clock, env);
+        controlDetail = await applyControlSignal(
+          deps.store,
+          deps.clock,
+          env,
+          deps.controlAudit,
+        );
       }
       // Phase 5b.2: bind FIRST (before markProcessed) so the contribution
       // is visible to the next coordinator pickup. If binding emits a turn,
@@ -171,6 +195,20 @@ export async function runHumanSignalDrain(
 
   return results;
 }
+
+/**
+ * Signal types that bind to an outer DialogueSession (see
+ * `human-signal-binding.ts` VERDICT_FOR). Drain emits `deferred` for these
+ * when invoked without binding deps so the outer-coordinator's next cycle
+ * can consume them — a non-outer role MUST NOT markProcessed=applied them.
+ */
+const BINDABLE_SIGNAL_TYPES: Partial<
+  Record<HumanSignalEnvelope["signal_type"], true>
+> = {
+  approve: true,
+  reject: true,
+  request_rework: true,
+};
 
 function validateEnvelope(env: HumanSignalEnvelope): { ok: true } | { ok: false; reason: string } {
   // Basic conditional-required checks per RGC-SIGNALS.

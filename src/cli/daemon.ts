@@ -263,6 +263,13 @@ async function main(argv: readonly string[]): Promise<number> {
         signal: humanSignal,
         clock,
         applyControlState: true,
+        // PR #74 codex P1: emit `pause_resume` applied ledger row when the
+        // control state machine actually transitions (RUNNING↔PAUSED, →STOPPED).
+        controlAudit: {
+          ledger,
+          callerId: args.callerId,
+          targetId: cfg.identity.target_id,
+        },
         // Outer-coordinator can additionally bind approve/reject signals to
         // the open outer DialogueSession. Other roles deal only with the
         // control-state side-effect; the binding deps are omitted so

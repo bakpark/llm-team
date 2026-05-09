@@ -203,6 +203,55 @@ describe("applyControlSignal", () => {
     );
     expect(out).toEqual({ kind: "transitioned", from: "PAUSED", to: "STOPPED" });
   });
+
+  it("PR #74 codex P1: emits applied ledger row for actual transitions when audit context supplied", async () => {
+    const store = new FsStore({ workdir: workdir() });
+    const clock = new FixedClock(Date.parse("2026-05-09T00:00:00.000Z"));
+    const ledger = makeLedger(store);
+    // Pause first.
+    await applyControlSignal(
+      store,
+      clock,
+      controlSignal({ signal_id: "sig-pause", signal_type: "pause" }),
+      { ledger, callerId: "test-caller", targetId: "test-target" },
+    );
+    // Resume — this transition was previously invisible in the ledger.
+    await applyControlSignal(
+      store,
+      clock,
+      controlSignal({ signal_id: "sig-resume", signal_type: "resume" }),
+      { ledger, callerId: "test-caller", targetId: "test-target" },
+    );
+    const rows = await readLedgerRows(store);
+    expect(rows.length).toBe(2);
+    expect(rows[0]).toMatchObject({
+      action_kind: "pause_resume",
+      result: "applied",
+      from_state: "RUNNING",
+      to_state: "PAUSED",
+    });
+    expect(rows[1]).toMatchObject({
+      action_kind: "pause_resume",
+      result: "applied",
+      from_state: "PAUSED",
+      to_state: "RUNNING",
+    });
+  });
+
+  it("PR #74 codex P1: noop transitions do NOT emit an applied ledger row", async () => {
+    const store = new FsStore({ workdir: workdir() });
+    const clock = new FixedClock(Date.parse("2026-05-09T00:00:00.000Z"));
+    const ledger = makeLedger(store);
+    // resume from RUNNING is a noop.
+    const out = await applyControlSignal(
+      store,
+      clock,
+      controlSignal({ signal_id: "sig-resume", signal_type: "resume" }),
+      { ledger, callerId: "test-caller", targetId: "test-target" },
+    );
+    expect(out.kind).toBe("noop");
+    expect(await readLedgerRows(store)).toEqual([]);
+  });
 });
 
 describe("runDaemonPrelude", () => {

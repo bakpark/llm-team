@@ -136,6 +136,43 @@ describe("drain — control-state apply (Phase 7b)", () => {
     expect((await readControlState(store, clock)).state).toBe("RUNNING");
   });
 
+  it("PR #74 codex P0: bindable signal without binding caller is deferred (not consumed)", async () => {
+    const w = workdir();
+    const store = new FsStore({ workdir: w });
+    const sig = new FsHumanSignal(store);
+    const clock = new FixedClock(Date.parse("2026-05-09T00:00:00.000Z"));
+
+    // Drop an approve envelope — bindable, but no binding deps supplied.
+    await dropSignal(
+      store,
+      HumanSignalEnvelope.parse({
+        signal_id: "sig-approve",
+        signal_type: "approve",
+        target_kind: "milestone",
+        target_id: "01HZM00000000000000000000A",
+        related_object_id: "01HZSC00000000000000000001",
+        actor: "alice",
+        created_at: "2026-05-09T00:00:00.000Z",
+        source: "fs_drop",
+      }),
+    );
+    const out = await runHumanSignalDrain({
+      store,
+      signal: sig,
+      clock,
+      applyControlState: true,
+    });
+    expect(out.length).toBe(1);
+    expect(out[0]?.kind).toBe("deferred");
+    if (out[0]?.kind === "deferred") {
+      expect(out[0].reason).toBe("no_binding_caller");
+    }
+    // Signal stays pending so the outer-coordinator's next cycle picks it up.
+    const pending = await sig.listPending();
+    expect(pending.length).toBe(1);
+    expect(pending[0]?.signal_id).toBe("sig-approve");
+  });
+
   it("pause then resume in one drain restores RUNNING", async () => {
     const w = workdir();
     const store = new FsStore({ workdir: w });
