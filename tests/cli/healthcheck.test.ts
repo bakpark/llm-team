@@ -76,8 +76,8 @@ describe("healthcheck parseArgs", () => {
 });
 
 describe("healthcheck runHealthcheck", () => {
-  it("all-pass mock yields passed=true and conforms to Zod schema", () => {
-    const result = runHealthcheck(
+  it("all-pass mock yields passed=true and conforms to Zod schema", async () => {
+    const result = await runHealthcheck(
       { stage: 1, json: false },
       {
         run: mockRun(ALL_PASS_TABLE),
@@ -99,10 +99,10 @@ describe("healthcheck runHealthcheck", () => {
     expect(result.auth_models.gh).toBe("env_token");
   });
 
-  it("missing required binary yields FAIL and passed=false", () => {
+  it("missing required binary yields FAIL and passed=false", async () => {
     const table = { ...ALL_PASS_TABLE };
     table["command -v claude"] = { status: 1 };
-    const result = runHealthcheck(
+    const result = await runHealthcheck(
       { stage: 1, json: false },
       {
         run: mockRun(table),
@@ -117,10 +117,10 @@ describe("healthcheck runHealthcheck", () => {
     expect(m11?.detail).toContain("claude");
   });
 
-  it("git < 2.5 yields FAIL on M-1-2", () => {
+  it("git < 2.5 yields FAIL on M-1-2", async () => {
     const table = { ...ALL_PASS_TABLE };
     table["git --version"] = { status: 0, stdout: "git version 2.4.0\n" };
-    const result = runHealthcheck(
+    const result = await runHealthcheck(
       { stage: 1, json: false },
       {
         run: mockRun(table),
@@ -134,8 +134,8 @@ describe("healthcheck runHealthcheck", () => {
     expect(m12?.status).toBe("FAIL");
   });
 
-  it("typecheck/build are always SKIP in stage 1 (out of fail-fast budget)", () => {
-    const result = runHealthcheck(
+  it("typecheck/build are always SKIP in stage 1 (out of fail-fast budget)", async () => {
+    const result = await runHealthcheck(
       { stage: 1, json: false },
       {
         run: mockRun(ALL_PASS_TABLE),
@@ -148,19 +148,34 @@ describe("healthcheck runHealthcheck", () => {
     expect(result.items.find((i) => i.id === "M-1-6.build")?.status).toBe("SKIP");
   });
 
-  it("stage 2 returns the phase-prod-3 placeholder", () => {
-    const result = runHealthcheck(
+  it("stage 2 with no qwen URL skips qwen ping (no longer the phase-prod-3 placeholder)", async () => {
+    const table: Record<string, { status: number; stdout?: string; stderr?: string }> = {
+      "gh api rate_limit": {
+        status: 0,
+        stdout: JSON.stringify({
+          resources: { core: { remaining: 4000, limit: 5000 } },
+        }),
+      },
+    };
+    const result = await runHealthcheck(
       { stage: 2, json: false },
-      { run: mockRun({}), env: {}, cwd: process.cwd(), now: () => new Date(0) },
+      {
+        run: mockRun(table),
+        env: {},
+        cwd: process.cwd(),
+        now: () => new Date("2026-05-09T00:00:00.000Z"),
+      },
     );
     expect(result.stage).toBe(2);
-    expect(result.passed).toBe(true);
-    expect(result.items[0]?.detail).toContain("phase-prod-3");
+    const qwen = result.items.find((i) => i.id === "M-2-qwen.ping");
+    expect(qwen?.status).toBe("SKIP");
+    const gh = result.items.find((i) => i.id === "M-2-gh.rate-limit");
+    expect(gh?.status).toBe("PASS");
     expect(result.auth_models.claude).toBe("UNKNOWN_UNTIL_STAGE3");
   });
 
-  it("auth model detection: gh env_token and claude env_token via ANTHROPIC_API_KEY", () => {
-    const result = runHealthcheck(
+  it("auth model detection: gh env_token and claude env_token via ANTHROPIC_API_KEY", async () => {
+    const result = await runHealthcheck(
       { stage: 1, json: false },
       {
         run: mockRun(ALL_PASS_TABLE),
@@ -175,8 +190,8 @@ describe("healthcheck runHealthcheck", () => {
     expect(result.auth_models.codex).toBe("interactive_only");
   });
 
-  it("gh keychain detection when no GH_TOKEN", () => {
-    const result = runHealthcheck(
+  it("gh keychain detection when no GH_TOKEN", async () => {
+    const result = await runHealthcheck(
       { stage: 1, json: false },
       {
         run: mockRun(ALL_PASS_TABLE),
@@ -188,7 +203,7 @@ describe("healthcheck runHealthcheck", () => {
     expect(result.auth_models.gh).toBe("keychain");
   });
 
-  it("caches `gh auth status` and `<bin> --help` (one spawn per probe)", () => {
+  it("caches `gh auth status` and `<bin> --help` (one spawn per probe)", async () => {
     const calls: string[] = [];
     const countingRun: RunCmd = (cmd, args) => {
       const key = `${cmd} ${args.join(" ")}`.trim();
@@ -197,7 +212,7 @@ describe("healthcheck runHealthcheck", () => {
       if (hit) return { status: hit.status, stdout: hit.stdout ?? "", stderr: hit.stderr ?? "" };
       return { status: 127, stdout: "", stderr: `mock: no entry for ${key}` };
     };
-    runHealthcheck(
+    await runHealthcheck(
       { stage: 1, json: false },
       {
         run: countingRun,
