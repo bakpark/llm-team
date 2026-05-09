@@ -1,9 +1,18 @@
-import type { ContextManifest } from "../domain/schema/manifest.js";
+import type {
+  ContextManifest,
+  FetchScope,
+  ManifestEntry,
+} from "../domain/schema/manifest.js";
 import type {
   AgentProfileId,
   AgentRoleInSession,
   ParentLoop,
 } from "../domain/schema/contribution.js";
+import {
+  resolveContextBudget,
+  type ContextBudget,
+} from "../config/target-schema.js";
+import { estimateTokensFromHeader } from "./manifest-builder.js";
 
 /**
  * 4-part prompt composition (#AGC-PROMPT-SERIALIZATION,
@@ -179,4 +188,169 @@ function outerInstructionBody(input: ComposePromptInput): string {
     default:
       return `You are ${input.agentProfileId} in the outer loop (${input.phaseOrPurpose}).`;
   }
+}
+
+/**
+ * AGC-CONTEXT-BUDGET / TCC-CONTEXT-BUDGET enforcement (phase 8a, G2-1).
+ *
+ * Sums per-entry `token_estimate` (attached by `manifest-builder`) plus the
+ * 4-part frontmatter / instruction / output-schema overhead, compares to the
+ * `(parent_loop, phase_or_purpose)` cap from `resolveContextBudget`, and —
+ * when over — drops manifest entries by AGC-CONTEXT-BUDGET truncation
+ * priority (lowest fetch_scope first). Required entries are never dropped.
+ *
+ * On persistent overflow the function returns the AGC-INVALID classification
+ * `context_budget_truncation` so the caller skips the LLM invocation. This
+ * mirrors `parseAgentAuthored` / `enrichEnvelope` outcome shape.
+ */
+
+/** Truncation priority per AGC-CONTEXT-BUDGET (lowest = drop first). */
+const FETCH_SCOPE_DROP_PRIORITY: Record<FetchScope, number> = {
+  tree: 0,
+  "body+turn_log": 1,
+  "body+comments": 2,
+  body: 3,
+  metadata: 4,
+};
+
+/**
+ * Per-entry overhead added on top of `token_estimate` to account for the
+ * manifest JSON wrapping (commas, quoting, indentation). Deterministic
+ * char/4-equivalent constant.
+ */
+const ENTRY_FRAMING_TOKENS = 8;
+
+/**
+ * Fixed prompt scaffolding (frontmatter + section headers + output schema
+ * boilerplate). Empirically the assembled body without entries hovers near
+ * 240 chars → ~60 tokens; we round up generously.
+ */
+const PROMPT_SCAFFOLD_TOKENS = 96;
+
+export interface ComposePromptWithBudgetInput extends ComposePromptInput {
+  /** Operator override map — when omitted the architecture default applies. */
+  contextBudget?: ContextBudget;
+  /**
+   * Optional fixed instruction-body overhead estimate. Defaults to char/4
+   * over the role-specific body the composer would produce.
+   */
+  extraInstructionTokenEstimate?: number;
+}
+
+export type ComposePromptWithBudgetOutcome =
+  | {
+      ok: true;
+      body: string;
+      manifest: ContextManifest;
+      droppedEntries: ManifestEntry[];
+      tokenEstimate: number;
+      cap: number;
+    }
+  | {
+      ok: false;
+      reason: "context_budget_truncation";
+      detail: string;
+      cap: number | null;
+      tokenEstimate: number;
+    };
+
+export function composePromptWithBudget(
+  input: ComposePromptWithBudgetInput,
+): ComposePromptWithBudgetOutcome {
+  const cap = resolveContextBudget(
+    input.contextBudget,
+    input.parentLoop,
+    input.phaseOrPurpose,
+  );
+  if (cap == null) {
+    // Unknown (loop, step) — caller misuse. Fail closed with the same
+    // AGC-INVALID classification so the call path is uniform.
+    return {
+      ok: false,
+      reason: "context_budget_truncation",
+      detail: `unknown (parent_loop, phase_or_purpose) pair: ${input.parentLoop}.${input.phaseOrPurpose}`,
+      cap: null,
+      tokenEstimate: 0,
+    };
+  }
+  const instructionOverhead =
+    input.extraInstructionTokenEstimate ??
+    Math.ceil(
+      (input.extraInstruction != null ? input.extraInstruction.length : 0) / 4,
+    );
+  const baseOverhead = PROMPT_SCAFFOLD_TOKENS + instructionOverhead;
+
+  const entries = [...input.manifest.entries];
+  const droppable = sortDroppable(entries);
+  let droppedEntries: ManifestEntry[] = [];
+
+  let total = computeTotal(entries, baseOverhead);
+  while (total > cap.token_hard_cap && droppable.length > 0) {
+    const victim = droppable.shift()!;
+    const idx = entries.indexOf(victim);
+    if (idx >= 0) entries.splice(idx, 1);
+    droppedEntries.push(victim);
+    total = computeTotal(entries, baseOverhead);
+  }
+
+  if (total > cap.token_hard_cap) {
+    return {
+      ok: false,
+      reason: "context_budget_truncation",
+      detail: `context budget overflow after low-priority truncation: ${total} > cap ${cap.token_hard_cap} (loop=${input.parentLoop} step=${input.phaseOrPurpose}, dropped=${droppedEntries.length}, required-remaining=${entries.filter((e) => e.required).length})`,
+      cap: cap.token_hard_cap,
+      tokenEstimate: total,
+    };
+  }
+
+  const truncatedManifest: ContextManifest = {
+    ...input.manifest,
+    entries,
+  };
+  const body = composePrompt({ ...input, manifest: truncatedManifest });
+  return {
+    ok: true,
+    body,
+    manifest: truncatedManifest,
+    droppedEntries,
+    tokenEstimate: total,
+    cap: cap.token_hard_cap,
+  };
+}
+
+function computeTotal(entries: ManifestEntry[], baseOverhead: number): number {
+  let total = baseOverhead;
+  for (const e of entries) {
+    total += entryTokenCost(e) + ENTRY_FRAMING_TOKENS;
+  }
+  return total;
+}
+
+/**
+ * Returns the deterministic token cost for a manifest entry. When
+ * `token_estimate` is present (phase 8a manifests) it is used verbatim; when
+ * absent (legacy / hand-built manifests) we recompute the same char/4
+ * heuristic over the entry header so the budget is never silently bypassed.
+ */
+function entryTokenCost(entry: ManifestEntry): number {
+  if (entry.token_estimate != null) return entry.token_estimate;
+  const { token_estimate: _omit, ...header } = entry;
+  return estimateTokensFromHeader(header);
+}
+
+/**
+ * Returns the entries eligible for truncation, ordered lowest-priority
+ * first (drop first). Required entries are excluded — overflow with only
+ * required entries surfaces as `context_budget_truncation`.
+ */
+function sortDroppable(entries: ManifestEntry[]): ManifestEntry[] {
+  const droppable = entries.filter((e) => !e.required);
+  droppable.sort((a, b) => {
+    const pa = FETCH_SCOPE_DROP_PRIORITY[a.fetch_scope];
+    const pb = FETCH_SCOPE_DROP_PRIORITY[b.fetch_scope];
+    if (pa !== pb) return pa - pb;
+    // Tiebreaker: drop the larger entry first so each drop maximizes savings.
+    return entryTokenCost(b) - entryTokenCost(a);
+  });
+  return droppable;
 }

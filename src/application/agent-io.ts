@@ -21,7 +21,8 @@ import {
   type AgcInvalidReason,
 } from "./envelope.js";
 import type { ManifestBuilder } from "./manifest-builder.js";
-import { composePrompt } from "./prompt-compose.js";
+import { composePromptWithBudget } from "./prompt-compose.js";
+import type { ContextBudget } from "../config/target-schema.js";
 import type { IdempotencyParts } from "./idempotency.js";
 
 /**
@@ -42,7 +43,12 @@ export type AgentIoOutcome =
     }
   | {
       ok: false;
-      stage: "lr_invoke" | "envelope_parse" | "envelope_enrich" | "matrix_validate";
+      stage:
+        | "prompt_compose"
+        | "lr_invoke"
+        | "envelope_parse"
+        | "envelope_enrich"
+        | "matrix_validate";
       reason: AgcInvalidReason | "lr_exit_status";
       detail: string;
       diagnosticsRef: string;
@@ -70,6 +76,15 @@ export interface AgentIoInput {
    * already rejected upstream (AgentAuthoredEnvelope.strict()).
    */
   runtimeMetadata: Record<string, unknown>;
+  /**
+   * TCC-CONTEXT-BUDGET / AGC-CONTEXT-BUDGET (phase 8a, G2-1) — optional
+   * operator override map. When omitted, `composePromptWithBudget` falls back
+   * to the architecture default cap for the (parent_loop, phase_or_purpose)
+   * pair. Persistent overflow surfaces as an AGC-INVALID
+   * `context_budget_truncation` outcome at the `prompt_compose` stage,
+   * before the LLM runner is invoked.
+   */
+  contextBudget?: ContextBudget;
 }
 
 export interface AgentIoDeps {
@@ -81,7 +96,12 @@ export async function callAgent(
   input: AgentIoInput,
   deps: AgentIoDeps,
 ): Promise<AgentIoOutcome> {
-  const promptBody = composePrompt({
+  // AGC-CONTEXT-BUDGET enforcement: build the prompt under the
+  // (parent_loop, phase_or_purpose) cap. On persistent overflow surface an
+  // AGC-INVALID `context_budget_truncation` outcome before the LLM runner is
+  // invoked. The diagnosticsRef is empty here because no runner artefact
+  // exists yet — callers persist the invalid envelope from the outcome.
+  const composeOut = composePromptWithBudget({
     agentProfileId: input.agentProfileId,
     agentRoleInSession: input.agentRoleInSession,
     parentLoop: input.parentLoop,
@@ -90,7 +110,18 @@ export async function callAgent(
     turnIndex: input.turnIndex,
     manifest: input.manifest,
     workspaceRevisionPin: input.workspaceRevisionPin,
+    contextBudget: input.contextBudget,
   });
+  if (!composeOut.ok) {
+    return {
+      ok: false,
+      stage: "prompt_compose",
+      reason: composeOut.reason,
+      detail: composeOut.detail,
+      diagnosticsRef: "",
+    };
+  }
+  const promptBody = composeOut.body;
   const promptRef = await writePromptTmp(input.sessionId, input.turnIndex, promptBody);
 
   const runnerInput: LlmRunnerInput = {
