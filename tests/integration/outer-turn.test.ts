@@ -238,6 +238,9 @@ async function seedValidatedSliceWithEvidence(store: FsStore) {
     result: "pass",
     failed_tests: [],
     log_ref: null,
+    // Phase 8c (KAC-TRACEABILITY): slice declares ac_ids:["AC-1"], so the
+    // VR must record AC-1 coverage to satisfy AC-level aggregation.
+    covers_ac_ids: ["AC-1"],
   });
   await store.writeAtomic(layout.verification(VR_A), JSON.stringify(vr));
   const sm = SliceMerge.parse({
@@ -684,6 +687,102 @@ describe("runOneOuterTurn — Validation lead_only PASS finalizes M_DONE", () =>
       }
     }
     expect(aggregates.length).toBe(1);
+  });
+
+  it("phase 8c (KAC-TRACEABILITY): partial AC coverage downgrades lead PASS → validation_fail", async () => {
+    // Plan §G2-2 검증: a fixture where only some ACs of a slice are PASS
+    // converges Validation to FAIL even when the lead emits PASS. The
+    // scout aggregation observes covers_ac_ids ⊊ slice.ac_ids and surfaces
+    // a FAIL row → derivedVerdict=FAIL → outer-turn AC bypass routes the
+    // session through dispatch matrix's `validation_fail` row.
+    const env = setup();
+    await seedMilestone(env.store, "M_DELIVERY_VALIDATING", { specPin: "spec-rev-1" });
+    // Slice declares two ACs but the seeded VR only covers AC-1 → AC-2 row=FAIL.
+    const VR_A = "01HZV0000000000000000000A1";
+    const SM_A = "01HZSM00000000000000000A11";
+    const slice = Slice.parse({
+      slice_id: SLICE_A,
+      milestone_id: MILESTONE_ID,
+      slice_kind: "feature",
+      value_statement: "two-AC slice",
+      ac_ids: ["AC-1", "AC-2"],
+      acceptance_tests: [
+        { path: "tests/ac1.test.ts", name: "ac1", ac_id: "AC-1" },
+        { path: "tests/ac2.test.ts", name: "ac2", ac_id: "AC-2" },
+      ],
+      declared_scope: ["src/x.ts"],
+      declared_metric_threshold: null,
+      interface_break: false,
+      dependencies: [],
+      trunk_base_revision: "trunk-base",
+      dod_revision_pin: "dod-pin",
+      state: "SLICE_VALIDATED",
+      current_session_id: null,
+      spawning_proposal_id: null,
+      abandoned_reason: null,
+      external_refs: [],
+      created_at: ISO,
+      updated_at: ISO,
+    });
+    await env.store.writeAtomic(layout.slice(SLICE_A), JSON.stringify(slice));
+    const vr = VerificationRun.parse({
+      verification_run_id: VR_A,
+      target_id: "demo",
+      target_revision: "rev-A1",
+      commands_or_checks: ["t"],
+      environment_fingerprint: "env",
+      started_at: ISO,
+      finished_at: ISO,
+      result: "pass",
+      failed_tests: [],
+      log_ref: null,
+      covers_ac_ids: ["AC-1"],
+    });
+    await env.store.writeAtomic(layout.verification(VR_A), JSON.stringify(vr));
+    const sm = SliceMerge.parse({
+      slice_merge_id: SM_A,
+      slice_id: SLICE_A,
+      target_id: "demo",
+      pre_merge_workspace_revision: "pre",
+      merge_revision: "merge-A1",
+      inner_session_id: null,
+      review_session_id: null,
+      verification_run_id: VR_A,
+      state: "SM_MERGED",
+      merged_at: ISO,
+      merged_by_caller_id: "caller-1",
+      lease_token: null,
+      audit_chain_predecessor_id: null,
+      external_refs: [],
+      created_at: ISO,
+      updated_at: ISO,
+    });
+    await env.store.writeAtomic(layout.sliceMerge(SM_A), JSON.stringify(sm));
+
+    const { adapter } = makeStub({
+      sentinel: [validationLead(MILESTONE_ID, "PASS")],
+    });
+    const llmRunner = new AdapterRunnerPort(adapter);
+    const out = await runOneOuterTurn({
+      store: env.store,
+      clock: env.clock,
+      llmRunner,
+      ledger: env.ledger,
+      callerId: "test",
+      targetId: "demo",
+    });
+    expect(out.kind).toBe("turn_persisted");
+    if (out.kind !== "turn_persisted") return;
+    expect(out.decision.converged).toBe(true);
+    if (!out.decision.converged) return;
+    expect(out.decision.final_verdict).toBe("FAIL");
+    expect(out.dispatch?.kind).toBe("applied");
+
+    const m = Milestone.parse(
+      JSON.parse((await env.store.readText(layout.milestone(MILESTONE_ID)))!),
+    );
+    // dispatch matrix `validation_fail` reverts the milestone to building.
+    expect(m.state).toBe("M_DELIVERY_BUILDING");
   });
 
   it("sentinel lead FAIL → converges validation_fail → milestone reverts to M_DELIVERY_BUILDING (PR #69 P0-4)", async () => {

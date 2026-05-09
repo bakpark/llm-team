@@ -110,6 +110,14 @@ export interface IntegrateInput {
   trunkRevision: string;
   testCommands: import("../ports/verification.js").CommandSpec[];
   environmentFingerprint: string;
+  /**
+   * Phase 8c (KAC-TRACEABILITY): AC-IDs the integrating slice declares.
+   * Forwarded to the rebase reverify VerificationRun so the SliceMerge's
+   * canonical `verification_run_id` records its AC coverage. Optional/
+   * default-empty preserves backward compat with callers that pre-date
+   * 8c.
+   */
+  coversAcIds?: readonly string[];
 }
 
 export type IntegrateOutcome =
@@ -164,6 +172,7 @@ export async function integrateSliceMerge(
       targetRevision: rebase.commit,
       testCommands: input.testCommands,
       environmentFingerprint: input.environmentFingerprint,
+      coversAcIds: input.coversAcIds ?? [],
     },
     {
       verification: deps.verification,

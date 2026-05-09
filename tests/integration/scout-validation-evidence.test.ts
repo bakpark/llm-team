@@ -59,14 +59,19 @@ async function seedSlice(
   sliceId: string,
   state: "SLICE_VALIDATED" | "SLICE_BUILDING",
   milestoneId: string = MILESTONE_ID,
+  acIds: readonly string[] = ["AC-1"],
 ) {
   const s = Slice.parse({
     slice_id: sliceId,
     milestone_id: milestoneId,
     slice_kind: "feature",
     value_statement: `slice ${sliceId.slice(-2)}`,
-    ac_ids: ["AC-1"],
-    acceptance_tests: [{ path: "tests/x.test.ts", name: "x", ac_id: "AC-1" }],
+    ac_ids: [...acIds],
+    acceptance_tests: acIds.map((id) => ({
+      path: `tests/${id}.test.ts`,
+      name: id,
+      ac_id: id,
+    })),
     declared_scope: ["src/x.ts"],
     declared_metric_threshold: null,
     interface_break: false,
@@ -89,6 +94,7 @@ async function seedVerification(
   vrId: string,
   result: "pass" | "fail",
   failedTests: { path: string; name: string; message: string | null }[] = [],
+  coversAcIds: readonly string[] = ["AC-1"],
 ) {
   const vr = VerificationRun.parse({
     verification_run_id: vrId,
@@ -101,6 +107,11 @@ async function seedVerification(
     result,
     failed_tests: failedTests,
     log_ref: null,
+    // Phase 8c (KAC-TRACEABILITY): the seeded slice declares ac_ids:["AC-1"],
+    // so the VR must record AC-1 coverage to keep the aggregate PASS. The
+    // FAIL path tests keep the same coverage — Validation FAIL flows from
+    // `result=fail`, not from missing AC coverage.
+    covers_ac_ids: coversAcIds,
   });
   await store.writeAtomic(layout.verification(vrId), JSON.stringify(vr));
 }
@@ -279,5 +290,114 @@ describe("aggregateValidationEvidence — milestone scoping", () => {
     );
     expect(out.slicesCovered.map((s) => s.slice_id)).toEqual([SLICE_A]);
     expect(out.derivedVerdict).toBe("PASS");
+  });
+});
+
+// -------------------------- Phase 8c — KAC-TRACEABILITY -------------------
+
+describe("aggregateValidationEvidence — AC-level traceability rows", () => {
+  it("emits one row per declared ac_id with PASS status when VR covers it", async () => {
+    const env = setup();
+    await seedMilestone(env.store);
+    await seedSlice(env.store, SLICE_A, "SLICE_VALIDATED", MILESTONE_ID, [
+      "AC-1",
+      "AC-2",
+    ]);
+    await seedVerification(env.store, VR_A, "pass", [], ["AC-1", "AC-2"]);
+    await seedSliceMerge(env.store, SM_A, SLICE_A, VR_A);
+
+    const out = await aggregateValidationEvidence(
+      { milestoneId: MILESTONE_ID },
+      { store: env.store, clock: env.clock, targetId: "demo" },
+    );
+    expect(out.derivedVerdict).toBe("PASS");
+    expect(out.acTraceability).toHaveLength(2);
+    for (const row of out.acTraceability) {
+      expect(row.status).toBe("PASS");
+      expect(row.slice_id).toBe(SLICE_A);
+      expect(row.slice_merge_id).toBe(SM_A);
+      expect(row.latest_vr_id).toBe(VR_A);
+    }
+    expect(out.acTraceability.map((r) => r.ac_id).sort()).toEqual([
+      "AC-1",
+      "AC-2",
+    ]);
+  });
+
+  it("partial AC coverage on a passing slice → row=FAIL → derivedVerdict=FAIL (plan §G2-2)", async () => {
+    const env = setup();
+    await seedMilestone(env.store);
+    // Slice declares AC-1 and AC-2 but VR only covers AC-1.
+    await seedSlice(env.store, SLICE_A, "SLICE_VALIDATED", MILESTONE_ID, [
+      "AC-1",
+      "AC-2",
+    ]);
+    await seedVerification(env.store, VR_A, "pass", [], ["AC-1"]);
+    await seedSliceMerge(env.store, SM_A, SLICE_A, VR_A);
+
+    const out = await aggregateValidationEvidence(
+      { milestoneId: MILESTONE_ID },
+      { store: env.store, clock: env.clock, targetId: "demo" },
+    );
+    expect(out.derivedVerdict).toBe("FAIL");
+    expect(out.acTraceability).toHaveLength(2);
+    const byAc = new Map(out.acTraceability.map((r) => [r.ac_id, r]));
+    expect(byAc.get("AC-1")?.status).toBe("PASS");
+    expect(byAc.get("AC-2")?.status).toBe("FAIL");
+    // Aggregate VR result must reflect the FAIL so `evidence_only` gate
+    // sees verification_green=false downstream.
+    expect(out.aggregate.result).toBe("fail");
+  });
+
+  it("non-validated slice surfaces as MISSING rows (one per declared AC)", async () => {
+    const env = setup();
+    await seedMilestone(env.store);
+    await seedSlice(env.store, SLICE_A, "SLICE_BUILDING", MILESTONE_ID, [
+      "AC-1",
+      "AC-2",
+    ]);
+
+    const out = await aggregateValidationEvidence(
+      { milestoneId: MILESTONE_ID },
+      { store: env.store, clock: env.clock, targetId: "demo" },
+    );
+    // Slice not validated → derived STALE (slice-level absence) but the
+    // AC traceability rows are still emitted as MISSING for operator
+    // surface.
+    expect(out.derivedVerdict).toBe("STALE");
+    expect(out.acTraceability).toHaveLength(2);
+    for (const row of out.acTraceability) {
+      expect(row.status).toBe("MISSING");
+      expect(row.slice_merge_id).toBeNull();
+      expect(row.latest_vr_id).toBeNull();
+    }
+  });
+
+  it("VR fail result → all AC rows for that slice = FAIL", async () => {
+    const env = setup();
+    await seedMilestone(env.store);
+    await seedSlice(env.store, SLICE_A, "SLICE_VALIDATED", MILESTONE_ID, [
+      "AC-1",
+      "AC-2",
+    ]);
+    // Even though `covers_ac_ids` lists both, `result=fail` propagates
+    // FAIL to every declared AC of the slice.
+    await seedVerification(
+      env.store,
+      VR_A,
+      "fail",
+      [{ path: "tests/x.test.ts", name: "x", message: "boom" }],
+      ["AC-1", "AC-2"],
+    );
+    await seedSliceMerge(env.store, SM_A, SLICE_A, VR_A);
+
+    const out = await aggregateValidationEvidence(
+      { milestoneId: MILESTONE_ID },
+      { store: env.store, clock: env.clock, targetId: "demo" },
+    );
+    expect(out.derivedVerdict).toBe("FAIL");
+    for (const row of out.acTraceability) {
+      expect(row.status).toBe("FAIL");
+    }
   });
 });

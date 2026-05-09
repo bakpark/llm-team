@@ -73,6 +73,9 @@ async function seedValidatedSlice(store: FsStore) {
         result: "pass",
         failed_tests: [],
         log_ref: null,
+        // Phase 8c (KAC-TRACEABILITY): slice declares ac_ids:["AC-1"], so
+        // the VR must record AC-1 coverage to keep AC-level aggregation PASS.
+        covers_ac_ids: ["AC-1"],
       }),
     ),
   );

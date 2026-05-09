@@ -34,6 +34,16 @@ export const VerificationRun = z
     result: VerificationResult,
     failed_tests: z.array(FailedTest).default(() => []),
     log_ref: z.string().min(1).nullable().default(null),
+    /**
+     * KAC-TRACEABILITY (phase 8c, plan §G2-2): the AC-IDs this run is
+     * intended to cover. Populated by the inner verification-runner from
+     * `slice.ac_ids` for slice-scoped runs; aggregate scout runs leave it
+     * empty (the per-slice rows carry the mapping).
+     *
+     * Optional / default `[]` so any historical VerificationRun JSON written
+     * before phase 8c parses unchanged.
+     */
+    covers_ac_ids: z.array(z.string().min(1)).default(() => []),
   })
   .strict();
 export type VerificationRun = z.infer<typeof VerificationRun>;

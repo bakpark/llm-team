@@ -46,6 +46,34 @@ export interface ScoutEvidenceInput {
   milestoneId: string;
 }
 
+/**
+ * KAC-TRACEABILITY (phase 8c, plan §G2-2): per-AC traceability row joining
+ * a declared slice AC-ID through its latest SliceMerge → VerificationRun
+ * to a PASS / FAIL / MISSING verdict.
+ *
+ *   - PASS    : the slice's latest SM_MERGED VerificationRun is `pass` and
+ *               its `covers_ac_ids` lists this AC.
+ *   - FAIL    : the slice's latest SM_MERGED VerificationRun is `fail` /
+ *               `error`, OR the slice's VR is pass but does not declare
+ *               coverage for this AC (an explicit AC mapping gap from a
+ *               passing slice is a Validation FAIL, not MISSING).
+ *   - MISSING : the slice itself has no SM_MERGED SliceMerge yet, or the
+ *               SliceMerge has no `verification_run_id`, or the VR file is
+ *               missing on disk. STALE-style absence at the AC level.
+ *
+ * The status enum is fixed (PASS / FAIL / MISSING) per the phase-8c
+ * constraint — no other states.
+ */
+export type AcTraceabilityStatus = "PASS" | "FAIL" | "MISSING";
+
+export interface AcTraceabilityRow {
+  ac_id: string;
+  slice_id: string;
+  slice_merge_id: string | null;
+  latest_vr_id: string | null;
+  status: AcTraceabilityStatus;
+}
+
 export interface ScoutEvidenceResult {
   /** Synthesised aggregate VerificationRun, persisted under verifications/. */
   aggregate: VerificationRunT;
@@ -57,6 +85,13 @@ export interface ScoutEvidenceResult {
   slicesCovered: readonly ContextSummarySliceRef[];
   /** Slice ids that lacked SliceMerge / VerificationRun (cause STALE). */
   slicesMissing: readonly string[];
+  /**
+   * Phase 8c (KAC-TRACEABILITY): AC-level traceability rows aggregated
+   * across all milestone slices. Additive — does not replace the slice-
+   * level `slicesCovered` / `slicesMissing` summaries that downstream
+   * consumers (ContextSummary snapshot) already rely on.
+   */
+  acTraceability: readonly AcTraceabilityRow[];
 }
 
 /**
@@ -101,10 +136,21 @@ export async function aggregateValidationEvidence(
     });
   }
 
+  // Phase 8c (KAC-TRACEABILITY): AC-level traceability is computed across
+  // ALL milestone slices (not just SLICE_VALIDATED), since an AC declared
+  // by a still-building slice is `MISSING`, not absent. The slice-level
+  // `slicesCovered` / `slicesMissing` summaries above are unchanged.
+  const acTraceability = await aggregateAcTraceability(
+    input.milestoneId,
+    sliceMergesBySliceId,
+    deps.store,
+  );
+
   const derivedVerdict = computeDerivedVerdict({
     sliceCount: slices.length,
     perSlice,
     missingCount: slicesMissing.length,
+    acTraceability,
   });
 
   const aggregate: VerificationRunT = VerificationRun.parse({
@@ -138,6 +184,7 @@ export async function aggregateValidationEvidence(
     derivedVerdict,
     slicesCovered,
     slicesMissing,
+    acTraceability,
   };
 }
 
@@ -145,6 +192,7 @@ function computeDerivedVerdict(args: {
   sliceCount: number;
   perSlice: readonly VerificationRunT[];
   missingCount: number;
+  acTraceability: readonly AcTraceabilityRow[];
 }): ScoutDerivedVerdict {
   if (args.sliceCount === 0) return "STALE";
   if (args.missingCount > 0) return "STALE";
@@ -152,7 +200,127 @@ function computeDerivedVerdict(args: {
   for (const vr of args.perSlice) {
     if (vr.result !== "pass") return "FAIL";
   }
+  // Phase 8c (KAC-TRACEABILITY): even when every slice's VR is `pass`, a
+  // partial AC mapping (slice.ac_ids ⊃ vr.covers_ac_ids) leaves some ACs
+  // un-evidenced. Per plan §G2-2 검증, a fixture where only some ACs of a
+  // slice are PASS converges Validation to FAIL — surface that here so the
+  // downstream `evidence_only` gate sees `result=fail` and the FAIL bypass
+  // routes through the dispatch matrix's `validation_fail` row.
+  for (const row of args.acTraceability) {
+    if (row.status === "FAIL") return "FAIL";
+  }
+  // MISSING rows alone do not flip a slice-green aggregate — they reflect
+  // slices that haven't yet validated. computeDerivedVerdict already
+  // returns STALE earlier (`missingCount > 0`) when the slice itself is
+  // missing evidence; an AC row whose slice is BUILDING/PENDING shows up
+  // as MISSING here without triggering FAIL.
   return "PASS";
+}
+
+/**
+ * Phase 8c (KAC-TRACEABILITY, plan §G2-2): walk every milestone slice
+ * and emit one AcTraceabilityRow per declared `ac_id`.
+ *
+ * Status assignment:
+ *   - No SM_MERGED SliceMerge for the slice OR no `verification_run_id`
+ *     OR the VR file is unreadable → `MISSING` (slice_merge_id /
+ *     latest_vr_id may be null).
+ *   - SM_MERGED VR present + `result=pass` + AC listed in
+ *     `vr.covers_ac_ids` → `PASS`.
+ *   - SM_MERGED VR present + `result≠pass` → `FAIL` (slice itself failed,
+ *     all its ACs inherit FAIL).
+ *   - SM_MERGED VR present + `result=pass` but AC NOT listed in
+ *     `vr.covers_ac_ids` → `FAIL` (passing slice with incomplete AC
+ *     mapping; KAC-TRACEABILITY requires every declared AC to be
+ *     evidenced, otherwise Validation must FAIL).
+ *
+ * Backward compat: VRs persisted before phase 8c parse with
+ * `covers_ac_ids = []` (zod default). Such VRs have empty coverage; if
+ * the parent slice declares any AC, those rows render as `FAIL`. This
+ * is the correct migration signal — pre-8c VRs cannot prove AC coverage,
+ * so a Validation re-run that observes them must require operators to
+ * re-emit fresh evidence. (Operator surface: the FAIL row points at the
+ * specific (ac_id, slice_id, latest_vr_id) tuple that needs re-running.)
+ */
+export async function aggregateAcTraceability(
+  milestoneId: string,
+  sliceMergesBySliceId: Map<string, SliceMergeT[]>,
+  store: StorePort,
+): Promise<readonly AcTraceabilityRow[]> {
+  const slices = await loadAllMilestoneSlices(milestoneId, store);
+  const rows: AcTraceabilityRow[] = [];
+  for (const slice of slices) {
+    if (slice.ac_ids.length === 0) continue;
+    const sm = pickLatestMerged(sliceMergesBySliceId.get(slice.slice_id));
+    const vr =
+      sm != null && sm.verification_run_id != null
+        ? await readVerificationRun(sm.verification_run_id, store)
+        : null;
+    for (const acId of slice.ac_ids) {
+      if (sm == null || sm.verification_run_id == null || vr == null) {
+        rows.push({
+          ac_id: acId,
+          slice_id: slice.slice_id,
+          slice_merge_id: sm?.slice_merge_id ?? null,
+          latest_vr_id: sm?.verification_run_id ?? null,
+          status: "MISSING",
+        });
+        continue;
+      }
+      const status: AcTraceabilityStatus =
+        vr.result !== "pass"
+          ? "FAIL"
+          : vr.covers_ac_ids.includes(acId)
+            ? "PASS"
+            : "FAIL";
+      rows.push({
+        ac_id: acId,
+        slice_id: slice.slice_id,
+        slice_merge_id: sm.slice_merge_id,
+        latest_vr_id: sm.verification_run_id,
+        status,
+      });
+    }
+  }
+  rows.sort(
+    (a, b) =>
+      a.slice_id.localeCompare(b.slice_id) || a.ac_id.localeCompare(b.ac_id),
+  );
+  return rows;
+}
+
+/**
+ * Phase 8c helper — load every slice for a milestone irrespective of
+ * state. `loadMilestoneSlices` (slice-level aggregation) filters to
+ * SLICE_VALIDATED only; AC traceability needs to surface declared ACs of
+ * slices still BUILDING / REVIEWING as `MISSING` rows.
+ */
+async function loadAllMilestoneSlices(
+  milestoneId: string,
+  store: StorePort,
+): Promise<readonly SliceT[]> {
+  let entries: string[];
+  try {
+    entries = await store.list("slices");
+  } catch {
+    return [];
+  }
+  const out: SliceT[] = [];
+  for (const name of entries) {
+    if (!name.endsWith(".json")) continue;
+    const body = await store.readText(`slices/${name}`);
+    if (body == null) continue;
+    let parsed: SliceT;
+    try {
+      parsed = Slice.parse(JSON.parse(body));
+    } catch {
+      continue;
+    }
+    if (parsed.milestone_id !== milestoneId) continue;
+    out.push(parsed);
+  }
+  out.sort((a, b) => a.slice_id.localeCompare(b.slice_id));
+  return out;
 }
 
 function collectFailedTests(

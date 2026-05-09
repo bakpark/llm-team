@@ -222,6 +222,12 @@ export async function runOneOuterTurn(
   });
   // P0-4 fix (PR #69 review): Validation FAIL/STALE bypass (pre-eval). See
   // the post-turn branch below for rationale.
+  //
+  // Phase 8c (KAC-TRACEABILITY): when lead emitted PASS but scout AC-level
+  // aggregation derives FAIL (any AC row status=FAIL — slice failed OR
+  // partial AC mapping), force convergence on FAIL so the dispatch
+  // matrix's `validation_fail` row runs. This is plan §G2-2 검증: a
+  // fixture where only some ACs of a slice are PASS converges to FAIL.
   if (
     phase === "Validation" &&
     !preDecision.converged &&
@@ -233,6 +239,15 @@ export async function runOneOuterTurn(
         converged: true,
         final_verdict: leadVerdict,
         finalization_decision: "finalization_rule",
+      };
+    } else if (
+      leadVerdict === "PASS" &&
+      preEvidence?.derivedVerdict === "FAIL"
+    ) {
+      preDecision = {
+        converged: true,
+        final_verdict: "FAIL",
+        finalization_decision: "required_evidence",
       };
     }
   }
@@ -535,6 +550,19 @@ export async function runOneOuterTurn(
         converged: true,
         final_verdict: leadVerdict,
         finalization_decision: "finalization_rule",
+      };
+    } else if (
+      // Phase 8c (KAC-TRACEABILITY): post-turn AC-level downgrade. See
+      // the pre-eval branch above for rationale — kept symmetric so a
+      // session that converges in either window honours scout's AC
+      // aggregation FAIL.
+      leadVerdict === "PASS" &&
+      postEvidence?.derivedVerdict === "FAIL"
+    ) {
+      decision = {
+        converged: true,
+        final_verdict: "FAIL",
+        finalization_decision: "required_evidence",
       };
     }
   }
