@@ -27,12 +27,12 @@ feat/phase-prod-<N>-<short-slug>
 feat(phase-prod-<N>): <one-line summary>
 ```
 
-PR body 는 `## Summary` / `## 구현` / `## 테스트` / `## Gate` 섹션 사용. 마지막 줄에 planning 문서 closing 명시:
+PR body 는 `## Summary` / `## 구현` / `## 테스트` / `## Gate` 섹션 사용. 마지막 줄에 planning 문서 tracking 메타데이터 명시 (GitHub closing syntax 아님 — `.human/` 은 gitignored 로컬 plan 참조용):
 
 ```
-Closes Phase <N> of `.human/draft/2026-05-09-production-implementation-phases.md`.
+Tracking: phase-prod-<N> per local plan (`.human/draft/2026-05-09-production-implementation-phases.md`, gitignored).
 ```
 
 ## phase-pipeline skill 결합
 
-phase-pipeline skill 은 cycle 시작 시 본 문서의 prefix / branch 패턴을 자동 적용하고, planning 문서 (`.human/draft/2026-05-09-production-implementation-phases.md`) 의 해당 phase 절을 발췌해 phase-implementer 로 위임한다.
+본 문서는 phase-pipeline skill 의 자동 pre-flight 탐지 대상이 아니라 **수동 참조용 운영 규약**이다. cycle 시작 시 사용자가 본 문서를 명시적으로 참조하거나, skill 이 git log / 직전 PR 의 prefix 패턴 (`feat(phase-prod-<N>):`) 으로 phase-prod cycle 임을 자동 매칭한다. planning 문서 (`.human/draft/2026-05-09-production-implementation-phases.md`) 의 해당 phase 절은 사용자가 수동으로 발췌해 phase-implementer 로 위임한다.
