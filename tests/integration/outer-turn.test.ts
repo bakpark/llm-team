@@ -783,6 +783,14 @@ describe("runOneOuterTurn — Validation lead_only PASS finalizes M_DONE", () =>
     );
     // dispatch matrix `validation_fail` reverts the milestone to building.
     expect(m.state).toBe("M_DELIVERY_BUILDING");
+    // PR #78 review (P0): the failing slice must also be reverted to
+    // SLICE_READY. Without `responsibleSliceIds` derived from the AC
+    // traceability FAIL rows, the dispatch effect would only roll back
+    // the milestone and leave the slice stuck at SLICE_VALIDATED.
+    const reverted = Slice.parse(
+      JSON.parse((await env.store.readText(layout.slice(SLICE_A)))!),
+    );
+    expect(reverted.state).toBe("SLICE_READY");
   });
 
   it("sentinel lead FAIL → converges validation_fail → milestone reverts to M_DELIVERY_BUILDING (PR #69 P0-4)", async () => {

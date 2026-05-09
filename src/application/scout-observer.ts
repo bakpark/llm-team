@@ -53,13 +53,22 @@ export interface ScoutEvidenceInput {
  *
  *   - PASS    : the slice's latest SM_MERGED VerificationRun is `pass` and
  *               its `covers_ac_ids` lists this AC.
- *   - FAIL    : the slice's latest SM_MERGED VerificationRun is `fail` /
- *               `error`, OR the slice's VR is pass but does not declare
- *               coverage for this AC (an explicit AC mapping gap from a
- *               passing slice is a Validation FAIL, not MISSING).
+ *   - FAIL    : conflates two operationally distinct conditions, both of
+ *               which converge Validation to FAIL but mean different
+ *               things to the operator:
+ *                 (a) hard fail — the slice's latest SM_MERGED VR is
+ *                     `fail` / `error`. Re-run the slice's verification.
+ *                 (b) coverage gap — the slice's VR is `pass` but its
+ *                     `covers_ac_ids` does not include this AC. Re-emit
+ *                     a fresh VR for this slice with the AC mapped.
+ *               (operator surface: the row's `latest_vr_id` + actual VR
+ *               `result` field disambiguates the two flavours.)
  *   - MISSING : the slice itself has no SM_MERGED SliceMerge yet, or the
  *               SliceMerge has no `verification_run_id`, or the VR file is
- *               missing on disk. STALE-style absence at the AC level.
+ *               missing on disk. STALE-style absence at the AC level. As
+ *               of phase 8c, MISSING also converges Validation to FAIL —
+ *               an un-evidenced declared AC blocks milestone completion
+ *               just like an explicit FAIL.
  *
  * The status enum is fixed (PASS / FAIL / MISSING) per the phase-8c
  * constraint — no other states.
@@ -178,6 +187,25 @@ export async function aggregateValidationEvidence(
     );
   }
 
+  // PR #78 review (P1): persist the AC traceability manifest so read-side
+  // audits can reconstruct (AC-ID -> SliceMerge -> VR -> verdict) without
+  // re-walking slices/. Overwritten per Validation aggregation pass —
+  // the latest verdict per (milestone, AC) is the source of truth. STALE
+  // path skips persistence symmetric to the aggregate VR rule above.
+  if (derivedVerdict !== "STALE") {
+    const manifest = {
+      milestone_id: input.milestoneId,
+      aggregate_vr_id: aggregate.verification_run_id,
+      derived_verdict: derivedVerdict,
+      generated_at: deps.clock.isoNow(),
+      rows: acTraceability,
+    };
+    await deps.store.writeAtomic(
+      layout.acTraceabilityByMilestone(input.milestoneId),
+      JSON.stringify(manifest, null, 2),
+    );
+  }
+
   return {
     aggregate,
     perSlice,
@@ -206,14 +234,17 @@ function computeDerivedVerdict(args: {
   // slice are PASS converges Validation to FAIL — surface that here so the
   // downstream `evidence_only` gate sees `result=fail` and the FAIL bypass
   // routes through the dispatch matrix's `validation_fail` row.
+  // Phase 8c (KAC-TRACEABILITY): a milestone in M_DELIVERY_VALIDATING with
+  // BUILDING/REVIEWING slices that declare ACs surfaces those ACs as
+  // `MISSING` rows. Such ACs are un-evidenced — they cannot prove milestone
+  // completeness — so they must converge Validation to FAIL just like an
+  // explicit AC mapping gap. Note: the early `missingCount > 0` STALE
+  // branch above only counts SLICE_VALIDATED slices that lack SM/VR; a
+  // BUILDING slice declaring ACs slips past that check, so the AC-row
+  // sweep must downgrade to FAIL on MISSING as well as FAIL.
   for (const row of args.acTraceability) {
-    if (row.status === "FAIL") return "FAIL";
+    if (row.status === "FAIL" || row.status === "MISSING") return "FAIL";
   }
-  // MISSING rows alone do not flip a slice-green aggregate — they reflect
-  // slices that haven't yet validated. computeDerivedVerdict already
-  // returns STALE earlier (`missingCount > 0`) when the slice itself is
-  // missing evidence; an AC row whose slice is BUILDING/PENDING shows up
-  // as MISSING here without triggering FAIL.
   return "PASS";
 }
 
@@ -313,8 +344,16 @@ async function loadAllMilestoneSlices(
     let parsed: SliceT;
     try {
       parsed = Slice.parse(JSON.parse(body));
-    } catch {
-      continue;
+    } catch (err) {
+      // PR #78 review: silently dropping a corrupt slice file would leak
+      // declared ACs from AC-traceability — Validation could converge
+      // green while the un-readable slice's ACs are absent from the row
+      // set. Surface as a hard error so the aggregator fails loudly.
+      throw new Error(
+        `[scout-observer] corrupt slice file slices/${name}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
     }
     if (parsed.milestone_id !== milestoneId) continue;
     out.push(parsed);
@@ -351,8 +390,15 @@ async function loadMilestoneSlices(
     let parsed: SliceT;
     try {
       parsed = Slice.parse(JSON.parse(body));
-    } catch {
-      continue;
+    } catch (err) {
+      // PR #78 review: corrupt slice JSON must not silently drop a slice
+      // from the aggregation set — that would silently shrink the per-
+      // slice VR coverage that the aggregate VR claims, breaking audit.
+      throw new Error(
+        `[scout-observer] corrupt slice file slices/${name}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
     }
     if (parsed.milestone_id !== milestoneId) continue;
     if (parsed.state !== "SLICE_VALIDATED") continue;

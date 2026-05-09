@@ -86,6 +86,7 @@ import type { LlmAgentProfileId, AgentRole } from "../ports/llm-runner.js";
 import { idempotencyKey } from "./idempotency.js";
 import {
   aggregateValidationEvidence,
+  type AcTraceabilityRow,
   type ScoutEvidenceResult,
 } from "./scout-observer.js";
 import { loadLatestSliceTelemetry } from "./slice-telemetry.js";
@@ -1486,7 +1487,22 @@ async function buildDispatchInput(
         };
       }
       if (normalized === "validation_fail") {
-        const ids = parseStringArray(artifacts, "responsible_slice_ids");
+        const fromArtifacts = parseStringArray(artifacts, "responsible_slice_ids");
+        // Phase 8c (KAC-TRACEABILITY): when a PASS lead is downgraded to FAIL
+        // by scout's AC-level aggregation (`derivedVerdict === "FAIL"`), the
+        // lead envelope is itself PASS so it does not carry
+        // `responsible_slice_ids`. Without a fallback, `recover_milestone_to_
+        // building` would revert only the milestone state and leave the
+        // failing slices stuck in SLICE_VALIDATED. Derive responsible slice
+        // ids from the cached AcTraceabilityRow set (slices that have at
+        // least one FAIL/MISSING AC row) so the dispatch effect can revert
+        // them to SLICE_READY for re-work.
+        const fromAcTraceability =
+          fromArtifacts.length === 0 && cachedEvidence != null
+            ? collectAcFailureSliceIds(cachedEvidence.acTraceability)
+            : [];
+        const ids =
+          fromArtifacts.length > 0 ? fromArtifacts : fromAcTraceability;
         return ids.length > 0 ? { ...base, responsibleSliceIds: ids } : base;
       }
       return base;
@@ -1506,6 +1522,28 @@ function normalizeFinalVerdict(phase: OuterPhase, raw: string): string {
     default:
       return raw;
   }
+}
+
+/**
+ * Phase 8c (KAC-TRACEABILITY): collect distinct slice ids whose AC-level
+ * traceability rows show FAIL or MISSING. Used when a PASS lead envelope
+ * is downgraded to validation_fail by scout aggregation — the dispatch
+ * matrix's `recover_milestone_to_building` row reverts these slices to
+ * SLICE_READY for re-work. Order is preserved (sorted by slice_id from
+ * `aggregateAcTraceability`) and duplicates collapsed.
+ */
+function collectAcFailureSliceIds(
+  rows: readonly AcTraceabilityRow[],
+): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const r of rows) {
+    if (r.status === "PASS") continue;
+    if (seen.has(r.slice_id)) continue;
+    seen.add(r.slice_id);
+    out.push(r.slice_id);
+  }
+  return out;
 }
 
 function readString(rec: Record<string, unknown>, key: string): string | null {
