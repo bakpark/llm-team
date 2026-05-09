@@ -402,6 +402,9 @@ target.invariant_enforcement.stage_graded:
   turn_log_compaction_delay: warn
   refactor_metric_missing: warn
   required_evidence_unmet: warn              # Stage 3b 부터 block
+  actor_team_membership_unreachable: block   # Inv #5 — phase 9a 추가 (TCC-GOVERNANCE 행)
+  scope_violation: warn                      # AGC-WORKSPACE 행에서 stage_graded 로 참조 (Stage 3b block)
+  fairness_violation: warn                   # RGC-FAIRNESS 행에서 stage_graded 로 참조 (detector 미구현)
 ```
 
 ### 의미
@@ -413,6 +416,10 @@ target.invariant_enforcement.stage_graded:
 ### Stage 5 의 의미
 
 Stage 5 진입 시 `target.invariant_enforcement` 의 stage_graded 모든 항목을 `block` 으로 전환. legacy writer 코드 경로 (legacy phase/Task/PhaseRun helper) 가 신규 row 를 만들지 못한다.
+
+### Call-site 매트릭스 (phase 9c)
+
+각 invariant 가 실제로 어떤 평가자에서 적용되며, 그 평가자가 `application/invariant-enforcement.ts` 의 `resolveEnforcementLevel(...)` 을 통과하는지 (즉 operator override 가 효력을 갖는지) 의 추적은 `docs/contracts/README.md#TCC-ENFORCEMENT-AUDIT` 매트릭스에 정리된다. 현재 wired 된 stage_graded 항목은 `actor_team_membership_unreachable` 뿐이며, 나머지는 Stage 5 default block 동작에만 의존한다 (operator downgrade 미지원). 후속 cycle 이 invariant 단위로 평가자에 lookup 을 wire 한다.
 
 <a id="TCC-PRECEDENCE"></a>
 ## TCC-PRECEDENCE: Configuration Precedence

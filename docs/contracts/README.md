@@ -424,7 +424,7 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 | `TCC-DUAL-TRACK` ★ | partial | `src/config/target-schema.ts` (`DualTrack` Zod block: `priority` ∈ {delivery_first (default), balanced, discovery_first} + optional `refactor_scheduled_capacity` + `scout_scan` cron entry; `Identity.kind` ∈ {external (default), self-hosting} + optional `agent_cwd`), `src/application/config-validator.ts` (self-hosting cross-field invariant — `agent_cwd` MUST be outside `workdir_path`), `src/application/dual-track-scheduler.ts` (consumer of `dual_track.priority` + `refactor_scheduled_capacity`). `loop_policies.<phase>.session_idle_seconds_p99` telemetry는 5c/6b | stage_graded:dual_slot_fairness=warn | 2026-05-05-loop |
 | `TCC-REFACTOR-METRICS` ★ | spec-only | `application/knowledge.sh` + scout scan (Stage 4) | stage_graded:refactor_metric_missing=warn | 2026-05-05-loop |
 | `TCC-CONTEXT-BUDGET` ★ | partial | `src/config/target-schema.ts` (`ContextBudget` Zod record over `LoopStep` enum — `outer.{Discovery,Specification,Planning,Validation}` / `middle.{review,merge}` / `inner.tdd_build`; `ContextBudgetEntry` `{token_hard_cap, soft_warn_pct?}`; `resolveContextBudget` lookup with `CONTEXT_BUDGET_DEFAULTS` from architecture defaults), `src/application/prompt-compose.ts` (`composePromptWithBudget` consumer — sums `ManifestEntry.token_estimate`, applies AGC-CONTEXT-BUDGET truncation priority, surfaces `context_budget_truncation`) | always_hard (overflow → invalid envelope) | 2026-05-05-loop (phase 8a) |
-| `TCC-ENFORCEMENT` ★ | partial | `src/config/target-schema.ts` (`InvariantEnforcement` Zod block: `always_hard[]` + `stage_graded` record of warn\|block), `src/application/invariant-enforcement.ts` (`resolveEnforcementLevel` — pure lookup; Stage 5 promotes every stage_graded entry to block; unknown invariants fail closed; `promoteToStage5` helper). Per-call-site wiring (each existing `stage_graded:<name>=warn` row 가 resolveEnforcementLevel 을 통과하도록) 은 후속 phase 가 보강 | always_hard (값 자체의 schema) | 2026-05-05-loop (phase 6b Stage 5 reach) |
+| `TCC-ENFORCEMENT` ★ | partial | `src/config/target-schema.ts` (`InvariantEnforcement` Zod block: `always_hard[]` + `stage_graded` record of warn\|block), `src/application/invariant-enforcement.ts` (`resolveEnforcementLevel` — pure lookup; Stage 5 promotes every stage_graded entry to block; unknown invariants fail closed; `promoteToStage5` helper), `src/cli/daemon.ts` (only wired call-site to date — `actor_team_membership_unreachable` lookup, phase 9a). Per-call-site wiring matrix is captured in [TCC-ENFORCEMENT-AUDIT](#TCC-ENFORCEMENT-AUDIT) (phase 9c G4-5). Other `stage_graded` invariants currently rely on the Stage 5 default-block fallback because their evaluators do not yet route through `resolveEnforcementLevel`; follow-up phases must wire them so operator overrides take effect. | always_hard (값 자체의 schema) + stage_graded default block at Stage 5 | 2026-05-05-loop (phase 6b Stage 5 reach; phase 9c call-site audit) |
 | `TCC-PRECEDENCE` | partial | `lib/config.sh`, env loading | always_hard | original |
 | `TCC-CHANGE-RULES` | spec-only | contract prose. ledger helper (Stage 2) | always_hard (변경 ledger 기록) | 2026-05-05-loop (invariant_enforcement 변경 ledger 추가) |
 | `TCC-GOVERNANCE` ★ | partial | `src/config/target-schema.ts` (Zod parse), `src/ports/team-membership.ts` (`TeamMembershipPort.isMember` — member / non_member / unreachable triad), `src/adapters/team-membership/github.ts` (`GitHubTeamMembership` — `gh api /orgs/{org}/teams/{slug}/memberships/{user}` + TTL cache), `src/adapters/team-membership/fs-mirror.ts` (`FsMirrorTeamMembership` — deterministic allowlist for tests / self-hosting), `src/application/human-signal-binding.ts` (actor verification hook before `human_approval` contribution + `signal_apply` ledger row `result=invalid` `result_detail=actor_not_in_human_team`), `src/cli/daemon.ts` (outer-coordinator wiring with `actor_team_membership_unreachable` policy via `resolveEnforcementLevel`) | always_hard (governance schema 검증) + stage_graded:actor_team_membership_unreachable=block (Inv #5 — phase 9a) | 2026-05-06-human-github-boundary (phase 9a G2-4) |
@@ -440,3 +440,42 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 | `ARC-ADAPTER-PROMPT-CONTRACT` ★ | partial | `src/adapters/llm-runner/common/prompt-relay.ts` (`assertFourPartLayout`), `src/ports/llm-runner-executor.ts` (preflight before adapter spawn), `src/adapters/llm-runner/claude-code.ts`, `src/adapters/llm-runner/codex-cli.ts`, `src/adapters/llm-runner/fake.ts` (provider adapters relay stdin verbatim) | always_hard (4-part layout 보존) | 2026-05-05-loop |
 | `ARC-ADAPTER-SUBSTITUTION` | spec-only | `TCC-AGENT-PROFILES` binding (Stage 2) | always_hard (agent_profile_id 기반) | phase-pivot |
 | `ARC-FAILURE-MODES` | active | `lib/ports/llm_runner.sh`, `scheduler/runner.sh` | n/a (분류) | original |
+
+<a id="TCC-ENFORCEMENT-AUDIT"></a>
+## TCC-ENFORCEMENT-AUDIT: Call-site Matrix (phase 9c, G4-5)
+
+본 절은 `TCC-ENFORCEMENT` 의 `always_hard` / `stage_graded` invariant 가 실제 코드에서 어디에서 평가되는지, 그리고 평가 경로가 `resolveEnforcementLevel(...)` 을 통과하는지를 추적한다. Stage 5 default 동작 (모든 `stage_graded` 항목이 block 으로 강제) 은 `src/application/invariant-enforcement.ts` 의 `resolveEnforcementLevel` 함수 내부에 박혀 있다. 따라서 해당 함수를 호출하지 않는 call-site 에서는 Stage 5 promotion 이 적용되지 않으며, 미배선 항목의 실제 block/warn 거동은 항목별로 (자체 경로 hardcoded / detector 미구현 / branch 부재) 달라진다. 자세한 분기는 아래 *Audit 결론* 을 참조.
+
+### `stage_graded` 호출처 매트릭스
+
+| Invariant | Default mode | Evaluation site(s) | Routes through `resolveEnforcementLevel`? | Status |
+|---|---|---|---|---|
+| `actor_team_membership_unreachable` | `block` (phase 9a) | `src/cli/daemon.ts` (outer-coordinator wiring), `src/application/human-signal-binding.ts` (consumer of resolved policy) | yes | wired (phase 9a) |
+| `scope_violation` | `warn` (Stage 3b block) | `src/application/envelope.ts` (`AGC_INVALID_REASONS`), `src/application/termination-evaluator.ts` (`scope_violation` abandoned_reason), `src/application/failure-policy.ts` (inner streak classifier) | no — hardcoded `block` semantics via AGC-INVALID + abandoned reason | deferred (no operator override path) |
+| `dual_slot_fairness` | `warn` (Stage 5 block) | `src/application/cross-slot-fairness.ts` (`orderByCrossSlotPriority` ordering), `src/application/dual-track-scheduler.ts` (caller, reads `target.dual_track.priority`) | no — ordering function has no warn/block branch (config-driven only) | deferred (no enforcement-level branch yet) |
+| `required_evidence_unmet` | `warn` (Stage 3b block) | `src/application/termination-evaluator.ts` (`finalization_decision: "required_evidence"`) | no — emits invalid envelope unconditionally | deferred (Stage 5 default block already enforced) |
+| `fairness_violation` | `warn` | `src/application/fairness.ts` (`sortFairly` / `pickFairly` — within-scope FIFO) | no — purely structural ordering, no violation detector exists | deferred (detector not yet implemented) |
+| `telemetry_enrichment_missing` | `warn` | `src/application/cross-slot-stale.ts` (commented ack), `src/application/outer-turn.ts` (KAC-SLICE-TELEMETRY emit comment) | no — comment-only acknowledgement | deferred (no warn/block guard) |
+| `turn_log_compaction_delay` | `warn` | `src/application/turn-log-compaction.ts` (`shouldCompactTurnLog` — trigger function) | no — boolean trigger, no enforcement branch | deferred |
+| `refactor_metric_missing` | `warn` | `src/application/refactor-backlog.ts` (`scoutScan` — fingerprint dedup), scout-observer | no — metric absence is currently silent | deferred (no detector emits the violation) |
+
+### `always_hard` 호출처 매트릭스
+
+| Invariant | Evaluation site(s) | Notes |
+|---|---|---|
+| `caller_only_operational_write` | `src/application/envelope.ts` (`CALLER_ONLY_FIELDS` rejection in `parseAgentAuthored`) | already block — no resolveEnforcementLevel needed |
+| `direct_invocation_forbidden` | spec-only (contract prose) | no implementation surface yet |
+| `manifest_external_read_write` | `src/application/manifest-builder.ts` (`AGC-CONTEXT-MANIFEST` + `recheckPins`) | block via AGC-INVALID flow |
+| `lease_acquisition_order` | `src/application/lease-acquisition-order.ts` (`assertCanAcquire` / `checkCanAcquire`), `tests/conformance/phase-4.test.ts` (CI gate) | block via thrown exception |
+| `stateless_per_call` | `src/ports/llm-runner-executor.ts` (`runInvoke` — turn 단위 stateless contract), `src/application/agent-io.ts` | block via runtime contract enforcement |
+
+### Audit 결론
+
+- **wired**: 1 / 8 stage_graded invariants (actor_team_membership_unreachable, phase 9a). `resolveEnforcementLevel(...)` 호출이 실제 call-site 에 박혀 있어, target operator 가 warn 으로 downgrade 하면 효력을 갖는다.
+- **deferred (7 stage_graded)**: matrix 의 *Routes through resolver? = no* 행이 모두 deferred 다. Stage 5 promotion 로직은 `resolveEnforcementLevel` 함수 내부에서만 동작하므로, 해당 함수를 호출하지 않는 call-site 에는 적용되지 않는다. 실제 block/warn 거동은 항목별로 다음과 같이 갈린다:
+  - **자체 경로 hardcoded block** — `scope_violation` (AGC-INVALID), `required_evidence_unmet` (invalid envelope unconditionally). 위반 시 block 은 발생하나 Stage 5 promotion 덕분이 아니라 자체 로직이며, operator override hook 은 없다.
+  - **detector 미구현** — `fairness_violation` (detector 자체 부재), `refactor_metric_missing` (metric 부재 silent). 위반 자체가 감지되지 않아 block 도 warn 도 발생하지 않는다.
+  - **enforcement-level branch 부재** — `dual_slot_fairness` (config-driven ordering only), `telemetry_enrichment_missing` (comment-only ack), `turn_log_compaction_delay` (boolean trigger). evaluator 가 존재해도 warn/block 분기 자체가 없다.
+- **always_hard**: 5 항목 중 4 항목 (`caller_only_operational_write` / `manifest_external_read_write` / `lease_acquisition_order` / `stateless_per_call`) 은 코드 경로상 block 이 보장된다. `direct_invocation_forbidden` 은 contract spec-only 이며 runtime 구현 표면이 없으므로 "감사됨" 일 뿐 runtime block 보장 항목에서는 제외된다.
+
+배선되지 않은 7 stage_graded invariant 의 평가자에 `resolveEnforcementLevel(...)` 을 통과시키는 작업은 본 phase 의 범위를 벗어난다 (각각 별도 detector / branching 도입 필요). 추적은 본 매트릭스의 *deferred* 행으로 남기며, 후속 cycle 이 invariant 단위로 wire 한다.
