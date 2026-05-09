@@ -354,6 +354,7 @@ export async function runOneOuterTurn(
     session.session_id,
     deps.store,
     deliveryTelemetry?.telemetry ?? null,
+    deliveryTelemetry?.deliveryMilestoneId ?? null,
   );
   const manifestBuilder = new ManifestBuilder(pinResolver, deps.clock);
   const manifest = await manifestBuilder.build({
@@ -929,6 +930,7 @@ class OuterPinResolver implements RevisionPinResolver {
     private readonly sessionId: string,
     private readonly store: StorePort,
     private readonly deliveryTelemetry: SliceTelemetryT | null,
+    private readonly deliveryMilestoneId: string | null,
   ) {}
   async resolve(entry: ManifestEntryDraft): Promise<string> {
     if (entry.object_kind === "milestone") {
@@ -957,13 +959,24 @@ class OuterPinResolver implements RevisionPinResolver {
       // KAC-SLICE-TELEMETRY (phase 8b): pin = telemetry audit_hash. Drift
       // (Delivery emits a new audit_hash) trips the manifest stale-pin
       // gate AND RGC-CROSS-SLOT-STALE in `cross-slot-stale.ts`.
-      if (
-        this.deliveryTelemetry != null &&
-        this.deliveryTelemetry.telemetry_id === entry.object_id
-      ) {
-        return this.deliveryTelemetry.audit_hash;
+      //
+      // PR #77 P0-2 fix: re-read the live latest telemetry pointer for the
+      // pinned Delivery milestone. ManifestBuilder.recheckPins() resolves
+      // each entry again after callAgent, so without this live re-read a
+      // mid-turn Delivery emit (new audit_hash on the same milestone)
+      // would not trip the stale gate — the resolver would keep returning
+      // the snapshot's audit_hash. We compare by Delivery milestone_id
+      // rather than telemetry_id because the telemetry_id rotates on every
+      // emit; the milestone is the stable identity for "Delivery N".
+      if (this.deliveryMilestoneId == null) {
+        return `missing:${entry.object_id}`;
       }
-      return `missing:${entry.object_id}`;
+      const live = await loadLatestSliceTelemetry(
+        this.store,
+        this.deliveryMilestoneId,
+      );
+      if (live == null) return `missing:${entry.object_id}`;
+      return live.audit_hash;
     }
     return this.milestone.updated_at;
   }

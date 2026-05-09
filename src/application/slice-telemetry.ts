@@ -88,127 +88,144 @@ export async function emitSliceTelemetry(
   input: EmitSliceTelemetryInput,
   deps: SliceTelemetryDeps,
 ): Promise<EmitSliceTelemetryResult> {
-  const slices = await listSlicesForMilestone(deps.store, input.milestone_id);
+  // PR #77 P1 fix: serialise emits per Delivery milestone via the pointer
+  // file lock. Without this the (load prior) → (writeAtomic file) →
+  // (writeAtomic pointer) sequence is split into separate steps, so two
+  // concurrent emits can both observe the same prior and persist distinct
+  // telemetry_id / audit_hash records (each with its own ledger row) for
+  // the same partition snapshot. Locking the pointer path is sufficient
+  // because every reader (manifest inject, cross-slot drift) goes through
+  // the pointer to resolve the live telemetry.
+  const pointerPath = layout.latestSliceTelemetryByMilestone(input.milestone_id);
+  return await deps.store.withFileLock(pointerPath, async () => {
+    const slices = await listSlicesForMilestone(deps.store, input.milestone_id);
 
-  const in_progress: TelemetryInProgressSlice[] = [];
-  const validated: TelemetryValidatedSlice[] = [];
-  const blocked: TelemetryBlockedSlice[] = [];
-  for (const s of slices) {
-    if (IN_PROGRESS_STATES.has(s.state)) {
-      in_progress.push({
-        slice_id: s.slice_id,
-        slice_kind: s.slice_kind,
-        state: s.state,
-        current_session_id: s.current_session_id,
-      });
-    } else if (s.state === "SLICE_VALIDATED") {
-      validated.push({
-        slice_id: s.slice_id,
-        slice_kind: s.slice_kind,
-        // SOC-MERGE-POLICY: the slice's `dod_revision_pin` carries the
-        // post-merge validated revision. trunk_base_revision pre-dates the
-        // merge so we prefer dod_revision_pin when present.
-        validated_revision: s.dod_revision_pin,
-      });
-    } else if (s.state === "SLICE_BLOCKED") {
-      blocked.push({
-        slice_id: s.slice_id,
-        slice_kind: s.slice_kind,
-        abandoned_reason: s.abandoned_reason,
-      });
+    const in_progress: TelemetryInProgressSlice[] = [];
+    const validated: TelemetryValidatedSlice[] = [];
+    const blocked: TelemetryBlockedSlice[] = [];
+    for (const s of slices) {
+      if (IN_PROGRESS_STATES.has(s.state)) {
+        in_progress.push({
+          slice_id: s.slice_id,
+          slice_kind: s.slice_kind,
+          state: s.state,
+          current_session_id: s.current_session_id,
+        });
+      } else if (s.state === "SLICE_VALIDATED") {
+        validated.push({
+          slice_id: s.slice_id,
+          slice_kind: s.slice_kind,
+          // SOC-MERGE-POLICY: the slice's `dod_revision_pin` carries the
+          // post-merge validated revision. trunk_base_revision pre-dates the
+          // merge so we prefer dod_revision_pin when present.
+          validated_revision: s.dod_revision_pin,
+        });
+      } else if (s.state === "SLICE_BLOCKED") {
+        blocked.push({
+          slice_id: s.slice_id,
+          slice_kind: s.slice_kind,
+          abandoned_reason: s.abandoned_reason,
+        });
+      }
     }
-  }
 
-  // Sort each partition by slice_id so the audit_hash is deterministic.
-  in_progress.sort((a, b) => a.slice_id.localeCompare(b.slice_id));
-  validated.sort((a, b) => a.slice_id.localeCompare(b.slice_id));
-  blocked.sort((a, b) => a.slice_id.localeCompare(b.slice_id));
+    // Sort each partition by slice_id so the audit_hash is deterministic.
+    in_progress.sort((a, b) => a.slice_id.localeCompare(b.slice_id));
+    validated.sort((a, b) => a.slice_id.localeCompare(b.slice_id));
+    blocked.sort((a, b) => a.slice_id.localeCompare(b.slice_id));
 
-  const telemetry_id = newMonotonicId(deps.clock.now());
-  const generated_at = deps.clock.isoNow();
-  const body = {
-    telemetry_id,
-    milestone_id: input.milestone_id,
-    generated_at,
-    in_progress_slices: in_progress,
-    validated_slices: validated,
-    blocked_slices: blocked,
-    recent_session_outcomes: [...(input.recent_session_outcomes ?? [])],
-    edge_cases: [...(input.edge_cases ?? [])],
-    recent_metric_runs: [...(input.recent_metric_runs ?? [])],
-  };
-  // body-only audit_hash — KAC-MANIFEST consumers must recompute it from
-  // the persisted record minus audit_hash. The id+generated_at are
-  // intentionally part of the body-hash because they bind the audit chain
-  // to a specific persisted instance — but that means a no-op call would
-  // compute a *new* hash every invocation. The idempotency check below
-  // recomputes the hash *with the prior id+generated_at* to dedup.
-  const audit_hash = bodyAuditHash(body);
-  const built: SliceTelemetryT = SliceTelemetry.parse({ ...body, audit_hash });
+    const telemetry_id = newMonotonicId(deps.clock.now());
+    const generated_at = deps.clock.isoNow();
+    const body = {
+      telemetry_id,
+      milestone_id: input.milestone_id,
+      generated_at,
+      in_progress_slices: in_progress,
+      validated_slices: validated,
+      blocked_slices: blocked,
+      recent_session_outcomes: [...(input.recent_session_outcomes ?? [])],
+      edge_cases: [...(input.edge_cases ?? [])],
+      recent_metric_runs: [...(input.recent_metric_runs ?? [])],
+    };
+    // body-only audit_hash — KAC-MANIFEST consumers must recompute it from
+    // the persisted record minus audit_hash. The id+generated_at are
+    // intentionally part of the body-hash because they bind the audit chain
+    // to a specific persisted instance — but that means a no-op call would
+    // compute a *new* hash every invocation. The idempotency check below
+    // recomputes the hash *with the prior id+generated_at* to dedup.
+    const audit_hash = bodyAuditHash(body);
+    const built: SliceTelemetryT = SliceTelemetry.parse({ ...body, audit_hash });
 
-  // Idempotent: if a prior telemetry exists for this milestone AND its
-  // partition shape is identical, reuse it. Identity is checked by
-  // recomputing the prior body's audit_hash against a copy of the prior
-  // record with this call's `telemetry_id` / `generated_at` substituted —
-  // i.e. compare the partition fields only.
-  const prior = await loadLatestSliceTelemetry(deps.store, input.milestone_id);
-  if (prior != null && partitionEquivalent(prior, built)) {
-    return { telemetry: prior, persisted: false };
-  }
+    // Idempotent: if a prior telemetry exists for this milestone AND its
+    // partition shape is identical, reuse it. Identity is checked by
+    // recomputing the prior body's audit_hash against a copy of the prior
+    // record with this call's `telemetry_id` / `generated_at` substituted —
+    // i.e. compare the partition fields only.
+    const prior = await loadLatestSliceTelemetry(deps.store, input.milestone_id);
+    if (prior != null && partitionEquivalent(prior, built)) {
+      return { telemetry: prior, persisted: false };
+    }
 
-  await deps.store.writeAtomic(
-    layout.sliceTelemetry(telemetry_id),
-    JSON.stringify(built, null, 2),
-  );
-  await deps.store.writeAtomic(
-    layout.latestSliceTelemetryByMilestone(input.milestone_id),
-    JSON.stringify({ telemetry_id }, null, 2),
-  );
-  await deps.ledger.appendTransition({
-    transition_id: newMonotonicId(deps.clock.now()),
-    target_id: deps.targetId,
-    object_id: telemetry_id,
-    object_kind: "system",
-    from_state: prior?.audit_hash ?? null,
-    to_state: audit_hash,
-    loop_kind: null,
-    phase: null,
-    slice_id: null,
-    slice_kind: null,
-    dod_revision: null,
-    session_id: null,
-    turn_index: null,
-    slot_kind: null,
-    agent_profile_id: null,
-    contribution_kind: null,
-    action_kind: "external_observation",
-    final_verdict: null,
-    caller_id: deps.callerId,
-    manifest_id: null,
-    input_revision_pins: [],
-    output_hash: null,
-    verification_run_id: null,
-    metric_run_id: null,
-    idempotency_key: idempotencyKey({
-      scope: "external_observation",
-      parts: {
-        kind: "slice_telemetry_emit",
-        milestone_id: input.milestone_id,
-        audit_hash,
-      },
-    }),
-    lease_token: null,
-    lease_kind: null,
-    result: "applied",
-    result_detail: null,
-    timestamp: deps.clock.isoNow(),
+    await deps.store.writeAtomic(
+      layout.sliceTelemetry(telemetry_id),
+      JSON.stringify(built, null, 2),
+    );
+    await deps.store.writeAtomic(
+      layout.latestSliceTelemetryByMilestone(input.milestone_id),
+      JSON.stringify({ telemetry_id }, null, 2),
+    );
+    await deps.ledger.appendTransition({
+      transition_id: newMonotonicId(deps.clock.now()),
+      target_id: deps.targetId,
+      object_id: telemetry_id,
+      object_kind: "system",
+      from_state: prior?.audit_hash ?? null,
+      to_state: audit_hash,
+      loop_kind: null,
+      phase: null,
+      slice_id: null,
+      slice_kind: null,
+      dod_revision: null,
+      session_id: null,
+      turn_index: null,
+      slot_kind: null,
+      agent_profile_id: null,
+      contribution_kind: null,
+      action_kind: "external_observation",
+      final_verdict: null,
+      caller_id: deps.callerId,
+      manifest_id: null,
+      input_revision_pins: [],
+      output_hash: null,
+      verification_run_id: null,
+      metric_run_id: null,
+      idempotency_key: idempotencyKey({
+        scope: "external_observation",
+        parts: {
+          kind: "slice_telemetry_emit",
+          milestone_id: input.milestone_id,
+          audit_hash,
+        },
+      }),
+      lease_token: null,
+      lease_kind: null,
+      result: "applied",
+      result_detail: null,
+      timestamp: deps.clock.isoNow(),
+    });
+    return { telemetry: built, persisted: true };
   });
-  return { telemetry: built, persisted: true };
 }
 
 /**
  * Resolve the latest SliceTelemetry for `milestone_id` via the pointer
  * file. Returns null if no telemetry has been emitted yet.
+ *
+ * PR #77 P1 fix: recompute `audit_hash` from the persisted body (minus
+ * audit_hash) and reject the record when it disagrees with the stored
+ * value. Without this check, an actor able to write the telemetry file
+ * could forge an `audit_hash` and bypass the manifest stale-pin gate +
+ * RGC-CROSS-SLOT-STALE drift comparison.
  */
 export async function loadLatestSliceTelemetry(
   store: StorePort,
@@ -227,11 +244,16 @@ export async function loadLatestSliceTelemetry(
   if (typeof pointer.telemetry_id !== "string") return null;
   const body = await store.readText(layout.sliceTelemetry(pointer.telemetry_id));
   if (body == null) return null;
+  let parsed: SliceTelemetryT;
   try {
-    return SliceTelemetry.parse(JSON.parse(body));
+    parsed = SliceTelemetry.parse(JSON.parse(body));
   } catch {
     return null;
   }
+  const { audit_hash, ...rest } = parsed;
+  const recomputed = bodyAuditHash(rest);
+  if (recomputed !== audit_hash) return null;
+  return parsed;
 }
 
 async function listSlicesForMilestone(

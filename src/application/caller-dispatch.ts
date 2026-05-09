@@ -48,6 +48,7 @@ import {
   promoteSliceMergeToApproved,
   type SliceMergeOpDeps,
 } from "./slice-merge.js";
+import { emitSliceTelemetry } from "./slice-telemetry.js";
 
 export interface DispatchInput {
   parent_loop: ParentLoop;
@@ -150,6 +151,26 @@ export async function dispatchOutcome(
   return { kind: "applied", effects: entry.effects, details };
 }
 
+/**
+ * Phase 8b — KAC-SLICE-TELEMETRY emit hook. Invoked AFTER the terminal
+ * Slice state transition for each dispatch effect so the partition snapshot
+ * reflects the post-transition state (Inv #3: Discovery N+1 manifest pin
+ * sees the live Delivery slice partition). Failures are non-fatal — the
+ * telemetry is read-side enrichment with warn-grade enforcement.
+ */
+async function emitTelemetryAfterTransition(
+  milestoneId: string,
+  smOpDeps: SliceMergeOpDeps,
+): Promise<void> {
+  try {
+    await emitSliceTelemetry({ milestone_id: milestoneId }, smOpDeps);
+  } catch {
+    // Swallow — telemetry emit is read-side enrichment; surfacing here
+    // would abort the dispatch after the slice transition has already
+    // committed.
+  }
+}
+
 async function runEffect(
   effect: DispatchEffect,
   input: DispatchInput,
@@ -172,6 +193,7 @@ async function runEffect(
         loop_kind: "inner",
         session_id: input.sessionId,
       });
+      await emitTelemetryAfterTransition(input.slice.milestone_id, smOpDeps);
       return {
         effect: "open_slice_merge_for_review",
         sliceMergeId: sm.slice_merge_id,
@@ -192,6 +214,7 @@ async function runEffect(
         loop_kind: "inner",
         session_id: input.sessionId,
       });
+      await emitTelemetryAfterTransition(input.slice.milestone_id, smOpDeps);
       return {
         effect: "close_slice_merge_blocked",
         sliceMergeId: input.sliceMerge.slice_merge_id,
@@ -243,6 +266,7 @@ async function runEffect(
           loop_kind: "middle",
           session_id: input.sessionId,
         });
+        await emitTelemetryAfterTransition(input.slice.milestone_id, smOpDeps);
         return {
           effect: "promote_slice_merge_to_approved_then_integrate",
           integrate: {
@@ -267,6 +291,7 @@ async function runEffect(
         loop_kind: "middle",
         session_id: input.sessionId,
       });
+      await emitTelemetryAfterTransition(input.slice.milestone_id, smOpDeps);
       return {
         effect: "promote_slice_merge_to_approved_then_integrate",
         integrate: {
@@ -293,6 +318,7 @@ async function runEffect(
         session_id: input.sessionId,
         clear_current_session: true,
       });
+      await emitTelemetryAfterTransition(input.slice.milestone_id, smOpDeps);
       return {
         effect: "reset_slice_for_rebuild",
         sliceMergeId: input.sliceMerge.slice_merge_id,

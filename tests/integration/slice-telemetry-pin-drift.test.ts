@@ -34,7 +34,12 @@ import {
   emitSliceTelemetry,
   loadLatestSliceTelemetry,
 } from "../../src/application/slice-telemetry.js";
-import { promoteSliceMergeToApproved } from "../../src/application/slice-merge.js";
+import { dispatchOutcome } from "../../src/application/caller-dispatch.js";
+import { FakeVerification } from "../../src/adapters/verification/fake.js";
+import { FakeWorkspace } from "../../src/adapters/workspace/fake.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DialogueSession } from "../../src/domain/schema/dialogue-session.js";
 import { LedgerRow } from "../../src/domain/schema/ledger.js";
 import {
@@ -234,23 +239,29 @@ describe("emitSliceTelemetry — partition + persistence", () => {
   });
 });
 
-describe("slice-merge.ts wiring — emit on transition", () => {
-  it("promoteSliceMergeToApproved emits a fresh SliceTelemetry for the slice's milestone", async () => {
+describe("caller-dispatch wiring — emit after slice transition", () => {
+  it("inner CONVERGED tests_green dispatch emits SliceTelemetry capturing the post-transition (SLICE_REVIEWING) partition", async () => {
+    // PR #77 P0-1 fix: emit hook moved out of slice-merge.ts and into
+    // caller-dispatch.ts so the partition snapshot reflects the *post*
+    // Slice state transition. Calling slice-merge ops directly no longer
+    // emits — dispatchOutcome is the contract surface.
     const store = new MemoryStore();
     const clock = new FixedClock(Date.parse(ISO_BASE));
-    const deps = makeDeps(store, clock);
+    const ledgerDeps = makeDeps(store, clock);
 
     await dropMilestone(store, M_DELIVERY, "M_DELIVERY_BUILDING", ISO_BASE);
-    await dropSlice(store, SLICE_A, M_DELIVERY, "SLICE_REVIEWING");
+    // Seed slice in SLICE_BUILDING — the dispatch will move it to
+    // SLICE_REVIEWING and the emit must observe SLICE_REVIEWING.
+    await dropSlice(store, SLICE_A, M_DELIVERY, "SLICE_BUILDING");
     const sm = SliceMerge.parse({
       slice_merge_id: SM_ID,
       slice_id: SLICE_A,
       target_id: TARGET_ID,
-      state: "SM_READY_FOR_REVIEW",
+      state: "SM_DRAFT",
       inner_session_id: SESSION_REVIEW,
       review_session_id: null,
-      verification_run_id: VERIF_ID,
-      pre_merge_workspace_revision: "pre-merge-revision",
+      verification_run_id: null,
+      pre_merge_workspace_revision: null,
       merge_revision: null,
       merged_at: null,
       merged_by_caller_id: null,
@@ -262,15 +273,39 @@ describe("slice-merge.ts wiring — emit on transition", () => {
       layout.sliceMerge(SM_ID),
       JSON.stringify(sm, null, 2),
     );
+    const slicePath = layout.slice(SLICE_A);
+    const sliceBody = await store.readText(slicePath);
+    const slice = Slice.parse(JSON.parse(sliceBody!));
 
     expect(await loadLatestSliceTelemetry(store, M_DELIVERY)).toBeNull();
-    await promoteSliceMergeToApproved(
-      { sliceMerge: sm, reviewSessionId: SESSION_REVIEW, sliceKind: "feature" },
-      deps,
+
+    const wsRoot = mkdtempSync(join(tmpdir(), "slice-telemetry-wiring-"));
+    await dispatchOutcome(
+      {
+        parent_loop: "inner",
+        phase_or_purpose: "tdd_build",
+        session_state: "CONVERGED",
+        final_verdict: "tests_green",
+        slice,
+        sliceMerge: sm,
+        sessionId: SESSION_REVIEW,
+        verificationRunId: VERIF_ID,
+        preMergeRevision: "pre-merge-revision",
+        environmentFingerprint: "fp",
+      },
+      {
+        ...ledgerDeps,
+        workspace: new FakeWorkspace(wsRoot),
+        verification: new FakeVerification(clock),
+      },
     );
     const telem = await loadLatestSliceTelemetry(store, M_DELIVERY);
     expect(telem).not.toBeNull();
-    expect(telem!.in_progress_slices.map((s) => s.slice_id)).toContain(SLICE_A);
+    // Post-transition: SLICE_REVIEWING (not SLICE_BUILDING from before
+    // dispatch). This is the Inv #3 contract — Discovery N+1 sees the
+    // post-transition partition.
+    const ip = telem!.in_progress_slices.find((s) => s.slice_id === SLICE_A);
+    expect(ip?.state).toBe("SLICE_REVIEWING");
   });
 });
 
@@ -285,6 +320,7 @@ describe("RGC-CROSS-SLOT-STALE — pin drift detection", () => {
     store: MemoryStore,
     milestoneIdToPin: string,
     pinAuditHash: string,
+    pinnedTelemetryId: string = "01HZTM0000000000000000000A",
   ): Promise<void> {
     const session = DialogueSession.parse({
       session_id: SESSION_DISCOVERY,
@@ -331,7 +367,7 @@ describe("RGC-CROSS-SLOT-STALE — pin drift detection", () => {
         },
         {
           object_kind: "slice_telemetry",
-          object_id: "01HZTM0000000000000000000A",
+          object_id: pinnedTelemetryId,
           fetch_scope: "body",
           revision_pin: pinAuditHash,
           required: false,
@@ -368,7 +404,12 @@ describe("RGC-CROSS-SLOT-STALE — pin drift detection", () => {
 
     // Initial telemetry — Discovery session pins to this audit_hash.
     const t0 = await emitSliceTelemetry({ milestone_id: M_DELIVERY }, deps);
-    await seedDiscoveryWithPin(store, M_DELIVERY, t0.telemetry.audit_hash);
+    await seedDiscoveryWithPin(
+      store,
+      M_DELIVERY,
+      t0.telemetry.audit_hash,
+      t0.telemetry.telemetry_id,
+    );
 
     // Delivery progresses — slice flips to SLICE_VALIDATED, new emit
     // produces a different audit_hash.
@@ -421,7 +462,12 @@ describe("RGC-CROSS-SLOT-STALE — pin drift detection", () => {
     await dropSlice(store, SLICE_A, M_DELIVERY, "SLICE_BUILDING");
 
     const t0 = await emitSliceTelemetry({ milestone_id: M_DELIVERY }, deps);
-    await seedDiscoveryWithPin(store, M_DELIVERY, t0.telemetry.audit_hash);
+    await seedDiscoveryWithPin(
+      store,
+      M_DELIVERY,
+      t0.telemetry.audit_hash,
+      t0.telemetry.telemetry_id,
+    );
 
     const out = await detectCrossSlotStaleSessions(deps);
     expect(out.staledSessionIds).toEqual([]);

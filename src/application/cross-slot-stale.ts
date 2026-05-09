@@ -46,6 +46,7 @@ import {
   type Milestone as MilestoneT,
   type MilestoneState,
 } from "../domain/schema/milestone.js";
+import { SliceTelemetry } from "../domain/schema/knowledge.js";
 import { newMonotonicId } from "../domain/ids.js";
 import type { ClockPort } from "../ports/clock.js";
 import type { StorePort } from "../ports/store.js";
@@ -275,37 +276,53 @@ async function detectDriftForSession(
   latestDeliveryUpdate: string,
   store: StorePort,
 ): Promise<DriftKind | null> {
-  const pin = await loadInjectedTelemetryPin(sess, store);
-  if (pin != null) {
-    // Find the Delivery milestone that this Discovery session was paired
-    // with — the inject path always picks the most-recently-updated
-    // Delivery in the same target. We mirror that selection here. If no
-    // matching Delivery exists anymore (e.g. archived), drop back to the
-    // conservative trigger.
-    const candidates = deliveryFamily
-      .filter(
+  const inject = await loadInjectedTelemetryPin(sess, store);
+  if (inject != null) {
+    // PR #77 P1 fix: pin the comparison to the *original* Delivery
+    // milestone the manifest was built against. The previous logic
+    // re-selected "most-recently-updated Delivery in the target" at
+    // detection time, which could swap to a different Delivery and
+    // produce false-stale (different milestone's telemetry compared) or
+    // missed-stale (the pinned milestone got rotated past). We resolve
+    // the pinned telemetry record (by its `telemetry_id` = manifest
+    // entry's object_id) to recover its `milestone_id`, then compare
+    // against that milestone's *current* telemetry only.
+    const pinnedDeliveryMilestoneId = await resolvePinnedDeliveryMilestoneId(
+      inject.telemetryId,
+      store,
+    );
+    if (pinnedDeliveryMilestoneId != null) {
+      // Confirm the pinned Delivery still exists and matches this
+      // Discovery's target (else fall through to the conservative
+      // trigger).
+      const pinnedDeliveryStillKnown = deliveryFamily.some(
         (m) =>
           m.target_id === discoveryMilestone.target_id &&
-          m.milestone_id !== discoveryMilestone.milestone_id,
-      )
-      .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
-    const deliveryN = candidates[0];
-    if (deliveryN != null) {
-      const live = await loadLatestSliceTelemetry(store, deliveryN.milestone_id);
-      if (live != null && live.audit_hash !== pin) {
-        return { kind: "telemetry_pin_drift", value: live.audit_hash };
-      }
-      if (live != null && live.audit_hash === pin) {
-        // Pin matches live telemetry — explicit "no drift" signal. Skip
-        // the fallback trigger so a moved Delivery updated_at without a
-        // material slice change does not re-stale.
-        return null;
-      }
-      // live==null but a pin existed: Delivery telemetry was rotated /
-      // archived — treat as drift.
-      if (live == null) {
+          m.milestone_id !== discoveryMilestone.milestone_id &&
+          m.milestone_id === pinnedDeliveryMilestoneId,
+      );
+      if (pinnedDeliveryStillKnown) {
+        const live = await loadLatestSliceTelemetry(
+          store,
+          pinnedDeliveryMilestoneId,
+        );
+        if (live != null && live.audit_hash !== inject.pin) {
+          return { kind: "telemetry_pin_drift", value: live.audit_hash };
+        }
+        if (live != null && live.audit_hash === inject.pin) {
+          // Pin matches live telemetry — explicit "no drift" signal. Skip
+          // the fallback trigger so a moved Delivery updated_at without a
+          // material slice change does not re-stale.
+          return null;
+        }
+        // live==null but a pin existed: Delivery telemetry was rotated /
+        // archived — treat as drift.
         return { kind: "telemetry_pin_drift", value: "<missing>" };
       }
+    } else {
+      // The pinned telemetry record itself is gone — treat as drift so
+      // the Discovery session re-resolves its base on next pickup.
+      return { kind: "telemetry_pin_drift", value: "<missing>" };
     }
   }
   // Fallback — phase-6a conservative trigger. Over-fires by design;
@@ -318,14 +335,16 @@ async function detectDriftForSession(
 }
 
 /**
- * Resolve the slice_telemetry manifest entry's `revision_pin` from the
- * session's most-recent SessionTurn's `input_manifest_id`. Returns null
- * when no turn exists yet or the manifest has no slice_telemetry entry.
+ * Resolve the slice_telemetry manifest entry from the session's most-recent
+ * SessionTurn's `input_manifest_id`. Returns the entry's `revision_pin`
+ * (the pinned `audit_hash`) and `object_id` (the pinned `telemetry_id`).
+ * Returns null when no turn exists yet or the manifest has no slice_telemetry
+ * entry.
  */
 async function loadInjectedTelemetryPin(
   sess: DialogueSessionT,
   store: StorePort,
-): Promise<string | null> {
+): Promise<{ pin: string; telemetryId: string } | null> {
   if (sess.current_turn_index <= 0) return null;
   // current_turn_index points at the *next* turn; the latest persisted
   // turn is current_turn_index - 1.
@@ -351,5 +370,24 @@ async function loadInjectedTelemetryPin(
     return null;
   }
   const entry = manifest.entries.find((e) => e.object_kind === "slice_telemetry");
-  return entry?.revision_pin ?? null;
+  if (entry == null) return null;
+  return { pin: entry.revision_pin, telemetryId: entry.object_id };
+}
+
+/**
+ * Read a persisted SliceTelemetry record by its `telemetry_id` and return
+ * the Delivery `milestone_id` it was emitted against. Returns null when
+ * the file is missing or unparseable.
+ */
+async function resolvePinnedDeliveryMilestoneId(
+  telemetryId: string,
+  store: StorePort,
+): Promise<string | null> {
+  const body = await store.readText(layout.sliceTelemetry(telemetryId));
+  if (body == null) return null;
+  try {
+    return SliceTelemetry.parse(JSON.parse(body)).milestone_id;
+  } catch {
+    return null;
+  }
 }
