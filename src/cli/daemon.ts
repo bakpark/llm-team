@@ -77,8 +77,15 @@ interface CliArgs {
   callerId: string;
 }
 
+// PR #75 review (P1): drift-observer is an external surface poller and
+// should not run at the default 1s cadence. When `--cycle-interval-ms` is
+// omitted for `--role drift-observer`, fall back to ~60s.
+const DEFAULT_CYCLE_INTERVAL_MS = 1_000;
+const DRIFT_OBSERVER_DEFAULT_CYCLE_INTERVAL_MS = 60_000;
+
 function parseArgs(argv: readonly string[]): CliArgs {
   const a = [...argv];
+  let cycleIntervalMsExplicit = false;
   const out: Partial<CliArgs> & {
     fakeWorkspace: boolean;
     fakeVerification: boolean;
@@ -90,7 +97,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
     fakeWorkspace: false,
     fakeVerification: false,
     once: false,
-    cycleIntervalMs: 1_000,
+    cycleIntervalMs: DEFAULT_CYCLE_INTERVAL_MS,
     callerId: process.env.LLM_TEAM_CALLER_ID ?? `daemon-${process.pid}`,
     targetPath: "./target.json",
   };
@@ -127,6 +134,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
         if (!Number.isFinite(n) || n < 0)
           throw new Error("--cycle-interval-ms must be a non-negative integer");
         out.cycleIntervalMs = n;
+        cycleIntervalMsExplicit = true;
         break;
       }
       case "--fake-llm-fixtures":
@@ -152,6 +160,9 @@ function parseArgs(argv: readonly string[]): CliArgs {
     throw new Error(
       "--role is required (turn-worker | dialogue-coordinator | outer-coordinator | dual-track-scheduler | recovery | drift-observer)",
     );
+  if (out.role === "drift-observer" && !cycleIntervalMsExplicit) {
+    out.cycleIntervalMs = DRIFT_OBSERVER_DEFAULT_CYCLE_INTERVAL_MS;
+  }
   return out as CliArgs;
 }
 
@@ -428,6 +439,9 @@ async function main(argv: readonly string[]): Promise<number> {
             gitHost,
             callerId: args.callerId,
             targetId: cfg.identity.target_id,
+            // PR #75 review (P1): provider guard — only refs whose
+            // `provider` matches the wired adapter (fs-mirror) are swept.
+            adapterProvider: FsMirrorIssueTracker.provider,
           });
           outcomeJson = JSON.stringify({
             role: args.role,
