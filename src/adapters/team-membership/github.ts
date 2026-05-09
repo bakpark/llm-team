@@ -67,6 +67,14 @@ export class GitHubTeamMembership implements TeamMembershipPort {
 
     const key = `${org}/${slug}::${actor}`;
     const now = this.opts.clock.now();
+    // PR #79 review (P1): sweep expired entries on every call so the Map
+    // does not grow unbounded over a long-running daemon. The cost is O(n)
+    // per call but `n` is bounded by active (team, actor) pairs in the TTL
+    // window; a bounded LRU could be substituted later if profiling shows
+    // hot-path overhead.
+    for (const [k, v] of this.cache) {
+      if (v.expiresAtMs <= now) this.cache.delete(k);
+    }
     const cached = this.cache.get(key);
     if (cached != null && cached.expiresAtMs > now) {
       return { kind: cached.kind };

@@ -123,7 +123,7 @@ describe("team-membership actor verification (Phase 9a, G2-4)", () => {
     expect(r.kind).toBe("appended");
   });
 
-  it("non-member actor → invalid; ledger row result=invalid actor_not_in_human_team", async () => {
+  it("non-member actor → invalid + pendingMembershipAudit (ledger emitted by drain after markProcessed)", async () => {
     const d = deps();
     const { session } = await seedMilestoneAndOpenSession(d);
     await writeFsMirrorTeam(d.store, TEAM, ["alice"]);
@@ -138,12 +138,18 @@ describe("team-membership actor verification (Phase 9a, G2-4)", () => {
     expect(r.kind).toBe("invalid");
     if (r.kind === "invalid") {
       expect(r.reason).toBe(ACTOR_NOT_IN_HUMAN_TEAM);
+      // PR #79 P1 review: binding now signals the audit detail via
+      // `pendingMembershipAudit` instead of emitting the ledger inline.
+      // The drain caller emits the row AFTER markProcessed succeeds.
+      expect(r.pendingMembershipAudit).toBe(ACTOR_NOT_IN_HUMAN_TEAM);
     }
 
     // No SessionTurn was written.
     const turn = await d.store.readText(layout.sessionTurn(session.session_id, 0));
     expect(turn).toBeNull();
 
+    // PR #79 P1: ledger emission is the drain's responsibility now —
+    // bindHumanSignalToSession alone must NOT have written a row.
     const rows = await readLedgerRows(d.store);
     const rejection = rows.find(
       (row) =>
@@ -151,11 +157,10 @@ describe("team-membership actor verification (Phase 9a, G2-4)", () => {
         row.result === "invalid" &&
         row.result_detail === ACTOR_NOT_IN_HUMAN_TEAM,
     );
-    expect(rejection).toBeDefined();
-    expect(rejection?.object_id).toBe("sig-1");
+    expect(rejection).toBeUndefined();
   });
 
-  it("unreachable + block policy → invalid actor_team_lookup_unreachable", async () => {
+  it("PR #79 P0 review: unreachable + block → unreachable_retry (defer; no ledger, no markProcessed)", async () => {
     const d = deps();
     await seedMilestoneAndOpenSession(d);
     await writeFsMirrorTeam(d.store, TEAM, ["alice"]);
@@ -168,13 +173,16 @@ describe("team-membership actor verification (Phase 9a, G2-4)", () => {
       humanTeam: TEAM,
       unreachablePolicy: "block",
     });
-    expect(r.kind).toBe("invalid");
-    if (r.kind === "invalid") {
-      expect(r.reason).toBe("actor_team_lookup_unreachable");
-    }
+    expect(r.kind).toBe("unreachable_retry");
+    // No signal_apply ledger row written — the contract mandates
+    // fail-closed via backoff retry, not permanent consumption of the
+    // signal. (The session-open ledger row from seeding is unrelated.)
+    const rows = await readLedgerRows(d.store);
+    const signalApplyRows = rows.filter((row) => row.action_kind === "signal_apply");
+    expect(signalApplyRows.length).toBe(0);
   });
 
-  it("unreachable + warn policy → contribution appended + audit-only invalid row", async () => {
+  it("unreachable + warn policy → contribution appended + pendingMembershipAudit (drain emits audit)", async () => {
     const d = deps();
     await seedMilestoneAndOpenSession(d);
     await writeFsMirrorTeamUnreachable(d.store, TEAM);
@@ -187,16 +195,14 @@ describe("team-membership actor verification (Phase 9a, G2-4)", () => {
       unreachablePolicy: "warn",
     });
     expect(r.kind).toBe("appended");
+    if (r.kind === "appended") {
+      // PR #79 P1: warn-policy audit deferred to drain (after markProcessed).
+      expect(r.pendingMembershipAudit).toBe("actor_team_lookup_unreachable");
+    }
 
+    // The applied signal_apply row from the appended turn IS written here
+    // (binding's existing ledger emission for the contribution itself).
     const rows = await readLedgerRows(d.store);
-    const auditRow = rows.find(
-      (row) =>
-        row.action_kind === "signal_apply" &&
-        row.result === "invalid" &&
-        row.result_detail === "actor_team_lookup_unreachable",
-    );
-    expect(auditRow).toBeDefined();
-    // Plus the normal applied signal_apply row from the appended turn.
     const appliedRow = rows.find(
       (row) =>
         row.action_kind === "signal_apply" &&
@@ -204,6 +210,15 @@ describe("team-membership actor verification (Phase 9a, G2-4)", () => {
         row.contribution_kind === "human_approval",
     );
     expect(appliedRow).toBeDefined();
+    // The audit row, however, is NOT yet written — the drain is responsible
+    // for emitting it after markProcessed succeeds.
+    const auditRow = rows.find(
+      (row) =>
+        row.action_kind === "signal_apply" &&
+        row.result === "invalid" &&
+        row.result_detail === "actor_team_lookup_unreachable",
+    );
+    expect(auditRow).toBeUndefined();
   });
 
   it("humanTeam=null → check is bypassed (legacy phase-5b behaviour)", async () => {
@@ -273,7 +288,8 @@ describe("drain integration with team-membership rejection (Phase 9a)", () => {
     );
     expect(live.current_turn_index).toBe(0);
 
-    // Ledger contains the rejection row.
+    // Ledger contains the rejection row (emitted by drain AFTER
+    // markProcessed succeeded — PR #79 P1 review).
     const rows = await readLedgerRows(d.store);
     const rejection = rows.find(
       (row) =>
@@ -283,5 +299,66 @@ describe("drain integration with team-membership rejection (Phase 9a)", () => {
         row.object_id === "drain-sig",
     );
     expect(rejection).toBeDefined();
+  });
+
+  it("PR #79 P0 review: drain unreachable+block defers signal (no markProcessed, no ledger, retried next cycle)", async () => {
+    const d = deps();
+    await seedMilestoneAndOpenSession(d);
+    await writeFsMirrorTeamUnreachable(d.store, TEAM);
+    const teamPort = new FsMirrorTeamMembership(d.store);
+    const sigStore = new FsHumanSignal(d.store);
+    await dropSignal(d.store, approveEnvelope("alice", "retry-sig"));
+
+    const out = await runHumanSignalDrain({
+      store: d.store,
+      signal: sigStore,
+      clock: d.clock,
+      binding: {
+        store: d.store,
+        clock: d.clock,
+        ledger: d.ledger,
+        callerId: "drain",
+        targetId: "demo",
+        teamMembership: teamPort,
+        humanTeam: TEAM,
+        unreachablePolicy: "block",
+      },
+    });
+    expect(out.length).toBe(1);
+    expect(out[0]?.kind).toBe("deferred");
+
+    // Signal STAYS pending — no markProcessed call.
+    const pending = await sigStore.listPending();
+    expect(pending.length).toBe(1);
+    expect(pending[0]?.signal_id).toBe("retry-sig");
+
+    // No ledger row was written for this transient lookup failure.
+    const rows = await readLedgerRows(d.store);
+    expect(
+      rows.filter(
+        (r) => r.object_id === "retry-sig" && r.action_kind === "signal_apply",
+      ).length,
+    ).toBe(0);
+
+    // The next drain cycle re-emits the same signal (still deferred while
+    // the lookup remains unreachable). This proves listPending re-surfaces
+    // the envelope, satisfying the contract's backoff-retry requirement.
+    const out2 = await runHumanSignalDrain({
+      store: d.store,
+      signal: sigStore,
+      clock: d.clock,
+      binding: {
+        store: d.store,
+        clock: d.clock,
+        ledger: d.ledger,
+        callerId: "drain",
+        targetId: "demo",
+        teamMembership: teamPort,
+        humanTeam: TEAM,
+        unreachablePolicy: "block",
+      },
+    });
+    expect(out2.length).toBe(1);
+    expect(out2[0]?.kind).toBe("deferred");
   });
 });

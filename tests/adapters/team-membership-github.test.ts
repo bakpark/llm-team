@@ -99,6 +99,24 @@ describe("GitHubTeamMembership", () => {
     expect(calls).toBe(2);
   });
 
+  it("PR #79 P1: expired entries swept from cache on subsequent calls", async () => {
+    const exec = new MockExec(async () => ({
+      stdout: JSON.stringify({ state: "active" }),
+    }));
+    const clock = new FixedClock(0);
+    const port = new GitHubTeamMembership({ exec, clock, ttlMs: 1_000 });
+    await port.isMember("acme/reviewers", "alice");
+    // Internal cache holds 1 entry. Advance past TTL and look up a different
+    // actor — sweep should evict the stale "alice" entry.
+    clock.advance(2_000);
+    await port.isMember("acme/reviewers", "bob");
+    // Reflective access: cache size after sweep must be just the new entry.
+    const cache = (port as unknown as { cache: Map<string, unknown> }).cache;
+    expect(cache.size).toBe(1);
+    expect(cache.has("acme/reviewers::bob")).toBe(true);
+    expect(cache.has("acme/reviewers::alice")).toBe(false);
+  });
+
   it("URL-encodes org/team/user path components", async () => {
     const exec = new MockExec(async () => ({
       stdout: JSON.stringify({ state: "active" }),

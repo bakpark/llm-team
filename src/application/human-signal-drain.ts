@@ -23,6 +23,7 @@ import {
 } from "./control-state.js";
 import {
   bindHumanSignalToSession,
+  emitMembershipRejection,
   type HumanSignalBindingDeps,
 } from "./human-signal-binding.js";
 import { layout } from "./persistence-layout.js";
@@ -131,6 +132,16 @@ export async function runHumanSignalDrain(
         | { kind: "appended"; session_id: string; turn_index: number }
         | { kind: "unsupported"; reason: string }
         | undefined;
+      // PR #79 P1 review: deferred audit emission. When binding signals a
+      // pending membership audit row (non-member rejection OR warn-policy
+      // admit), the row is emitted AFTER markProcessed succeeds with
+      // `alreadyProcessed=false`. Crash between bind and markProcessed
+      // therefore cannot leak a duplicate `result=invalid` audit row on
+      // the next drain cycle (FileLedger.replay does not dedup invalid).
+      let pendingMembershipAudit:
+        | "actor_not_in_human_team"
+        | "actor_team_lookup_unreachable"
+        | null = null;
       if (deps.binding != null) {
         const b = await bindHumanSignalToSession(env, deps.binding);
         if (b.kind === "no_session") {
@@ -144,11 +155,22 @@ export async function runHumanSignalDrain(
           });
           continue;
         }
+        if (b.kind === "unreachable_retry") {
+          // PR #79 P0 review (gpt5.5): TCC-GOVERNANCE fail-closed +
+          // backoff retry. Signal stays pending; no markProcessed, no
+          // ledger row, so a transient GitHub Teams API blip cannot
+          // permanently consume the approval.
+          results.push({
+            kind: "deferred",
+            signal_id: env.signal_id,
+            reason: b.reason,
+          });
+          continue;
+        }
         if (b.kind === "invalid") {
           // Phase 9a (G2-4): team-membership check rejected the signal.
-          // The binding hook already wrote a `signal_apply` ledger row
-          // with `result=invalid`. Mark the signal record as invalid so
-          // it stops being re-emitted by listPending.
+          // markProcessed FIRST, then emit the audit ledger row — only
+          // when this drain owns the transition (alreadyProcessed=false).
           const r = await deps.signal.markProcessed({
             signalId: env.signal_id,
             state: "invalid",
@@ -157,6 +179,11 @@ export async function runHumanSignalDrain(
             appliedAt: now,
           });
           if (r.alreadyProcessed) continue;
+          await emitMembershipRejection(
+            deps.binding,
+            env,
+            b.pendingMembershipAudit,
+          );
           results.push({
             kind: "invalid",
             signal_id: env.signal_id,
@@ -170,6 +197,9 @@ export async function runHumanSignalDrain(
             session_id: b.session_id,
             turn_index: b.turn_index,
           };
+          if (b.pendingMembershipAudit != null) {
+            pendingMembershipAudit = b.pendingMembershipAudit;
+          }
         } else {
           // unsupported — fall through to markProcessed=applied so the
           // queue moves on (signal_type isn't bindable, e.g. pause).
@@ -187,6 +217,11 @@ export async function runHumanSignalDrain(
       // this signal as processed inside its lock — otherwise both drains
       // would emit `applied` for the same signal_id.
       if (r.alreadyProcessed) continue;
+      // PR #79 P1: emit warn-policy audit row only when this drain owns
+      // the markProcessed transition (deferred until after the lock).
+      if (pendingMembershipAudit != null && deps.binding != null) {
+        await emitMembershipRejection(deps.binding, env, pendingMembershipAudit);
+      }
       results.push({
         kind: "applied",
         signal_id: env.signal_id,
