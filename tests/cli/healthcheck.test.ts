@@ -34,7 +34,6 @@ const ALL_PASS_TABLE: Record<string, { status: number; stdout?: string; stderr?:
   "command -v gtimeout": { status: 1 },
   "git --version": { status: 0, stdout: "git version 2.43.0\n" },
   "node --version": { status: 0, stdout: "v20.10.0\n" },
-  "npx --no-install vitest list": { status: 0, stdout: "tests/foo.test.ts\n" },
   "gh auth status": { status: 0, stdout: "Logged in (keychain)\n" },
   "gh api user --jq .login": { status: 0, stdout: "octocat\n" },
   "gh auth token": { status: 0, stdout: "ghp_xxx\n" },
@@ -93,7 +92,7 @@ describe("healthcheck runHealthcheck", () => {
     expect(result.items.every((i) => i.status !== "FAIL")).toBe(true);
     // Anchors present.
     expect(result.items.map((i) => i.anchor)).toEqual(
-      expect.arrayContaining(["M-1-1", "M-1-2", "M-1-3", "M-1-4", "M-2-1", "M-2-2", "M-2-3", "M-2-4", "M-2-5"]),
+      expect.arrayContaining(["M-1-1", "M-1-2", "M-1-3", "M-2-1", "M-2-2", "M-2-3", "M-2-4", "M-2-5"]),
     );
     // Auth models populated.
     expect(result.auth_models.gh).toBe("env_token");

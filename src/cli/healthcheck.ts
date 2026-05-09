@@ -303,22 +303,10 @@ export function runStage1(opts: {
     anchor: "M-1-3",
   });
 
-  // M-1-4 — vitest list (project tests are runnable). Use --reporter=dot
-  // and `--listFiles` lite-substitute by invoking `vitest list`. Falls back
-  // to a non-zero status as FAIL.
-  const vitestList = run("npx", ["--no-install", "vitest", "list"], {
-    cwd,
-  });
-  items.push({
-    id: "M-1-4.vitest-list",
-    status: vitestList.status === 0 ? "PASS" : "FAIL",
-    detail:
-      vitestList.status === 0
-        ? "vitest list ok"
-        : `vitest list failed: ${(vitestList.stderr || vitestList.stdout).trim().slice(0, 160)}`,
-    anchor: "M-1-4",
-  });
-
+  // M-1-4 — vitest list. Removed from Stage 1 fail-fast: cold `vitest list`
+  // exceeds the 5s budget on this repo (866 tests, deep import graph), which
+  // produced false negatives. The intent ("test infra is alive") is covered
+  // by `npm test` / `npm run typecheck` in the PR build (.github/workflows).
   // M-1-5 — typecheck. Stage 1 is a 5s fail-fast probe and `npm run
   // typecheck` is a multi-second compile, so it is always SKIP here. The
   // PR build (.github/workflows) and `npm run typecheck` cover this gate.
