@@ -76,32 +76,6 @@ describe("Phase 1a — persistence layout authority", () => {
   });
 });
 
-describe("Phase 1a — legacy phase-model imports forbidden", () => {
-  const fg = require("node:fs");
-  const path = require("node:path");
-
-  function walk(dir: string): string[] {
-    const out: string[] = [];
-    for (const name of fg.readdirSync(dir)) {
-      const full = path.join(dir, name);
-      const stat = fg.statSync(full);
-      if (stat.isDirectory()) out.push(...walk(full));
-      else if (full.endsWith(".ts")) out.push(full);
-    }
-    return out;
-  }
-
-  it("no src/ file imports from docs/history/legacy-phase-model/", () => {
-    const tsFiles = walk(resolve(REPO_ROOT, "src"));
-    const offenders: string[] = [];
-    for (const file of tsFiles) {
-      const body = readFileSync(file, "utf8");
-      if (/legacy-phase-model/.test(body)) offenders.push(file);
-    }
-    expect(offenders).toEqual([]);
-  });
-});
-
 describe("Phase 1a — ledger row schema includes target_id (TCC-IDENTITY)", () => {
   it("schema file mentions target_id as required", () => {
     const body = readFileSync(

@@ -13,7 +13,7 @@
 
 상위 문서와 하위 문서가 충돌하면 상위 문서가 우선한다. contract 문서끼리 충돌하면 더 구체적인 scope 의 문서가 우선하되, 충돌 자체를 수정 대상으로 기록해야 한다.
 
-`docs/architecture/` 는 구현 설명 또는 기존 설계 자료로 간주한다. 이 디렉토리의 contract 를 override 하지 않는다. `docs/history/legacy-phase-model/` 은 amendment 이전의 archive 이며 신규 코드 / 문서가 의존하지 않는다 (lint rule 으로 강제, historical reader / fixture / migration tooling 만 예외).
+`docs/architecture/` 는 구현 설명 또는 기존 설계 자료로 간주한다. 이 디렉토리의 contract 를 override 하지 않는다.
 
 <a id="CONTRACT-STRUCTURE"></a>
 ## CONTRACT-STRUCTURE: Directory Structure
@@ -28,7 +28,6 @@ docs/contracts/
   knowledge-contract.md
   target-config-contract.md
   agent-runner-port-contract.md
-docs/history/legacy-phase-model/        # archive (read-only, historical reference 만)
 ```
 
 각 contract 의 책임은 다음과 같다.
@@ -157,7 +156,7 @@ legacy `agent_role`, `operation`, `phase_run_id` 는 신규 row 에 등장하지
 <a id="CONTRACT-MIGRATION-NOTES"></a>
 ## CONTRACT-MIGRATION-NOTES: Legacy Phase Model → Loop-Based Migration
 
-이전 *7-phase Workflow Shape + parallel quorum review* 모형 (`docs/history/legacy-phase-model/` archive) 은 본 contract set 에서 완전히 폐기되어 *3-loop nested model + DialogueSession + dual-slot serialization* 으로 치환되었다. legacy 어휘를 본 contract 어디에도 사용하지 않는다 (REPLACE without alias). 본 절은 도구·테스트·운영 코드를 마이그레이션할 때만 참조하기 위한 단일 환산표다.
+이전 *7-phase Workflow Shape + parallel quorum review* 모형은 본 contract set 에서 완전히 폐기되어 *3-loop nested model + DialogueSession + dual-slot serialization* 으로 치환되었다. legacy 어휘를 본 contract 어디에도 사용하지 않는다 (REPLACE without alias). 본 절은 도구·테스트·운영 코드를 마이그레이션할 때만 참조하기 위한 단일 환산표다.
 
 ### Vocabulary 환산
 
@@ -268,22 +267,6 @@ legacy `agent_role`, `operation`, `phase_run_id` 는 신규 row 에 등장하지
 | (없음) | `session_outcome` (Caller-only, session 종료 응축) |
 | (없음) | `proposal` (acceptance_test_amendment / discovered_dependency / refactor / cross_milestone_amendment 등) |
 
-### 첫 번째 라운드의 Legacy Role → Phase 환산
-
-이전 라운드의 amendment (`docs/history/legacy-phase-model/contracts/README.md` 의 CONTRACT-MIGRATION-NOTES) 가 polled `PO / PM / Planner / Coder / Reviewer / Integrator / QA` role → 7-phase 환산을 단일 권위로 가졌다. 본 amendment 는 그 7-phase 도 폐기하므로, 더 거슬러 올라가는 *role → loop* 직접 환산은 다음과 같다.
-
-| Legacy Role (1st round) | Loop · Phase / Purpose | Lead Profile | Required Participants |
-|---|---|---|---|
-| PO | outer Discovery | atlas | `[human]` |
-| PM | outer Specification | atlas | `[human]` |
-| Planner | outer Planning | atlas | (없음) |
-| Coder | inner tdd_build | forge | (없음) |
-| Reviewer | middle review | sentinel | (없음, internal escalation 시 `[human]`) |
-| Integrator | (흡수됨) middle review approve + SliceMerge merge | (Caller) | — |
-| QA | outer Validation | sentinel | (없음, release governance 외부) |
-
-본 환산표는 본 절에서만 권위를 갖는다. 다른 contract 또는 architecture 문서가 동일 환산을 중복 정의하면 본 절이 우선한다. 더 상세한 phase model archive 는 `docs/history/legacy-phase-model/contracts/README.md#CONTRACT-MIGRATION-NOTES` 참조.
-
 <a id="CONTRACT-CHANGE"></a>
 ## CONTRACT-CHANGE: Change Rules
 
@@ -387,8 +370,6 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 | `SOC-RECOVERY-OPERATION` | partial | `application/recovery.sh` | always_hard | 2026-05-05-loop (session-stale / inner-no-progress / slice-merge-stale trigger 추가) |
 | `SOC-MERGE-POLICY` | partial | `src/ports/workspace.ts` (`WorkspacePort.rebaseOntoTrunk` — 결과 `clean` / `conflict` 분리), `src/adapters/workspace/git-worktree.ts` + `src/adapters/workspace/fake.ts` (rebase 어댑터), `src/application/slice-merge.ts` (`integrateSliceMerge`: 1회 rebase + reverify, conflict / fail → SM_STALE). 자동 재시도 한도와 first-merger-wins lock은 phase 4 lease 도입으로 보강 | always_hard (first-merger-wins) | 2026-05-05-loop (SliceMerge first-merger-wins) |
 | `SOC-IDEMPOTENCY` | partial | `src/application/ledger.ts` (3-scope `idempotencyKey` compositor); 미도입 dispatch 는 추후 phase | always_hard | 2026-05-05-loop (3-scope 분리) |
-| `SOC-PHASE-RUN` ✕ | deprecated | `docs/history/legacy-phase-model/contracts/state-and-operation-contract.md` | stage_graded:legacy_writer=warn (Stage 5 block) | (deprecated 2026-05-05-loop) |
-
 ### Reliability and Gate
 
 | Anchor | Status | Implementation Surface | Enforcement | Active Since |
@@ -411,8 +392,6 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 | `RGC-NOTIFICATION` | partial | `src/ports/notifier.ts` (`NotifierPort` — push-only `notify` with idempotency via `notification_id`), `src/adapters/notifier/github.ts` (`gh issue comment` / `gh pr comment` wrapper with HTML-comment marker for de-dup), `src/adapters/notifier/fs-mirror.ts` (FS sink + idempotency map for tests / self-hosting) | n/a (push-only) | 2026-05-05-loop (port + adapters phase 6b) |
 | `RGC-FAIRNESS` | partial | `src/application/fairness.ts` (`sortFairly` + `pickFairly` — within-scope oldest-ready-first + priority overrides, stable; inner-only). cross-slot fairness 는 `src/application/cross-slot-fairness.ts` (RGC-CROSS-SLOT-FAIRNESS, phase 6a) | stage_graded:fairness_violation=warn | 2026-05-05-loop (within-scope vs cross-slot 분리) |
 | `RGC-DAEMON-STARTUP` | partial | `src/cli/daemon.ts` (`daemonMain` — per-role PID lockdir, recovery sweep on every cycle, SIGINT/SIGTERM graceful shutdown). acquisition order CI gate via `tests/conformance/phase-4.test.ts` exhaustive (held, requested) matrix. multi-process atomic 시작 + sibling 종료 정책은 phase 5/6a 가 보강 | always_hard (atomic startup) | 2026-05-05-loop (acquisition order CI startup gate) |
-| `RGC-PHASE-LEASE` ✕ | deprecated | `docs/history/legacy-phase-model/contracts/reliability-and-gate-contract.md` | stage_graded:legacy_writer=warn | (deprecated 2026-05-05-loop, 대체: RGC-LEASE-KINDS) |
-
 ### Knowledge
 
 | Anchor | Status | Implementation Surface | Enforcement | Active Since |
@@ -448,8 +427,6 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 | `TCC-PRECEDENCE` | partial | `lib/config.sh`, env loading | always_hard | original |
 | `TCC-CHANGE-RULES` | spec-only | contract prose. ledger helper (Stage 2) | always_hard (변경 ledger 기록) | 2026-05-05-loop (invariant_enforcement 변경 ledger 추가) |
 | `TCC-GOVERNANCE` ★ | partial | `src/config/target-schema.ts` (Zod parse) — runtime consumer 미구현 (drain / dispatch / observer 후속 plan) | always_hard (governance schema 검증) | 2026-05-06-human-github-boundary |
-| `TCC-PHASE-POLICIES` ✕ | deprecated | `docs/history/legacy-phase-model/contracts/target-config-contract.md` | stage_graded:legacy_writer=warn | (deprecated 2026-05-05-loop, 대체: TCC-LOOP-POLICIES) |
-
 ### Agent Runner Port
 
 | Anchor | Status | Implementation Surface | Enforcement | Active Since |
