@@ -35,9 +35,12 @@ import { FakeVerification } from "../adapters/verification/fake.js";
 import { ShellVerification } from "../adapters/verification/shell.js";
 import { GitWorktreeWorkspace } from "../adapters/workspace/git-worktree.js";
 import { FakeWorkspace } from "../adapters/workspace/fake.js";
+import { FsHumanSignal } from "../adapters/human-signal/fs.js";
 import { validateOrThrow } from "../application/config-validator.js";
+import { runDaemonPrelude } from "../application/control-state.js";
 import { runOneMiddleReviewTurn } from "../application/dialogue-coordinator.js";
 import { runOneDualTrackTurn } from "../application/dual-track-scheduler.js";
+import { runHumanSignalDrain } from "../application/human-signal-drain.js";
 import { FileLedger } from "../application/ledger.js";
 import { runOneOuterTurn } from "../application/outer-turn.js";
 import { LOG_DAEMON_PATH } from "../application/persistence-layout.js";
@@ -219,6 +222,11 @@ async function main(argv: readonly string[]): Promise<number> {
         : { argv: ["npm", "test"], cwd },
     ];
 
+    // Phase 7b: a single FsHumanSignal adapter feeds the per-cycle drain
+    // for every role. The control-state machine lives at
+    // `<workdir>/control/state.json` (see runDaemonPrelude).
+    const humanSignal = new FsHumanSignal(store);
+
     do {
       // Every cycle starts with a recovery sweep (RGC-RECOVERY).
       const sweep = await runRecoverySweep({
@@ -246,6 +254,66 @@ async function main(argv: readonly string[]): Promise<number> {
             reanimated_sessions: sweep.reanimatedSessions,
           },
         });
+      }
+      // Phase 7b (G1-4): drain pending human signals + apply the control
+      // state machine, then gate pickup. This runs for every role so
+      // pause/resume/stop are observed everywhere.
+      await runHumanSignalDrain({
+        store,
+        signal: humanSignal,
+        clock,
+        applyControlState: true,
+        // PR #74 codex P1: emit `pause_resume` applied ledger row when the
+        // control state machine actually transitions (RUNNING↔PAUSED, →STOPPED).
+        controlAudit: {
+          ledger,
+          callerId: args.callerId,
+          targetId: cfg.identity.target_id,
+        },
+        // Outer-coordinator can additionally bind approve/reject signals to
+        // the open outer DialogueSession. Other roles deal only with the
+        // control-state side-effect; the binding deps are omitted so
+        // bindable signals stay pending until the outer-coordinator picks
+        // them up (drain emits `deferred` for those).
+        ...(args.role === "outer-coordinator"
+          ? {
+              binding: {
+                store,
+                clock,
+                ledger,
+                callerId: args.callerId,
+                targetId: cfg.identity.target_id,
+              },
+            }
+          : {}),
+      });
+      const gate = await runDaemonPrelude({
+        store,
+        clock,
+        ledger,
+        callerId: args.callerId,
+        targetId: cfg.identity.target_id,
+        role: args.role,
+      });
+      if (gate.action === "stopped") {
+        // Graceful daemon shutdown — STOPPED is terminal. The finally
+        // block releases held leases and the role lockdir.
+        process.stdout.write(
+          `${JSON.stringify({ role: args.role, outcome: { kind: "stopped" } })}\n`,
+        );
+        return 0;
+      }
+      if (gate.action === "paused") {
+        process.stdout.write(
+          `${JSON.stringify({
+            role: args.role,
+            outcome: { kind: "noop", detail: "paused" },
+          })}\n`,
+        );
+        if (args.once || interrupted) break;
+        if (args.cycleIntervalMs > 0)
+          await new Promise((r) => setTimeout(r, args.cycleIntervalMs));
+        continue;
       }
       let outcomeJson: string;
       switch (args.role) {
