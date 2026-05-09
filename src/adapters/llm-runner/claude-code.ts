@@ -23,18 +23,20 @@ export class ClaudeCodeAdapter implements LlmRunnerAdapter {
 
   async run(input: LlmAdapterInput): Promise<LlmAdapterResult> {
     const { cmd, args } = this.buildArgv();
-    return spawnWithTimeout({
+    const env = resolveSpawnEnv({
+      allowlist: this.cfg.envAllowlist,
+      override: this.cfg.envOverride,
+    });
+    const r = await spawnWithTimeout({
       cmd,
       args,
       cwd: input.agentCwd,
-      env: resolveSpawnEnv({
-        allowlist: this.cfg.envAllowlist,
-        override: this.cfg.envOverride,
-      }),
+      env,
       stdin: input.stdin,
       timeoutSec: input.timeoutSec,
       killGraceMs: this.cfg.killGraceMs,
     });
+    return { ...r, spawnEnv: env };
   }
 
   buildArgv(): { cmd: string; args: string[] } {

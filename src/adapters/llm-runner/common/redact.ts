@@ -6,7 +6,7 @@
  * Redaction runs *only at the persist boundary* (artifact writers, log/notify
  * appenders). Adapter internals keep raw stdout/stderr so that retry classifiers
  * and tests see the unmodified data. Once a string is handed to a sink, every
- * known token-shape and every literal `process.env` value is replaced with
+ * known token-shape and every secret-suspected env value is replaced with
  * `[REDACTED]`.
  *
  * Patterns (intentionally conservative — false negatives over false positives)
@@ -14,7 +14,11 @@
  * - Anthropic key: `sk-ant-…`
  * - OpenAI key: `sk-…` (excluding `sk-ant-` since Anthropic is matched first)
  * - Generic Bearer header: `Bearer <token>`
- * - process.env raw values: any env value present verbatim in the input
+ * - env values: only values whose KEY matches a secret-suspected suffix
+ *   (`_KEY`, `_TOKEN`, `_SECRET`, `_PAT`, `_PASSWORD`, `_AUTH`, `_CREDENTIAL`)
+ *   or an explicit key (`GH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
+ *   This avoids scrubbing benign values like `HOME`, `PATH`, `TMPDIR`,
+ *   working directories, etc. that happen to be ≥12 chars.
  *
  * Token boundaries are word-char-aware so that unrelated words (`scarf`,
  * `risk-free`) are not partially matched. The minimum length of 12 chars on
@@ -22,6 +26,35 @@
  */
 
 const PLACEHOLDER = "[REDACTED]";
+
+// Suffix patterns (case-insensitive) — env keys ending with these are
+// considered secret-bearing. Underscore-prefixed to avoid matching benign
+// keys whose name merely contains "key" or "auth" mid-word.
+const SECRET_KEY_SUFFIXES: ReadonlyArray<string> = [
+  "_KEY",
+  "_TOKEN",
+  "_SECRET",
+  "_PAT",
+  "_PASSWORD",
+  "_AUTH",
+  "_CREDENTIAL",
+];
+
+// Explicit secret-bearing key names that don't fit the suffix pattern.
+const SECRET_KEY_EXPLICIT: ReadonlySet<string> = new Set([
+  "GH_TOKEN",
+  "ANTHROPIC_API_KEY",
+  "OPENAI_API_KEY",
+]);
+
+function isSecretKey(key: string): boolean {
+  const upper = key.toUpperCase();
+  if (SECRET_KEY_EXPLICIT.has(upper)) return true;
+  for (const suffix of SECRET_KEY_SUFFIXES) {
+    if (upper.endsWith(suffix)) return true;
+  }
+  return false;
+}
 
 // Order matters: Anthropic must run before the generic OpenAI sk- pattern.
 const TOKEN_PATTERNS: ReadonlyArray<RegExp> = [
@@ -40,14 +73,19 @@ const TOKEN_PATTERNS: ReadonlyArray<RegExp> = [
 
 /**
  * Redact secret-shaped substrings and any literal value from `envSnapshot`
- * that appears verbatim in the input.
+ * whose KEY is secret-suspected (see SECRET_KEY_SUFFIXES / SECRET_KEY_EXPLICIT).
  *
- * @param input        raw text (stdout/stderr/log line/notification body)
- * @param envSnapshot  env to scan for raw value matches (default: process.env)
+ * Multiple env sources can be passed — values are merged before scanning so
+ * that secrets injected via `envOverride` (and not present in `process.env`)
+ * are still masked.
+ *
+ * @param input    raw text (stdout/stderr/log line/notification body)
+ * @param envs     one or more env snapshots to scan. Defaults to [process.env].
+ *                 An explicit empty array disables env-value redaction.
  */
 export function redactSecrets(
   input: string,
-  envSnapshot: NodeJS.ProcessEnv = process.env,
+  ...envs: NodeJS.ProcessEnv[]
 ): string {
   if (input.length === 0) return input;
 
@@ -58,17 +96,22 @@ export function redactSecrets(
     out = out.replace(re, PLACEHOLDER);
   }
 
-  // 2. Literal env value match. Only redact when the value looks
-  //    secret-ish (>= 12 chars) to avoid scrubbing common short values like
-  //    `0`, `true`, paths, or empty strings.
+  // 2. Env-value match restricted to secret-suspected keys. Length floor of
+  //    4 chars avoids absurd matches (e.g. a 1-char API key) but does not
+  //    require a long suffix so short-but-real tokens are still masked.
+  const sources: NodeJS.ProcessEnv[] =
+    envs.length === 0 ? [process.env] : envs;
   const seen = new Set<string>();
-  for (const [, value] of Object.entries(envSnapshot)) {
-    if (typeof value !== "string") continue;
-    if (value.length < 12) continue;
-    if (seen.has(value)) continue;
-    seen.add(value);
-    if (!out.includes(value)) continue;
-    out = splitReplaceAll(out, value, PLACEHOLDER);
+  for (const env of sources) {
+    for (const [key, value] of Object.entries(env)) {
+      if (typeof value !== "string") continue;
+      if (value.length < 4) continue;
+      if (!isSecretKey(key)) continue;
+      if (seen.has(value)) continue;
+      seen.add(value);
+      if (!out.includes(value)) continue;
+      out = splitReplaceAll(out, value, PLACEHOLDER);
+    }
   }
 
   return out;

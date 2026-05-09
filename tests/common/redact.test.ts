@@ -64,4 +64,55 @@ describe("redactSecrets", () => {
     const s = `value=${env.WEIRD_TOKEN} suffix`;
     expect(redactSecrets(s, env)).toBe(`value=${MASK} suffix`);
   });
+
+  it("does not mask benign env values like HOME/PATH/TMPDIR", () => {
+    const env = {
+      HOME: "/Users/alice/with-a-long-path",
+      PATH: "/usr/local/bin:/usr/bin:/bin:/sbin",
+      TMPDIR: "/var/folders/xx/some-temp-dir-1234",
+      PWD: "/Users/alice/dev/project-foo",
+    };
+    const line = `running in ${env.HOME} via ${env.PATH} (tmp=${env.TMPDIR}, cwd=${env.PWD})`;
+    expect(redactSecrets(line, env)).toBe(line);
+  });
+
+  it("masks values for explicit secret keys (GH_TOKEN, ANTHROPIC_API_KEY, OPENAI_API_KEY)", () => {
+    const env = {
+      GH_TOKEN: "ghs_thisisafaketokenvalue1234",
+      ANTHROPIC_API_KEY: "sk-ant-fakekeyvaluehere987654",
+      OPENAI_API_KEY: "sk-fakekeyvaluehere1234567",
+    };
+    const line = `gh=${env.GH_TOKEN} anth=${env.ANTHROPIC_API_KEY} oa=${env.OPENAI_API_KEY}`;
+    expect(redactSecrets(line, env)).toBe(
+      `gh=${MASK} anth=${MASK} oa=${MASK}`,
+    );
+  });
+
+  it("masks suffix-matched secret keys case-insensitively", () => {
+    const env = {
+      MY_SERVICE_SECRET: "topsecretvalue123",
+      db_password: "p@ssw0rd-very-long",
+      OAUTH_CREDENTIAL: "credential-blob-1234",
+      SOME_AUTH: "auth-bearer-blob-1234",
+    };
+    const line = `s=${env.MY_SERVICE_SECRET} p=${env.db_password} c=${env.OAUTH_CREDENTIAL} a=${env.SOME_AUTH}`;
+    expect(redactSecrets(line, env)).toBe(
+      `s=${MASK} p=${MASK} c=${MASK} a=${MASK}`,
+    );
+  });
+
+  it("masks envOverride-injected secrets when passed as additional source", () => {
+    const baseEnv = { HOME: "/Users/alice/dev" };
+    const overrideEnv = { CUSTOM_API_TOKEN: "overridden-secret-9876" };
+    const line = `home=${baseEnv.HOME} tok=${overrideEnv.CUSTOM_API_TOKEN}`;
+    expect(redactSecrets(line, baseEnv, overrideEnv)).toBe(
+      `home=/Users/alice/dev tok=${MASK}`,
+    );
+  });
+
+  it("ignores non-secret keys even when value is long", () => {
+    const env = { CONFIG_FILE_PATH: "/etc/myapp/config.json.long" };
+    const line = `loaded ${env.CONFIG_FILE_PATH} ok`;
+    expect(redactSecrets(line, env)).toBe(line);
+  });
 });

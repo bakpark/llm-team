@@ -42,6 +42,7 @@ export async function runInvoke(
       rawCode?: number | null;
       signal?: NodeJS.Signals | null;
       timedOut?: boolean;
+      spawnEnv?: NodeJS.ProcessEnv;
     },
   ): Promise<LlmRunnerResult> => {
     const consumedAt = new Date().toISOString();
@@ -52,13 +53,20 @@ export async function runInvoke(
       consumedAt,
       ...(bodies.reason ? { reason: bodies.reason } : {}),
     };
-    await writeRedacted(slots.stdout, bodies.stdout ?? "");
-    await writeRedacted(slots.stderr, bodies.stderr ?? "");
-    await writeRedacted(slots.envelope, bodies.envelope ?? "");
+    // Redact against the resolved spawn env when the adapter exposes it.
+    // This catches secrets injected via envOverride that are not present in
+    // process.env. When unavailable (preflight failures, fake adapters), we
+    // fall back to process.env via the default branch in redactSecrets.
+    const envSources: NodeJS.ProcessEnv[] = bodies.spawnEnv
+      ? [process.env, bodies.spawnEnv]
+      : [process.env];
+    await writeRedacted(slots.stdout, bodies.stdout ?? "", envSources);
+    await writeRedacted(slots.stderr, bodies.stderr ?? "", envSources);
+    await writeRedacted(slots.envelope, bodies.envelope ?? "", envSources);
     // metadata is structured/short and cannot contain secrets, but we still
     // run it through redact for defense-in-depth (env values that happened to
     // collide with the consumed_at string would be unlikely but harmless).
-    await writeRedacted(slots.metadata, JSON.stringify(meta));
+    await writeRedacted(slots.metadata, JSON.stringify(meta), envSources);
     return {
       exitStatus,
       envelopeRef: slots.envelope.path,
@@ -134,6 +142,7 @@ export async function runInvoke(
       signal: r.signal,
       timedOut: r.timedOut,
       reason,
+      spawnEnv: r.spawnEnv,
     });
   } catch (e) {
     const stack = (e as Error).stack ?? String(e);
@@ -147,8 +156,9 @@ export async function runInvoke(
 async function writeRedacted(
   slot: AttemptSlots["stdout"],
   body: string,
+  envSources: NodeJS.ProcessEnv[],
 ): Promise<void> {
-  await slot.write(redactSecrets(body));
+  await slot.write(redactSecrets(body, ...envSources));
 }
 
 function isParseableJson(s: string): boolean {

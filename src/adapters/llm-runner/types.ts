@@ -14,6 +14,14 @@ export interface LlmAdapterResult {
   timedOut: boolean;
   stdout: string;
   stderr: string;
+  /**
+   * Resolved env passed to the child process (after allowlist + override
+   * merge). The executor uses this for sink-boundary redaction so that
+   * secrets injected via `envOverride` — and not present in `process.env` —
+   * are still masked. Optional: adapters that don't expose this fall back
+   * to `process.env` redaction in the executor.
+   */
+  spawnEnv?: NodeJS.ProcessEnv;
 }
 
 export type LlmAdapterId = "claude_code" | "codex_cli" | "fake";
