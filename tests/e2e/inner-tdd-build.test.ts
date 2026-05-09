@@ -34,11 +34,3 @@ describe.skipIf(!LIVE)(
     });
   },
 );
-
-// Always-on guard: when LLM_TEAM_E2E is unset, the file must contain at
-// least one PASS so vitest reports the suite as exercised.
-describe("Phase prod-4 — inner tdd_build live default-skip guard", () => {
-  it("default-skips live cases unless LLM_TEAM_E2E=1", () => {
-    expect(LIVE).toBe(process.env.LLM_TEAM_E2E === "1");
-  });
-});

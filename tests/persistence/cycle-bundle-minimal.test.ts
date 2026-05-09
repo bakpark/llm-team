@@ -1,7 +1,7 @@
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   bundleDirName,
@@ -9,9 +9,18 @@ import {
   writeCycleBundle,
 } from "../../src/persistence/cycle-bundle-minimal.js";
 
+const createdWorkdirs: string[] = [];
 function workdir(): string {
-  return mkdtempSync(join(tmpdir(), "cycle-bundle-"));
+  const wd = mkdtempSync(join(tmpdir(), "cycle-bundle-"));
+  createdWorkdirs.push(wd);
+  return wd;
 }
+afterEach(() => {
+  while (createdWorkdirs.length > 0) {
+    const d = createdWorkdirs.pop()!;
+    rmSync(d, { recursive: true, force: true });
+  }
+});
 
 describe("cycle bundle minimal — directory layout", () => {
   it("writes <workdir>/<target>/cycles/<role>-<objId>-<hash12>/ with all files", () => {
@@ -134,6 +143,41 @@ describe("cycle bundle minimal — directory layout", () => {
     ).toThrow(/at least one attempt/);
   });
 
+  it("rejects duplicated attempt index (PR #87 P1-B)", () => {
+    expect(() =>
+      writeCycleBundle({
+        workdir: workdir(),
+        targetId: "t",
+        role: "forge",
+        objId: "01HZS00000000000000000000A",
+        prompt: "p",
+        attempts: [
+          { index: 1, stdout: "a", stderr: "", exitCode: 0, envelope: null },
+          { index: 1, stdout: "b", stderr: "", exitCode: 0, envelope: null },
+        ],
+        summary: { attempts: 2, outcome: "noop" },
+        envSnapshots: [],
+      }),
+    ).toThrow(/attempt index 1 duplicated/);
+  });
+
+  it("rejects non-positive / non-integer attempt index (PR #87 P1-B)", () => {
+    expect(() =>
+      writeCycleBundle({
+        workdir: workdir(),
+        targetId: "t",
+        role: "forge",
+        objId: "01HZS00000000000000000000A",
+        prompt: "p",
+        attempts: [
+          { index: 0, stdout: "", stderr: "", exitCode: 0, envelope: null },
+        ],
+        summary: { attempts: 1, outcome: "noop" },
+        envSnapshots: [],
+      }),
+    ).toThrow(/positive integer/);
+  });
+
   it("bundleDirName composes the segment exactly", () => {
     expect(bundleDirName("forge", "ABC", "0123456789ab")).toBe(
       "forge-ABC-0123456789ab",
@@ -172,6 +216,29 @@ describe("cycle bundle minimal — secret redaction at writer boundary", () => {
     expect(read("attempt1.stderr")).not.toContain(ghPat);
     expect(read("attempt1.envelope.json")).not.toContain(ghPat);
     expect(read("attempt1.envelope.json")).not.toContain(skAnt);
+  });
+
+  it("redacts secret-shaped tokens in summary.json outcome (PR #87 P1-A)", () => {
+    const wd = workdir();
+    const ghPat = "ghp_" + "z".repeat(40);
+    const result = writeCycleBundle({
+      workdir: wd,
+      targetId: "e2e-sandbox",
+      role: "forge",
+      objId: "01HZS00000000000000000000A",
+      prompt: "p",
+      attempts: [
+        { index: 1, stdout: "", stderr: "", exitCode: 0, envelope: null },
+      ],
+      summary: { attempts: 1, outcome: `failed because ${ghPat} leaked` },
+      envSnapshots: [],
+    });
+    const summaryRaw = readFileSync(
+      join(result.bundleDir, "summary.json"),
+      "utf8",
+    );
+    expect(summaryRaw).not.toContain(ghPat);
+    expect(summaryRaw).toContain("[REDACTED]");
   });
 
   it("redacts env-bearing secret values when envSnapshots is provided", () => {

@@ -1,8 +1,21 @@
-import { existsSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+
+const tmpDirsToCleanup: string[] = [];
+function trackedMkdtemp(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tmpDirsToCleanup.push(dir);
+  return dir;
+}
+afterEach(() => {
+  while (tmpDirsToCleanup.length > 0) {
+    const d = tmpDirsToCleanup.pop()!;
+    rmSync(d, { recursive: true, force: true });
+  }
+});
 
 import {
   DEFAULT_E2E_COST_CAP_USD,
@@ -60,7 +73,7 @@ describe("e2e harness — createE2eRun", () => {
   });
 
   it("respects LLM_TEAM_E2E_TMPDIR override", () => {
-    const altRoot = mkdtempSync(join(tmpdir(), "alt-tmp-"));
+    const altRoot = trackedMkdtemp("alt-tmp-");
     const handle = createE2eRun({ env: { LLM_TEAM_E2E_TMPDIR: altRoot } });
     try {
       expect(handle.workdir.startsWith(altRoot)).toBe(true);
@@ -88,7 +101,7 @@ describe("e2e harness — snapshot/verify blast radius", () => {
   });
 
   it("detects production ledger size drift", () => {
-    const dir = mkdtempSync(join(tmpdir(), "prodledger-"));
+    const dir = trackedMkdtemp("prodledger-");
     const ledgerPath = join(dir, "ledger.ndjson");
     writeFileSync(ledgerPath, "row-1\n", "utf8");
     const baseline = snapshotBlastRadius({ productionLedgerPath: ledgerPath });
@@ -99,7 +112,7 @@ describe("e2e harness — snapshot/verify blast radius", () => {
   });
 
   it("tolerates missing production ledger (size=0 vs size=0)", () => {
-    const dir = mkdtempSync(join(tmpdir(), "noledger-"));
+    const dir = trackedMkdtemp("noledger-");
     const ledgerPath = join(dir, "missing.ndjson");
     const baseline = snapshotBlastRadius({ productionLedgerPath: ledgerPath });
     expect(baseline.productionLedgerSize).toBe(0);
@@ -109,7 +122,7 @@ describe("e2e harness — snapshot/verify blast radius", () => {
   });
 
   it("returns sentinel for non-git trunkRoot and matches itself", () => {
-    const dir = mkdtempSync(join(tmpdir(), "nogit-"));
+    const dir = trackedMkdtemp("nogit-");
     const baseline = snapshotBlastRadius({ trunkRoot: dir });
     expect(baseline.trunkStatus).toBe("<no-git>");
     expect(() => verifyBlastRadius(baseline, { trunkRoot: dir })).not.toThrow();
