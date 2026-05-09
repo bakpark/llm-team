@@ -30,6 +30,16 @@ export interface RunInnerVerificationInput {
   targetRevision: string;
   testCommands: CommandSpec[];
   environmentFingerprint: string;
+  /**
+   * KAC-TRACEABILITY (phase 8c, plan §G2-2): AC-IDs this verification is
+   * intended to cover. Recorded on the VerificationRun so the scout
+   * observer's AC-level aggregation (`aggregateAcTraceability`) can map a
+   * slice's declared `ac_ids` to PASS / FAIL / MISSING via the slice's
+   * latest SliceMerge → VerificationRun. Optional with default `[]` for
+   * backward compat with phase ≤ 8b call sites that did not yet wire AC
+   * coverage through.
+   */
+  coversAcIds?: readonly string[];
 }
 
 export interface VerificationRunnerDeps {
@@ -62,6 +72,7 @@ export async function persistVerification(
     result: outcome.result,
     failed_tests: outcome.failed_tests,
     log_ref: null,
+    covers_ac_ids: input.coversAcIds ?? [],
   });
   await deps.store.writeAtomic(
     layout.verification(run.verification_run_id),

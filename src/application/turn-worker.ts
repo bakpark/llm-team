@@ -352,12 +352,15 @@ async function runOneInnerTurnInner(
   });
 
   // Verification (#RGC-VERIFICATION inner = synchronous post-commit)
+  // Phase 8c (KAC-TRACEABILITY): forward the slice's declared ac_ids so the
+  // resulting VerificationRun records exactly which AC-IDs it covers.
   const verificationRun = await runInnerVerification(
     {
       targetId: deps.cfg.targetId,
       targetRevision: commit.commit,
       testCommands: deps.cfg.testCommands(prep.agentCwd),
       environmentFingerprint: deps.cfg.environmentFingerprint,
+      coversAcIds: slice.ac_ids,
     },
     {
       verification: deps.verification,

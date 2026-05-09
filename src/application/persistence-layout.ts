@@ -63,6 +63,17 @@ export const layout = {
   contextSummary(milestoneId: string): string {
     return `knowledge/context_summaries/${requireUlid("milestone_id", milestoneId)}.json`;
   },
+  /**
+   * KAC-TRACEABILITY (phase 8c, plan §G2-2) — persisted snapshot of the
+   * AcTraceabilityRow set produced by `aggregateAcTraceability` for a
+   * given milestone. Read-side audits ((`AC-ID -> SliceMerge ->
+   * VerificationRun -> verdict`) consume this manifest without having to
+   * replay the aggregation against potentially-mutated slice/VR files.
+   * Overwritten on each Validation aggregation pass.
+   */
+  acTraceabilityByMilestone(milestoneId: string): string {
+    return `scout/ac_traceability/${requireUlid("milestone_id", milestoneId)}.json`;
+  },
   refactorProposal(proposalId: string): string {
     return `knowledge/refactor_proposals/${requireUlid("proposal_id", proposalId)}.json`;
   },

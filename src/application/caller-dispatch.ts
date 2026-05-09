@@ -258,6 +258,10 @@ async function runEffect(
           testCommands:
             input.testCommandsForReverify?.(innerPrep.agentCwd) ?? [],
           environmentFingerprint: input.environmentFingerprint,
+          // Phase 8c (KAC-TRACEABILITY): forward the slice's declared
+          // ac_ids so the canonical SliceMerge VerificationRun records AC
+          // coverage that scout-observer's AC-level aggregation can join on.
+          coversAcIds: input.slice.ac_ids,
         },
         { ...smOpDeps, workspace: deps.workspace, verification: deps.verification },
       );
