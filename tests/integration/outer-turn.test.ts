@@ -29,6 +29,8 @@ import { layout } from "../../src/application/persistence-layout.js";
 import { DialogueSession } from "../../src/domain/schema/dialogue-session.js";
 import { Milestone } from "../../src/domain/schema/milestone.js";
 import { Slice } from "../../src/domain/schema/slice.js";
+import { SliceMerge } from "../../src/domain/schema/slice-merge.js";
+import { VerificationRun } from "../../src/domain/schema/verification.js";
 import { CollectingLogger } from "../../src/ports/logger.js";
 import { SystemClock } from "../../src/ports/clock.js";
 
@@ -193,6 +195,70 @@ async function seedMilestone(
   });
   await store.writeAtomic(layout.milestone(MILESTONE_ID), JSON.stringify(m));
   return m;
+}
+
+/**
+ * Phase 5c: scout aggregation needs a SLICE_VALIDATED slice with a
+ * SM_MERGED SliceMerge → VerificationRun for `verification_green` to fire.
+ * Helper seeds a single passing slice for the Validation PASS test.
+ */
+async function seedValidatedSliceWithEvidence(store: FsStore) {
+  const VR_A = "01HZV0000000000000000000A1";
+  const SM_A = "01HZSM00000000000000000A11";
+  const slice = Slice.parse({
+    slice_id: SLICE_A,
+    milestone_id: MILESTONE_ID,
+    slice_kind: "feature",
+    value_statement: "validated slice",
+    ac_ids: ["AC-1"],
+    acceptance_tests: [{ path: "tests/x.test.ts", name: "x", ac_id: "AC-1" }],
+    declared_scope: ["src/x.ts"],
+    declared_metric_threshold: null,
+    interface_break: false,
+    dependencies: [],
+    trunk_base_revision: "trunk-base",
+    dod_revision_pin: "dod-pin",
+    state: "SLICE_VALIDATED",
+    current_session_id: null,
+    spawning_proposal_id: null,
+    abandoned_reason: null,
+    external_refs: [],
+    created_at: ISO,
+    updated_at: ISO,
+  });
+  await store.writeAtomic(layout.slice(SLICE_A), JSON.stringify(slice));
+  const vr = VerificationRun.parse({
+    verification_run_id: VR_A,
+    target_id: "demo",
+    target_revision: "rev-A1",
+    commands_or_checks: ["t"],
+    environment_fingerprint: "env",
+    started_at: ISO,
+    finished_at: ISO,
+    result: "pass",
+    failed_tests: [],
+    log_ref: null,
+  });
+  await store.writeAtomic(layout.verification(VR_A), JSON.stringify(vr));
+  const sm = SliceMerge.parse({
+    slice_merge_id: SM_A,
+    slice_id: SLICE_A,
+    target_id: "demo",
+    pre_merge_workspace_revision: "pre",
+    merge_revision: "merge-A1",
+    inner_session_id: null,
+    review_session_id: null,
+    verification_run_id: VR_A,
+    state: "SM_MERGED",
+    merged_at: ISO,
+    merged_by_caller_id: "caller-1",
+    lease_token: null,
+    audit_chain_predecessor_id: null,
+    external_refs: [],
+    created_at: ISO,
+    updated_at: ISO,
+  });
+  await store.writeAtomic(layout.sliceMerge(SM_A), JSON.stringify(sm));
 }
 
 function planningSliceFixture(sliceId: string, deps: string[] = []) {
@@ -536,6 +602,12 @@ describe("runOneOuterTurn — Validation lead_only PASS finalizes M_DONE", () =>
   it("sentinel lead emits milestone_package PASS → ContextSummary persisted, milestone M_DONE", async () => {
     const env = setup();
     await seedMilestone(env.store, "M_DELIVERY_VALIDATING", { specPin: "spec-rev-1" });
+    // Phase 5c: scout aggregation requires a SLICE_VALIDATED slice with a
+    // SM_MERGED SliceMerge → VerificationRun for the `evidence_only` gate
+    // to register `verification_green`. Without seeded evidence the
+    // aggregation returns STALE and the session stays in `continue` until
+    // the FAIL/STALE bypass kicks in — which is the new desired behaviour.
+    await seedValidatedSliceWithEvidence(env.store);
     const { adapter } = makeStub({
       sentinel: [validationLead(MILESTONE_ID, "PASS")],
     });
@@ -562,6 +634,56 @@ describe("runOneOuterTurn — Validation lead_only PASS finalizes M_DONE", () =>
     );
     expect(m.state).toBe("M_DONE");
     expect(m.context_summary_id).not.toBeNull();
+
+    // Phase 5c: ContextSummary is now wired with scout-supplied slices.
+    const ctxBody = await env.store.readText(
+      layout.contextSummary(MILESTONE_ID),
+    );
+    expect(ctxBody).not.toBeNull();
+    const ctxParsed = JSON.parse(ctxBody!);
+    expect(ctxParsed.slices.length).toBeGreaterThan(0);
+    expect(ctxParsed.slices[0].slice_id).toBe(SLICE_A);
+  });
+
+  it("PR #72 P0-1: Validation PASS persists exactly one aggregate VerificationRun (single aggregation invariant)", async () => {
+    const env = setup();
+    await seedMilestone(env.store, "M_DELIVERY_VALIDATING", { specPin: "spec-rev-1" });
+    await seedValidatedSliceWithEvidence(env.store);
+    // Capture the verifications dir before the outer turn so we can isolate
+    // the aggregate(s) added by Validation evidence aggregation.
+    const before = new Set(await env.store.list("verifications"));
+    const { adapter } = makeStub({
+      sentinel: [validationLead(MILESTONE_ID, "PASS")],
+    });
+    const llmRunner = new AdapterRunnerPort(adapter);
+    const out = await runOneOuterTurn({
+      store: env.store,
+      clock: env.clock,
+      llmRunner,
+      ledger: env.ledger,
+      callerId: "test",
+      targetId: "demo",
+    });
+    expect(out.kind).toBe("turn_persisted");
+
+    const after = await env.store.list("verifications");
+    const newOnes: string[] = [];
+    for (const name of after) {
+      if (!before.has(name)) newOnes.push(name);
+    }
+    // Exactly one new aggregate VR (the scout-aggregated one). Two would
+    // indicate the dual aggregation regression (loadOuterTurnSummaries +
+    // buildDispatchInput each persisting their own).
+    const aggregates: unknown[] = [];
+    for (const name of newOnes) {
+      const body = await env.store.readText(`verifications/${name}`);
+      if (body == null) continue;
+      const parsed = VerificationRun.parse(JSON.parse(body));
+      if (parsed.environment_fingerprint === "scout-observer") {
+        aggregates.push(parsed);
+      }
+    }
+    expect(aggregates.length).toBe(1);
   });
 
   it("sentinel lead FAIL → converges validation_fail → milestone reverts to M_DELIVERY_BUILDING (PR #69 P0-4)", async () => {
