@@ -16,6 +16,7 @@
  * propagate quickly. `unreachable` is never cached.
  */
 
+import { spawn } from "node:child_process";
 import type {
   MembershipResult,
   TeamMembershipPort,
@@ -24,6 +25,45 @@ import type { ClockPort } from "../../ports/clock.js";
 import type { GhExec } from "../issue-tracker/github.js";
 
 const PROVIDER = "github";
+
+/**
+ * Phase 9d — minimal production `GhExec` that spawns the local `gh` CLI.
+ * Auth lives outside this process (Inv #4): `gh` reads `GH_TOKEN` / login
+ * state. On non-zero exit the rejection message embeds stderr so the caller
+ * can route HTTP-404 → `non_member` and other failures → `unreachable`
+ * (see {@link GitHubTeamMembership}).
+ *
+ * `command` defaults to `"gh"`. Operators who keep `gh` outside `$PATH`
+ * pass an absolute path. No shell is involved (argv list).
+ */
+export class ProcessGhExec implements GhExec {
+  constructor(private readonly command: string = "gh") {}
+
+  run(args: string[], stdin?: string): Promise<{ stdout: string }> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(this.command, args, {
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const stdout: Buffer[] = [];
+      const stderr: Buffer[] = [];
+      child.stdout.on("data", (c: Buffer) => stdout.push(c));
+      child.stderr.on("data", (c: Buffer) => stderr.push(c));
+      child.on("error", (err) => reject(err));
+      child.on("close", (code) => {
+        if (code === 0) {
+          resolve({ stdout: Buffer.concat(stdout).toString("utf8") });
+          return;
+        }
+        const err = Buffer.concat(stderr).toString("utf8").trim();
+        reject(new Error(`gh exited ${code}: ${err}`));
+      });
+      if (stdin != null) {
+        child.stdin.write(stdin);
+      }
+      child.stdin.end();
+    });
+  }
+}
 
 /** Default short TTL for non-member results so role removals propagate. */
 const NON_MEMBER_TTL_MS = 30_000;

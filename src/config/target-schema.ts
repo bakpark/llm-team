@@ -16,6 +16,16 @@ export const ProfileCfg = z
 
 export type ProfileCfg = z.infer<typeof ProfileCfg>;
 
+/**
+ * TCC-GOVERNANCE `human_team_provider` — selects the `TeamMembershipPort`
+ * adapter the daemon binds. `fs-mirror` (default) keeps the phase-9a parity
+ * wiring; `github` opts the deployment into the `gh api` Teams adapter
+ * (phase-9d follow-up to PR #79). The schema default preserves backward
+ * compatibility — operators who never set the field stay on fs-mirror.
+ */
+export const HumanTeamProvider = z.enum(["github", "fs-mirror"]);
+export type HumanTeamProvider = z.infer<typeof HumanTeamProvider>;
+
 export const Governance = z
   .object({
     human_team: z.string().min(1),
@@ -23,6 +33,7 @@ export const Governance = z
     contract_change_issue_number: z.number().int().positive(),
     signal_command_prefix: z.string().min(1).default("/"),
     human_team_cache_ttl_seconds: z.number().int().positive().default(300),
+    human_team_provider: HumanTeamProvider.default("fs-mirror"),
     unauthorized_author_alert: z.boolean().default(false),
   })
   .strict()

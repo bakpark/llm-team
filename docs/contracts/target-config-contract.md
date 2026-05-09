@@ -97,6 +97,7 @@ legacy `agent_runner.by_role` 키는 폐기되었다.
 | `target.governance.contract_change_issue_number` | yes | — | `{contract, change_proposal}` 집합 surface — verb 가 target_kind 결정 (예: `amendment-approve` → `change_proposal`). |
 | `target.governance.signal_command_prefix` | no | `/` | comment command verb prefix. slash-command 충돌 회피용 운영 override. |
 | `target.governance.human_team_cache_ttl_seconds` | no | `300` | drain 의 GitHub Teams API 응답 캐시 TTL. RGC-LEASE-KINDS 의 lease TTL 과 별개. |
+| `target.governance.human_team_provider` | no | `"fs-mirror"` | `TeamMembershipPort` 어댑터 선택. `"fs-mirror"` (default) 는 `external_mirror/teams/<team>.json` allowlist (self-hosting / 테스트 용). `"github"` 는 `gh api /orgs/{org}/teams/{slug}/memberships/{user}` 로 라우팅 (auth 는 `GH_TOKEN` / `gh auth login` 으로 외부에서 — Inv #4). |
 | `target.governance.unauthorized_author_alert` | no | `false` | 비-멤버이지만 repo collaborator 인 author 의 1차 시도 시 비공개 운영 알림 (RGC-NOTIFICATION). 공개 surface 에는 노출하지 않음. |
 
 `human_team` 캐시 미스 + GitHub Teams API 실패 시 drain 은 fail-closed (envelope 큐 진입 보류, backoff 재시도). 한도 초과 시 RGC-NOTIFICATION 운영 알림.
