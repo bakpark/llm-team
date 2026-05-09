@@ -315,25 +315,29 @@ target.dual_track: {
 ### 키 스키마
 
 ```text
-target.context_budget.<loop>.<step>.{
-  tokens                     # int. 1-shot 호출의 총 token hard cap (provider 한도 보다 낮게 설정)
+target.context_budget."<loop>.<step>".{
+  token_hard_cap   # MUST. int (positive). 1-shot 호출의 총 token hard cap
+                   # (provider 한도 보다 낮게 설정). 초과 시 AGC-CONTEXT-BUDGET
+                   # truncation 우선순위 적용 후에도 남으면 AGC-INVALID
+                   # `context_budget_truncation` 으로 LLM 호출 차단.
+  soft_warn_pct    # optional. float ∈ [0, 1]. 향후 telemetry/warn 임계 (현재 reserved).
 }
 ```
 
-`<loop>` ∈ {`outer`, `middle`, `inner`}, `<step>` 은 `TCC-LOOP-POLICIES` 의 step enum 과 동일.
+키는 `<loop>.<step>` 한 토큰의 flat string 이다 (예: `"outer.Discovery"`, `"inner.tdd_build"`). `<loop>` ∈ {`outer`, `middle`, `inner`}, `<step>` 은 `TCC-LOOP-POLICIES` 의 step enum 과 동일하며 구현은 `LoopStep` Zod enum 으로 폐쇄된다 (`outer.{Discovery,Specification,Planning,Validation}` / `middle.{review,merge}` / `inner.tdd_build`).
 
 ### Default
 
-target operator 가 `target.context_budget.<loop>.<step>` 을 명시하지 않으면 다음 시스템 기본값이 적용된다 (architecture default; provider 한도 보다 낮게 설정).
+target operator 가 `target.context_budget."<loop>.<step>"` 을 명시하지 않으면 다음 시스템 기본값이 적용된다 (architecture default; provider 한도 보다 낮게 설정).
 
 ```text
-target.context_budget.outer.Discovery.tokens:    256000
-target.context_budget.outer.Specification.tokens: 256000
-target.context_budget.outer.Planning.tokens:     256000
-target.context_budget.outer.Validation.tokens:   256000
-target.context_budget.middle.review.tokens:      192000
-target.context_budget.middle.merge.tokens:       128000
-target.context_budget.inner.tdd_build.tokens:    128000
+target.context_budget."outer.Discovery".token_hard_cap:    256000
+target.context_budget."outer.Specification".token_hard_cap: 256000
+target.context_budget."outer.Planning".token_hard_cap:     256000
+target.context_budget."outer.Validation".token_hard_cap:   256000
+target.context_budget."middle.review".token_hard_cap:      192000
+target.context_budget."middle.merge".token_hard_cap:       128000
+target.context_budget."inner.tdd_build".token_hard_cap:    128000
 ```
 
 provider 한도 변경에 따른 cap 조정은 `TCC-CHANGE-RULES` 의 다음 cycle 적용 정책을 따른다.

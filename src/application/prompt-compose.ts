@@ -12,6 +12,7 @@ import {
   resolveContextBudget,
   type ContextBudget,
 } from "../config/target-schema.js";
+import { estimateTokensFromHeader } from "./manifest-builder.js";
 
 /**
  * 4-part prompt composition (#AGC-PROMPT-SERIALIZATION,
@@ -320,9 +321,21 @@ export function composePromptWithBudget(
 function computeTotal(entries: ManifestEntry[], baseOverhead: number): number {
   let total = baseOverhead;
   for (const e of entries) {
-    total += (e.token_estimate ?? 0) + ENTRY_FRAMING_TOKENS;
+    total += entryTokenCost(e) + ENTRY_FRAMING_TOKENS;
   }
   return total;
+}
+
+/**
+ * Returns the deterministic token cost for a manifest entry. When
+ * `token_estimate` is present (phase 8a manifests) it is used verbatim; when
+ * absent (legacy / hand-built manifests) we recompute the same char/4
+ * heuristic over the entry header so the budget is never silently bypassed.
+ */
+function entryTokenCost(entry: ManifestEntry): number {
+  if (entry.token_estimate != null) return entry.token_estimate;
+  const { token_estimate: _omit, ...header } = entry;
+  return estimateTokensFromHeader(header);
 }
 
 /**
@@ -337,7 +350,7 @@ function sortDroppable(entries: ManifestEntry[]): ManifestEntry[] {
     const pb = FETCH_SCOPE_DROP_PRIORITY[b.fetch_scope];
     if (pa !== pb) return pa - pb;
     // Tiebreaker: drop the larger entry first so each drop maximizes savings.
-    return (b.token_estimate ?? 0) - (a.token_estimate ?? 0);
+    return entryTokenCost(b) - entryTokenCost(a);
   });
   return droppable;
 }
