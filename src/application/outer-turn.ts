@@ -26,8 +26,11 @@
  *      AgentRunner, validate envelope, persist SessionTurn (lock + read-
  *      check-write inside `persistSessionTurn`).
  *   6. Re-load all persisted turns, evaluate finalization. Validation's
- *      `evidence_only` rule pulls a synthetic VerificationRun from the
- *      lead's `milestone_package` verdict (PASS → result=pass).
+ *      `evidence_only` rule pulls the scout-aggregated VerificationRun
+ *      (phase 5c — `scout-observer.aggregateValidationEvidence`) so the
+ *      gate decides on real cross-slice evidence rather than a fabricated
+ *      stand-in. The FAIL/STALE bypass below preserves the lead-verdict
+ *      authority for explicit FAIL/STALE outcomes.
  *   7. CONVERGED → dispatch via `caller-dispatch-outer.dispatchOuterOutcome`,
  *      then persist `state=CONVERGED + final_verdict + finalization_decision`.
  *      No dispatch happens for `continue` / `timeout` / `awaiting_human`.
@@ -51,7 +54,6 @@ import {
 import type { Envelope } from "../domain/schema/envelope.js";
 import type { Milestone as MilestoneT } from "../domain/schema/milestone.js";
 import type { CallerRoutingDecision } from "../domain/schema/session-turn.js";
-import type { VerificationRun } from "../domain/schema/verification.js";
 import type { ClockPort } from "../ports/clock.js";
 import type { LlmRunnerPort } from "../ports/llm-runner.js";
 import type { StorePort } from "../ports/store.js";
@@ -82,6 +84,7 @@ import {
 import { Slice, type Slice as SliceT } from "../domain/schema/slice.js";
 import type { LlmAgentProfileId, AgentRole } from "../ports/llm-runner.js";
 import { idempotencyKey } from "./idempotency.js";
+import { aggregateValidationEvidence } from "./scout-observer.js";
 
 export interface OuterTurnDeps {
   store: StorePort;
@@ -203,6 +206,7 @@ export async function runOneOuterTurn(
     turnIndex,
     phase,
     deps,
+    milestone.milestone_id,
   );
   let preDecision = evaluateTermination({
     termination: session.session_termination,
@@ -472,6 +476,7 @@ export async function runOneOuterTurn(
     sessionAfterTurn.current_turn_index,
     phase,
     deps,
+    milestone.milestone_id,
   );
   let decision = evaluateTermination({
     termination: sessionAfterTurn.session_termination,
@@ -592,12 +597,13 @@ async function finalizeConvergedSession(
       detail: "convergence reached but no lead envelope available for dispatch",
     };
   }
-  const dispatchInput: OuterDispatchInput = buildDispatchInput(
+  const dispatchInput: OuterDispatchInput = await buildDispatchInput(
     decision,
     session,
     milestone,
     phase,
     leadEnvelope,
+    deps,
   );
   const dispatch = await dispatchOuterOutcome(dispatchInput, {
     store: deps.store,
@@ -1167,15 +1173,24 @@ function nextReviewer(
 
 /**
  * Build the TurnSummary[] termination-evaluator consumes. For Validation
- * we synthesize a `verification_green` VerificationRun from the lead's
- * milestone_package verdict so `evidence_only` can decide without a real
- * scout aggregation pass (deferred to 5c).
+ * we attach the scout aggregate VerificationRun (phase 5c —
+ * `aggregateValidationEvidence`) so `evidence_only` decides on real
+ * cross-slice evidence. Lead-verdict guard (PR #69 P0-4) is preserved by
+ * the FAIL/STALE bypass in runOneOuterTurn — scout aggregation only
+ * downgrades a PASS lead verdict to STALE when no slice-level evidence
+ * exists (defence in depth against the lead claiming PASS without
+ * underlying SLICE_VALIDATED + SliceMerge → VerificationRun coverage).
+ *
+ * `milestoneId` is optional only for back-compat with older outer phases
+ * (Discovery / Specification / Planning) that do not need evidence
+ * aggregation.
  */
 async function loadOuterTurnSummaries(
   sessionId: string,
   upToTurnIndexExclusive: number,
   phase: OuterPhase,
   deps: Pick<OuterTurnDeps, "store" | "clock" | "targetId">,
+  milestoneId?: string,
 ): Promise<TurnSummary[]> {
   const summaries: TurnSummary[] = [];
   for (let i = 0; i < upToTurnIndexExclusive; i++) {
@@ -1208,28 +1223,23 @@ async function loadOuterTurnSummaries(
         env.agent_profile_id ?? parsed.agent_profile_id ?? undefined,
     });
   }
-  if (phase === "Validation" && summaries.length > 0) {
-    // Synthesize a verification_green record from the latest lead's
-    // milestone_package verdict. PASS → pass; FAIL/STALE → fail.
+  if (phase === "Validation" && summaries.length > 0 && milestoneId != null) {
+    // Phase 5c: scout aggregation. The `verification_green` evidence
+    // attached to the lead summary is the real scout-aggregated
+    // VerificationRun (not a fabricated stand-in). When the aggregation
+    // returns STALE (no SLICE_VALIDATED slices, or any missing
+    // SliceMerge → VerificationRun hop), the synthesised VR is `fail` so
+    // `evidence_only` keeps the session in `continue` until the underlying
+    // slice state catches up — at which point the FAIL/STALE bypass
+    // (P0-4) finalizes via the lead's explicit verdict.
     const lastLead = lastBy(summaries, (t) => t.agent_role_in_session === "lead");
     if (lastLead?.verdict?.result != null) {
-      const result =
-        lastLead.verdict.result === "PASS" ? "pass" : "fail";
-      const synthetic: VerificationRun = {
-        verification_run_id: newMonotonicId(deps.clock.now()),
-        target_id: deps.targetId,
-        target_revision: "outer-validation",
-        commands_or_checks: ["outer.validation.aggregate"],
-        environment_fingerprint: "outer-aggregate",
-        started_at: deps.clock.isoNow(),
-        finished_at: deps.clock.isoNow(),
-        result,
-        failed_tests: [],
-        log_ref: null,
-      };
-      // attach to the last summary entry (corresponding to the lead turn).
+      const evidence = await aggregateValidationEvidence(
+        { milestoneId },
+        { store: deps.store, clock: deps.clock, targetId: deps.targetId },
+      );
       const idx = summaries.length - 1;
-      summaries[idx] = { ...summaries[idx]!, verification: synthetic };
+      summaries[idx] = { ...summaries[idx]!, verification: evidence.aggregate };
     }
   }
   return summaries;
@@ -1260,13 +1270,14 @@ function lastBy<T>(arr: readonly T[], pred: (t: T) => boolean): T | null {
  * them defensively — missing fields surface as dispatch errors downstream
  * rather than silently dropping side-effects.
  */
-function buildDispatchInput(
+async function buildDispatchInput(
   decision: TerminationDecision & { converged: true },
   session: DialogueSessionT,
   milestone: MilestoneT,
   phase: OuterPhase,
   leadEnvelope: Envelope,
-): OuterDispatchInput {
+  deps: Pick<OuterTurnDeps, "store" | "clock" | "targetId">,
+): Promise<OuterDispatchInput> {
   const artifacts = (leadEnvelope.artifacts ?? {}) as Record<string, unknown>;
   // Validation finalization rule (`lead_only`) propagates the raw verdict
   // result (`PASS` / `FAIL` / `STALE`) as the session's final_verdict, but
@@ -1295,9 +1306,23 @@ function buildDispatchInput(
     case "Validation": {
       if (normalized === "validation_pass") {
         const summary = parseContextSummary(artifacts, milestone.milestone_id);
-        return summary != null
-          ? { ...base, contextSummaryInput: summary }
-          : base;
+        if (summary == null) return base;
+        // Phase 5c: scout-supplied slices field. The lead's
+        // milestone_package envelope declares a context_summary body but
+        // omits the per-slice references — those are owned by the scout
+        // observer aggregation pass. Re-run aggregation here (idempotent
+        // on store state) to inject ContextSummarySliceRef[].
+        const evidence = await aggregateValidationEvidence(
+          { milestoneId: milestone.milestone_id },
+          deps,
+        );
+        return {
+          ...base,
+          contextSummaryInput: {
+            ...summary,
+            slices: [...evidence.slicesCovered],
+          },
+        };
       }
       if (normalized === "validation_fail") {
         const ids = parseStringArray(artifacts, "responsible_slice_ids");
