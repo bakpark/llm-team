@@ -3,7 +3,7 @@
  * Phase 4 daemon CLI — runs continuous loops with lease-protected pickup.
  *
  *   tsx src/cli/daemon.ts --role turn-worker | dialogue-coordinator | recovery
- *     | drift-observer
+ *     | drift-observer | scout-scanner
  *     --target ./target.json [--workdir <path>]
  *     [--once] [--cycle-interval-ms 1000]
  *     [--fake-llm-fixtures <dir>] [--fake-workspace] [--fake-verification]
@@ -16,6 +16,12 @@
  *     non-signal drift and writes `external_observation` ledger rows. Uses
  *     the FsMirror IssueTracker / GitHost adapters; production GitHub-API
  *     wiring is out of scope for this phase.
+ *   - `scout-scanner`       — phase-9b (G1-3). Periodic KAC-REFACTOR-BACKLOG
+ *     scan over in-progress Delivery slices. Default cadence 5min when
+ *     `--cycle-interval-ms` is omitted. The actual metric-collection
+ *     adapter (TCC-REFACTOR-METRICS) is still spec-only — the daemon
+ *     wiring uses a no-op scanner so the role runs idempotently with
+ *     zero RefactorBacklog mutations until the adapter lands.
  *
  * Atomicity (RGC-DAEMON-STARTUP): every daemon role takes a per-role PID
  * lockdir under `<workdir>/log/daemon-<role>.pid.lock`. Sibling failure on
@@ -55,6 +61,7 @@ import { FileLedger } from "../application/ledger.js";
 import { runOneOuterTurn } from "../application/outer-turn.js";
 import { LOG_DAEMON_PATH } from "../application/persistence-layout.js";
 import { runRecoverySweep } from "../application/recovery.js";
+import { runScoutScannerSweep } from "../application/scout-observer.js";
 import { runOneInnerTurn } from "../application/turn-worker.js";
 import { SystemClock } from "../ports/clock.js";
 
@@ -64,7 +71,8 @@ type DaemonRole =
   | "outer-coordinator"
   | "dual-track-scheduler"
   | "recovery"
-  | "drift-observer";
+  | "drift-observer"
+  | "scout-scanner";
 
 interface CliArgs {
   role: DaemonRole;
@@ -84,6 +92,12 @@ interface CliArgs {
 // omitted for `--role drift-observer`, fall back to ~60s.
 const DEFAULT_CYCLE_INTERVAL_MS = 1_000;
 const DRIFT_OBSERVER_DEFAULT_CYCLE_INTERVAL_MS = 60_000;
+// Phase 9b (G1-3): scout-scanner is an architectural debt scanner over
+// in-progress Delivery slices. The planning §변경 spec pins the default
+// cadence to 5min — the scanner produces RefactorBacklog candidates and
+// running it at the daemon's 1s default would (a) waste churn on an
+// idempotent dedup path and (b) flood the ledger with no-op cycles.
+const SCOUT_SCANNER_DEFAULT_CYCLE_INTERVAL_MS = 300_000;
 
 function parseArgs(argv: readonly string[]): CliArgs {
   const a = [...argv];
@@ -114,10 +128,11 @@ function parseArgs(argv: readonly string[]): CliArgs {
           v !== "outer-coordinator" &&
           v !== "dual-track-scheduler" &&
           v !== "recovery" &&
-          v !== "drift-observer"
+          v !== "drift-observer" &&
+          v !== "scout-scanner"
         )
           throw new Error(
-            `--role must be turn-worker | dialogue-coordinator | outer-coordinator | dual-track-scheduler | recovery | drift-observer (got ${v ?? "<missing>"})`,
+            `--role must be turn-worker | dialogue-coordinator | outer-coordinator | dual-track-scheduler | recovery | drift-observer | scout-scanner (got ${v ?? "<missing>"})`,
           );
         out.role = v;
         break;
@@ -160,10 +175,13 @@ function parseArgs(argv: readonly string[]): CliArgs {
   }
   if (out.role == null)
     throw new Error(
-      "--role is required (turn-worker | dialogue-coordinator | outer-coordinator | dual-track-scheduler | recovery | drift-observer)",
+      "--role is required (turn-worker | dialogue-coordinator | outer-coordinator | dual-track-scheduler | recovery | drift-observer | scout-scanner)",
     );
   if (out.role === "drift-observer" && !cycleIntervalMsExplicit) {
     out.cycleIntervalMs = DRIFT_OBSERVER_DEFAULT_CYCLE_INTERVAL_MS;
+  }
+  if (out.role === "scout-scanner" && !cycleIntervalMsExplicit) {
+    out.cycleIntervalMs = SCOUT_SCANNER_DEFAULT_CYCLE_INTERVAL_MS;
   }
   return out as CliArgs;
 }
@@ -222,7 +240,8 @@ async function main(argv: readonly string[]): Promise<number> {
     const needsLlmRunner =
       args.role !== "recovery" &&
       args.role !== "dual-track-scheduler" &&
-      args.role !== "drift-observer";
+      args.role !== "drift-observer" &&
+      args.role !== "scout-scanner";
     const allowFake = process.env.LLM_TEAM_ALLOW_FAKE_RUNNER === "1";
     const llmRunner = args.fakeLlmFixtures
       ? new AdapterRunnerPort(new FakeAdapter({ fixtureDir: args.fakeLlmFixtures }))
@@ -442,6 +461,35 @@ async function main(argv: readonly string[]): Promise<number> {
         case "recovery": {
           // Recovery sweep already ran above — emit a noop outcome.
           outcomeJson = JSON.stringify({ role: args.role, outcome: { kind: "swept" } });
+          break;
+        }
+        case "scout-scanner": {
+          // Phase 9b (G1-3) — KAC-REFACTOR-BACKLOG periodic scan over
+          // in-progress Delivery slices. The default scan callback returns
+          // [] — TCC-REFACTOR-METRICS adapter wiring is out of scope for
+          // this phase, so the daemon role runs idempotently with zero
+          // RefactorBacklog mutations until the metric adapter lands. The
+          // sweep still exercises the dedup + ledger-emit path via
+          // `scoutScan` whenever a candidate-producing scan is supplied.
+          const out = await runScoutScannerSweep(
+            { scan: async () => [] },
+            {
+              store,
+              clock,
+              ledger,
+              callerId: args.callerId,
+              targetId: cfg.identity.target_id,
+            },
+          );
+          outcomeJson = JSON.stringify({
+            role: args.role,
+            outcome: {
+              kind: "swept",
+              proposed: out.proposed.length,
+              duplicates: out.duplicates.length,
+              scanned_slices: out.scannedSliceCount,
+            },
+          });
           break;
         }
         case "drift-observer": {
