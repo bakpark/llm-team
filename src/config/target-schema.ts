@@ -146,9 +146,64 @@ export const InternalEscalationRules = z
 
 export type InternalEscalationRules = z.infer<typeof InternalEscalationRules>;
 
+/**
+ * TCC-DUAL-TRACK — cross-slot priority + scout cron entry (phase 6a).
+ *
+ * `priority` selects the cross-slot fairness strategy that
+ * `application/cross-slot-fairness.ts` applies when both intake and delivery
+ * promotion candidates are ready in the same scheduler cycle. Default is
+ * `delivery_first` per RGC-CROSS-SLOT-FAIRNESS.
+ *
+ * `refactor_scheduled_capacity` is the optional cap consulted by
+ * `application/promotion-guard.ts` (RGC-PROMOTION-GUARD third row).
+ *
+ * `scout_scan` is a minimal schedule helper for the scout periodic scan
+ * referenced by KAC-REFACTOR-BACKLOG / KAC-SLICE-TELEMETRY. Only the cadence
+ * is recorded here; the actual trigger lives with phase 5c/6b.
+ */
+export const DualTrackPriority = z.enum([
+  "delivery_first",
+  "balanced",
+  "discovery_first",
+]);
+export type DualTrackPriority = z.infer<typeof DualTrackPriority>;
+
+export const ScoutScanSchedule = z
+  .object({
+    enabled: z.boolean().default(true),
+    interval_seconds: z.number().int().positive().default(3600),
+  })
+  .strict();
+export type ScoutScanSchedule = z.infer<typeof ScoutScanSchedule>;
+
+export const DualTrack = z
+  .object({
+    priority: DualTrackPriority.default("delivery_first"),
+    refactor_scheduled_capacity: z.number().int().nonnegative().nullable().default(null),
+    scout_scan: ScoutScanSchedule.default(() => ScoutScanSchedule.parse({})),
+  })
+  .strict();
+export type DualTrack = z.infer<typeof DualTrack>;
+
+/**
+ * TCC-IDENTITY `kind` distinguishes self-hosting (LLM-team is its own target)
+ * from external operation. Self-hosting MUST run agent_cwd off-tree from the
+ * controller workdir to keep operational writes (Inv #4) from contaminating
+ * the controller process. The strict separation is enforced by
+ * `application/agent-workspace.ts` — when `kind=self-hosting` and
+ * `agent_cwd === workdir_path` we throw at config load.
+ */
+export const TargetKind = z.enum(["external", "self-hosting"]);
+export type TargetKind = z.infer<typeof TargetKind>;
+
 export const Identity = z
   .object({
     target_id: z.string().min(1),
+    /**
+     * external (default) — target is a separate codebase.
+     * self-hosting — target is the LLM-team repo itself; agent_cwd ≠ workdir_path enforced.
+     */
+    kind: TargetKind.default("external"),
     /**
      * TCC-IDENTITY: abstract reference to the persistent store binding.
      * Mirrors the contract field of the same name. Concrete adapter URIs
@@ -158,6 +213,12 @@ export const Identity = z
     persistent_store_ref: z.string().min(1).optional(),
     /** FS adapter hint when persistent_store_ref points at a local path. */
     workdir_path: z.string().min(1).optional(),
+    /**
+     * Agent worktrees / workspace root. When omitted, callers default to
+     * `<workdir_path>/workspaces`. For self-hosting targets `agent_cwd`
+     * MUST resolve outside `workdir_path` (enforced at config validation).
+     */
+    agent_cwd: z.string().min(1).optional(),
     audit_hash_seed: z.string().min(1).optional(),
     label_prefix: z.string().min(1).optional(),
   })
@@ -179,6 +240,7 @@ export const TargetConfig = z
     governance: Governance.optional(),
     lease: LeaseConfig.optional(),
     internal_escalation_rules: InternalEscalationRules.optional(),
+    dual_track: DualTrack.optional(),
   })
   .strict();
 

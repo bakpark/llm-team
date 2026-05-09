@@ -35,6 +35,7 @@ import { GitWorktreeWorkspace } from "../adapters/workspace/git-worktree.js";
 import { FakeWorkspace } from "../adapters/workspace/fake.js";
 import { validateOrThrow } from "../application/config-validator.js";
 import { runOneMiddleReviewTurn } from "../application/dialogue-coordinator.js";
+import { runOneDualTrackTurn } from "../application/dual-track-scheduler.js";
 import { FileLedger } from "../application/ledger.js";
 import { runOneOuterTurn } from "../application/outer-turn.js";
 import { LOG_DAEMON_PATH } from "../application/persistence-layout.js";
@@ -46,6 +47,7 @@ type DaemonRole =
   | "turn-worker"
   | "dialogue-coordinator"
   | "outer-coordinator"
+  | "dual-track-scheduler"
   | "recovery";
 
 interface CliArgs {
@@ -87,10 +89,11 @@ function parseArgs(argv: readonly string[]): CliArgs {
           v !== "turn-worker" &&
           v !== "dialogue-coordinator" &&
           v !== "outer-coordinator" &&
+          v !== "dual-track-scheduler" &&
           v !== "recovery"
         )
           throw new Error(
-            `--role must be turn-worker | dialogue-coordinator | outer-coordinator | recovery (got ${v ?? "<missing>"})`,
+            `--role must be turn-worker | dialogue-coordinator | outer-coordinator | dual-track-scheduler | recovery (got ${v ?? "<missing>"})`,
           );
         out.role = v;
         break;
@@ -132,7 +135,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
   }
   if (out.role == null)
     throw new Error(
-      "--role is required (turn-worker | dialogue-coordinator | outer-coordinator | recovery)",
+      "--role is required (turn-worker | dialogue-coordinator | outer-coordinator | dual-track-scheduler | recovery)",
     );
   return out as CliArgs;
 }
@@ -180,7 +183,7 @@ async function main(argv: readonly string[]): Promise<number> {
 
     const llmRunner = args.fakeLlmFixtures
       ? new AdapterRunnerPort(new FakeAdapter({ fixtureDir: args.fakeLlmFixtures }))
-      : args.role === "recovery"
+      : args.role === "recovery" || args.role === "dual-track-scheduler"
         ? null
         : (() => {
             throw new Error(
@@ -290,6 +293,24 @@ async function main(argv: readonly string[]): Promise<number> {
             ledger,
             callerId: args.callerId,
             targetId: cfg.identity.target_id,
+          });
+          outcomeJson = JSON.stringify({ role: args.role, outcome });
+          break;
+        }
+        case "dual-track-scheduler": {
+          // Phase 6a — atomic 4-step slot promotion (intake_queue +
+          // delivery_promotion_queue). No LLM runner; no slice-anchored
+          // lease (the scheduler claims slot_lock for the duration of
+          // each promotion only).
+          const outcome = await runOneDualTrackTurn({
+            store,
+            clock,
+            ledger,
+            lease,
+            callerId: args.callerId,
+            targetId: cfg.identity.target_id,
+            dualTrack: cfg.dual_track,
+            leaseConfig: cfg.lease,
           });
           outcomeJson = JSON.stringify({ role: args.role, outcome });
           break;
