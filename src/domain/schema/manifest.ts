@@ -32,6 +32,11 @@ export const ManifestEntryObjectKind = z.enum([
   "code_tree",
   "context_summary",
   "decision",
+  // KAC-SLICE-TELEMETRY (phase 8b) — Discovery N+1 manifest entry that
+  // references the latest SliceTelemetry of the live Delivery N. Read-only
+  // by contract; the entry's `revision_pin` is the SliceTelemetry's
+  // `audit_hash`, which RGC-CROSS-SLOT-STALE compares to detect drift.
+  "slice_telemetry",
 ]);
 export type ManifestEntryObjectKind = z.infer<typeof ManifestEntryObjectKind>;
 

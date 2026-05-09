@@ -15,6 +15,7 @@
  * matrix effects.
  */
 import { newMonotonicId } from "../domain/ids.js";
+import { Slice } from "../domain/schema/slice.js";
 import {
   SliceMerge,
   type SliceMerge as SliceMergeT,
@@ -27,6 +28,7 @@ import type { WorkspacePort } from "../ports/workspace.js";
 import { idempotencyKey } from "./idempotency.js";
 import type { LedgerAppender } from "./ledger.js";
 import { layout } from "./persistence-layout.js";
+import { emitSliceTelemetry } from "./slice-telemetry.js";
 import { runInnerVerification } from "./verification-runner.js";
 
 export interface SliceMergeOpDeps {
@@ -35,6 +37,45 @@ export interface SliceMergeOpDeps {
   ledger: LedgerAppender;
   callerId: string;
   targetId: string;
+}
+
+/**
+ * Phase 8b — KAC-SLICE-TELEMETRY emit hook. Each SliceMerge transition
+ * pairs with a Slice state transition (caller-dispatch.ts), so emitting
+ * here covers SLICE_REVIEWING / SLICE_INTEGRATING / SLICE_VALIDATED /
+ * SLICE_BLOCKED / SLICE_BUILDING (rebuild) re-shape moments. The emit is
+ * idempotent — a no-op call (no partition change) returns the prior
+ * telemetry without writing.
+ *
+ * Failures are non-fatal: telemetry emit is read-side enrichment for
+ * Discovery N+1, and `telemetry_enrichment_missing=warn` (KAC-SLICE-
+ * TELEMETRY) keeps it warn-grade. A surfaced error from the emit could
+ * abort the SliceMerge transition, leaving the slice in an inconsistent
+ * state — far worse than missing telemetry on this cycle.
+ */
+async function emitTelemetryAfterTransition(
+  sliceId: string,
+  deps: SliceMergeOpDeps,
+): Promise<void> {
+  const slicePath = layout.slice(sliceId);
+  let body: string | null;
+  try {
+    body = await deps.store.readText(slicePath);
+  } catch {
+    return;
+  }
+  if (body == null) return;
+  let milestoneId: string;
+  try {
+    milestoneId = Slice.parse(JSON.parse(body)).milestone_id;
+  } catch {
+    return;
+  }
+  try {
+    await emitSliceTelemetry({ milestone_id: milestoneId }, deps);
+  } catch {
+    // Swallow — see header rationale.
+  }
 }
 
 /** SM_READY_FOR_REVIEW → SM_APPROVED + records review_session_id. */
@@ -99,6 +140,7 @@ export async function promoteSliceMergeToApproved(
     result_detail: null,
     timestamp: deps.clock.isoNow(),
   });
+  await emitTelemetryAfterTransition(updated.slice_id, deps);
   return updated;
 }
 
@@ -238,6 +280,7 @@ export async function integrateSliceMerge(
     result_detail: null,
     timestamp: deps.clock.isoNow(),
   });
+  await emitTelemetryAfterTransition(merged.slice_id, deps);
   return {
     result: "merged",
     sliceMerge: merged,
@@ -301,6 +344,7 @@ async function markSliceMergeStale(
     result_detail: reason.slice(0, 200),
     timestamp: deps.clock.isoNow(),
   });
+  await emitTelemetryAfterTransition(updated.slice_id, deps);
   return updated;
 }
 
@@ -371,6 +415,7 @@ export async function closeSliceMergeRequestChanges(
     result_detail: null,
     timestamp: deps.clock.isoNow(),
   });
+  await emitTelemetryAfterTransition(updated.slice_id, deps);
   return updated;
 }
 
@@ -433,5 +478,6 @@ export async function closeSliceMergeBlocked(
     result_detail: input.cause.slice(0, 200),
     timestamp: deps.clock.isoNow(),
   });
+  await emitTelemetryAfterTransition(updated.slice_id, deps);
   return updated;
 }
