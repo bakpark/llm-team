@@ -69,6 +69,16 @@ export const layout = {
   sliceTelemetry(telemetryId: string): string {
     return `knowledge/slice_telemetry/${requireUlid("telemetry_id", telemetryId)}.json`;
   },
+  /**
+   * KAC-SLICE-TELEMETRY (phase 8b) — pointer file holding the latest
+   * SliceTelemetry telemetry_id for a given Delivery milestone. Discovery
+   * N+1 manifest inject and RGC-CROSS-SLOT-STALE drift detection both read
+   * this pointer to resolve the live telemetry without scanning the
+   * directory. The pointer body is `{ "telemetry_id": <ULID> }`.
+   */
+  latestSliceTelemetryByMilestone(milestoneId: string): string {
+    return `knowledge/slice_telemetry/by_milestone/${requireUlid("milestone_id", milestoneId)}.json`;
+  },
   featureRequest(requestId: string): string {
     return `feature_requests/${requireUlid("request_id", requestId)}.json`;
   },

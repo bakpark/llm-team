@@ -52,7 +52,7 @@ import {
   type Participant,
 } from "../domain/schema/dialogue-session.js";
 import type { Envelope } from "../domain/schema/envelope.js";
-import type { Milestone as MilestoneT } from "../domain/schema/milestone.js";
+import { Milestone, type Milestone as MilestoneT } from "../domain/schema/milestone.js";
 import type { CallerRoutingDecision } from "../domain/schema/session-turn.js";
 import type { ClockPort } from "../ports/clock.js";
 import type { LlmRunnerPort } from "../ports/llm-runner.js";
@@ -88,6 +88,8 @@ import {
   aggregateValidationEvidence,
   type ScoutEvidenceResult,
 } from "./scout-observer.js";
+import { loadLatestSliceTelemetry } from "./slice-telemetry.js";
+import type { SliceTelemetry as SliceTelemetryT } from "../domain/schema/knowledge.js";
 
 export interface OuterTurnDeps {
   store: StorePort;
@@ -330,7 +332,30 @@ export async function runOneOuterTurn(
       purpose: `prior turn ${i} (${t.agent_role_in_session})${rcSuffix}`,
     });
   }
-  const pinResolver = new OuterPinResolver(milestone, session.session_id, deps.store);
+  // KAC-SLICE-TELEMETRY (phase 8b) — Discovery N+1 / Specification N+1
+  // manifests inject the live SliceTelemetry from the active Delivery N
+  // milestone in the same target (read-only). The pin records the
+  // telemetry's audit_hash so RGC-CROSS-SLOT-STALE can detect drift.
+  const deliveryTelemetry =
+    phase === "Discovery" || phase === "Specification"
+      ? await loadDeliveryTelemetryForInject(milestone, deps.store)
+      : null;
+  if (deliveryTelemetry != null) {
+    drafts.push({
+      object_kind: "slice_telemetry",
+      object_id: deliveryTelemetry.telemetry.telemetry_id,
+      fetch_scope: "body",
+      required: false,
+      purpose: `Delivery N=${deliveryTelemetry.deliveryMilestoneId} live slice telemetry (read-only)`,
+    });
+  }
+  const pinResolver = new OuterPinResolver(
+    milestone,
+    session.session_id,
+    deps.store,
+    deliveryTelemetry?.telemetry ?? null,
+    deliveryTelemetry?.deliveryMilestoneId ?? null,
+  );
   const manifestBuilder = new ManifestBuilder(pinResolver, deps.clock);
   const manifest = await manifestBuilder.build({
     session_id: session.session_id,
@@ -904,6 +929,8 @@ class OuterPinResolver implements RevisionPinResolver {
     private readonly milestone: MilestoneT,
     private readonly sessionId: string,
     private readonly store: StorePort,
+    private readonly deliveryTelemetry: SliceTelemetryT | null,
+    private readonly deliveryMilestoneId: string | null,
   ) {}
   async resolve(entry: ManifestEntryDraft): Promise<string> {
     if (entry.object_kind === "milestone") {
@@ -928,8 +955,81 @@ class OuterPinResolver implements RevisionPinResolver {
       if (body == null) return `missing:${entry.object_id}`;
       return `len=${body.length}:${body.slice(0, 32).replace(/\s+/g, "")}`;
     }
+    if (entry.object_kind === "slice_telemetry") {
+      // KAC-SLICE-TELEMETRY (phase 8b): pin = telemetry audit_hash. Drift
+      // (Delivery emits a new audit_hash) trips the manifest stale-pin
+      // gate AND RGC-CROSS-SLOT-STALE in `cross-slot-stale.ts`.
+      //
+      // PR #77 P0-2 fix: re-read the live latest telemetry pointer for the
+      // pinned Delivery milestone. ManifestBuilder.recheckPins() resolves
+      // each entry again after callAgent, so without this live re-read a
+      // mid-turn Delivery emit (new audit_hash on the same milestone)
+      // would not trip the stale gate — the resolver would keep returning
+      // the snapshot's audit_hash. We compare by Delivery milestone_id
+      // rather than telemetry_id because the telemetry_id rotates on every
+      // emit; the milestone is the stable identity for "Delivery N".
+      if (this.deliveryMilestoneId == null) {
+        return `missing:${entry.object_id}`;
+      }
+      const live = await loadLatestSliceTelemetry(
+        this.store,
+        this.deliveryMilestoneId,
+      );
+      if (live == null) return `missing:${entry.object_id}`;
+      return live.audit_hash;
+    }
     return this.milestone.updated_at;
   }
+}
+
+/**
+ * Resolve the live Delivery N SliceTelemetry to inject into a Discovery /
+ * Specification N+1 manifest. Returns null when no Delivery family
+ * milestone (M_DELIVERY_BUILDING / VALIDATING / DONE) shares the target
+ * OR when the latest such milestone has no SliceTelemetry emitted yet
+ * (KAC-SLICE-TELEMETRY allows `telemetry_enrichment_missing=warn`).
+ */
+async function loadDeliveryTelemetryForInject(
+  discoveryMilestone: MilestoneT,
+  store: StorePort,
+): Promise<{
+  telemetry: SliceTelemetryT;
+  deliveryMilestoneId: string;
+} | null> {
+  const deliveryFamily: readonly string[] = [
+    "M_DELIVERY_BUILDING",
+    "M_DELIVERY_VALIDATING",
+    "M_DONE",
+  ];
+  let names: string[];
+  try {
+    names = await store.list("milestones");
+  } catch {
+    return null;
+  }
+  const candidates: MilestoneT[] = [];
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const body = await store.readText(`milestones/${name}`);
+    if (body == null) continue;
+    let m: MilestoneT;
+    try {
+      m = Milestone.parse(JSON.parse(body));
+    } catch {
+      continue;
+    }
+    if (m.target_id !== discoveryMilestone.target_id) continue;
+    if (m.milestone_id === discoveryMilestone.milestone_id) continue;
+    if (!deliveryFamily.includes(m.state)) continue;
+    candidates.push(m);
+  }
+  if (candidates.length === 0) return null;
+  // Most-recently-updated Delivery is "Delivery N" for inject purposes.
+  candidates.sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
+  const deliveryN = candidates[0]!;
+  const telemetry = await loadLatestSliceTelemetry(store, deliveryN.milestone_id);
+  if (telemetry == null) return null;
+  return { telemetry, deliveryMilestoneId: deliveryN.milestone_id };
 }
 
 function decideRouting(envelope: Envelope): CallerRoutingDecision {

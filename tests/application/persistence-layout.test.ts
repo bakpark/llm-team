@@ -85,6 +85,10 @@ describe("persistence-layout", () => {
     expect(layout.sliceTelemetry(TELEM_ID)).toBe(
       `knowledge/slice_telemetry/${TELEM_ID}.json`,
     );
+    expect(layout.latestSliceTelemetryByMilestone(M_ID)).toBe(
+      `knowledge/slice_telemetry/by_milestone/${M_ID}.json`,
+    );
+    expect(() => layout.latestSliceTelemetryByMilestone("bad")).toThrow(/ULID/);
     expect(layout.featureRequest(REQ_ID)).toBe(
       `feature_requests/${REQ_ID}.json`,
     );

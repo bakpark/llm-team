@@ -1,28 +1,32 @@
 /**
- * RGC-CROSS-SLOT-STALE — cross-slot staleness detection (phase 6a).
+ * RGC-CROSS-SLOT-STALE — cross-slot staleness detection.
  *
  * Detects when a Discovery N+1 outer session has read-base-revision-pinned
  * an artefact from Delivery N that has since changed. When detected, the
  * affected Discovery N+1 SESSION_OPEN session is transitioned to
  * AWAITING_REVALIDATION (per RGC-CROSS-SLOT-STALE Caller Action table).
  *
- * Detection signal (FS-only, phase 6a — full revision pin replay arrives
- * with phase 5c/6b telemetry):
+ * Detection signal — phase 8b (KAC-SLICE-TELEMETRY pin comparison):
  *
  *   - For each SESSION_OPEN whose `parent_loop = "outer"` and whose
- *     `parent_object_kind = "milestone"`:
- *       - find the milestone the session belongs to.
- *       - if the milestone is in a Discovery / Specification state AND a
- *         peer Delivery milestone (state ∈ {M_DELIVERY_BUILDING,
- *         M_DELIVERY_VALIDATING, M_DONE}) was updated AFTER the Discovery
- *         session's `updated_at`, mark the Discovery session as stale.
+ *     `parent_object_kind = "milestone"` and whose milestone is in a
+ *     Discovery / Specification state:
  *
- *   - The conservative "any newer Delivery update" trigger is intentional
- *     — phase 6a does not yet track manifest read_base_revision_pin (that
- *     arrives with KAC-SLICE-TELEMETRY inject in phase 5c). The trigger
- *     can therefore over-fire (false-stale); RGC-CROSS-SLOT-STALE allows
- *     warn-grade enforcement (`telemetry_enrichment_missing=warn`) so
- *     this conservative behaviour is contract-compliant.
+ *     1. Resolve the session's *latest* SessionTurn → its `input_manifest_id`.
+ *     2. Read the manifest; locate the entry whose `object_kind` is
+ *        `slice_telemetry` (injected by `outer-turn.ts` for the live
+ *        Delivery N).
+ *     3. Look up the Delivery milestone's *current* SliceTelemetry (via
+ *        `loadLatestSliceTelemetry`) and compare its `audit_hash` to the
+ *        manifest entry's `revision_pin`. Drift → AWAITING_REVALIDATION.
+ *
+ *   - Fallback (no telemetry inject yet — fresh Discovery session whose
+ *     first turn has not run, or no Delivery has emitted telemetry): the
+ *     conservative phase-6a trigger ("any newer Delivery update than the
+ *     Discovery session's updated_at") is preserved. This preserves
+ *     dual-slot safety while telemetry catches up — KAC-SLICE-TELEMETRY
+ *     is `telemetry_enrichment_missing=warn`, so over-firing here remains
+ *     contract-compliant.
  *
  * Atomicity: each session is transitioned under
  * `withFileLock(sessionMetadata)` with a read-check-write. The function is
@@ -34,16 +38,22 @@ import {
   type DialogueSession as DialogueSessionT,
 } from "../domain/schema/dialogue-session.js";
 import {
+  ContextManifest,
+  type ContextManifest as ContextManifestT,
+} from "../domain/schema/manifest.js";
+import {
   Milestone,
   type Milestone as MilestoneT,
   type MilestoneState,
 } from "../domain/schema/milestone.js";
+import { SliceTelemetry } from "../domain/schema/knowledge.js";
 import { newMonotonicId } from "../domain/ids.js";
 import type { ClockPort } from "../ports/clock.js";
 import type { StorePort } from "../ports/store.js";
 import { idempotencyKey } from "./idempotency.js";
 import type { LedgerAppender } from "./ledger.js";
 import { layout } from "./persistence-layout.js";
+import { loadLatestSliceTelemetry } from "./slice-telemetry.js";
 
 const DISCOVERY_FAMILY: readonly MilestoneState[] = [
   "M_DISCOVERY_DRAFT",
@@ -138,7 +148,8 @@ export async function detectCrossSlotStaleSessions(
   // Skip the pass; an explicit check rather than relying on the reduce
   // below makes the intent visible to readers.
   if (deliveryFamily.length === 0) return { staledSessionIds: [] };
-  // Latest Delivery activity timestamp — the conservative trigger.
+  // Latest Delivery activity timestamp — the fallback trigger when no
+  // KAC-SLICE-TELEMETRY pin is available for comparison.
   const latestDeliveryUpdate = deliveryFamily.reduce(
     (acc, m) => (m.updated_at > acc ? m.updated_at : acc),
     deliveryFamily[0]!.updated_at,
@@ -151,7 +162,15 @@ export async function detectCrossSlotStaleSessions(
     const milestone = byId.get(sess.parent_object_id);
     if (milestone == null) continue;
     if (!DISCOVERY_FAMILY.includes(milestone.state)) continue;
-    if (sess.updated_at >= latestDeliveryUpdate) continue;
+
+    const driftKind = await detectDriftForSession(
+      sess,
+      milestone,
+      deliveryFamily,
+      latestDeliveryUpdate,
+      deps.store,
+    );
+    if (driftKind == null) continue;
 
     const sessionPath = layout.sessionMetadata(sess.session_id);
     const transitioned = await deps.store.withFileLock(
@@ -210,7 +229,13 @@ export async function detectCrossSlotStaleSessions(
         parts: {
           kind: "cross_slot_stale",
           session_id: sess.session_id,
-          delivery_revision: latestDeliveryUpdate,
+          // Idempotency key keys on the trigger that fired so a session
+          // re-flagged via a different drift kind would still produce a
+          // distinct ledger row. `telemetry_pin_drift` carries the new
+          // pin; `delivery_updated_at` falls back to the latest Delivery
+          // updated_at (phase-6a conservative trigger).
+          drift_kind: driftKind.kind,
+          drift_value: driftKind.value,
         },
       }),
       lease_token: null,
@@ -223,4 +248,146 @@ export async function detectCrossSlotStaleSessions(
   }
 
   return { staledSessionIds: staledIds };
+}
+
+/**
+ * Per-session drift signal.
+ *
+ * `kind="telemetry_pin_drift"` — the Discovery session's latest manifest
+ * referenced a SliceTelemetry whose audit_hash no longer matches the
+ * Delivery milestone's current SliceTelemetry. `value` records the new
+ * audit_hash.
+ *
+ * `kind="delivery_updated_at"` — fallback (phase-6a conservative trigger):
+ * Delivery activity timestamp moved past the Discovery session's
+ * `updated_at`, and either no telemetry inject was present yet OR a
+ * telemetry pin was present but the Discovery session's updated_at also
+ * pre-dates the latest Delivery activity. `value` records the latest
+ * Delivery `updated_at`.
+ */
+type DriftKind =
+  | { kind: "telemetry_pin_drift"; value: string }
+  | { kind: "delivery_updated_at"; value: string };
+
+async function detectDriftForSession(
+  sess: DialogueSessionT,
+  discoveryMilestone: MilestoneT,
+  deliveryFamily: readonly MilestoneT[],
+  latestDeliveryUpdate: string,
+  store: StorePort,
+): Promise<DriftKind | null> {
+  const inject = await loadInjectedTelemetryPin(sess, store);
+  if (inject != null) {
+    // PR #77 P1 fix: pin the comparison to the *original* Delivery
+    // milestone the manifest was built against. The previous logic
+    // re-selected "most-recently-updated Delivery in the target" at
+    // detection time, which could swap to a different Delivery and
+    // produce false-stale (different milestone's telemetry compared) or
+    // missed-stale (the pinned milestone got rotated past). We resolve
+    // the pinned telemetry record (by its `telemetry_id` = manifest
+    // entry's object_id) to recover its `milestone_id`, then compare
+    // against that milestone's *current* telemetry only.
+    const pinnedDeliveryMilestoneId = await resolvePinnedDeliveryMilestoneId(
+      inject.telemetryId,
+      store,
+    );
+    if (pinnedDeliveryMilestoneId != null) {
+      // Confirm the pinned Delivery still exists and matches this
+      // Discovery's target (else fall through to the conservative
+      // trigger).
+      const pinnedDeliveryStillKnown = deliveryFamily.some(
+        (m) =>
+          m.target_id === discoveryMilestone.target_id &&
+          m.milestone_id !== discoveryMilestone.milestone_id &&
+          m.milestone_id === pinnedDeliveryMilestoneId,
+      );
+      if (pinnedDeliveryStillKnown) {
+        const live = await loadLatestSliceTelemetry(
+          store,
+          pinnedDeliveryMilestoneId,
+        );
+        if (live != null && live.audit_hash !== inject.pin) {
+          return { kind: "telemetry_pin_drift", value: live.audit_hash };
+        }
+        if (live != null && live.audit_hash === inject.pin) {
+          // Pin matches live telemetry — explicit "no drift" signal. Skip
+          // the fallback trigger so a moved Delivery updated_at without a
+          // material slice change does not re-stale.
+          return null;
+        }
+        // live==null but a pin existed: Delivery telemetry was rotated /
+        // archived — treat as drift.
+        return { kind: "telemetry_pin_drift", value: "<missing>" };
+      }
+    } else {
+      // The pinned telemetry record itself is gone — treat as drift so
+      // the Discovery session re-resolves its base on next pickup.
+      return { kind: "telemetry_pin_drift", value: "<missing>" };
+    }
+  }
+  // Fallback — phase-6a conservative trigger. Over-fires by design;
+  // KAC-SLICE-TELEMETRY allows warn-grade enforcement so this stays
+  // contract-compliant until every Discovery session has an injected pin.
+  if (sess.updated_at < latestDeliveryUpdate) {
+    return { kind: "delivery_updated_at", value: latestDeliveryUpdate };
+  }
+  return null;
+}
+
+/**
+ * Resolve the slice_telemetry manifest entry from the session's most-recent
+ * SessionTurn's `input_manifest_id`. Returns the entry's `revision_pin`
+ * (the pinned `audit_hash`) and `object_id` (the pinned `telemetry_id`).
+ * Returns null when no turn exists yet or the manifest has no slice_telemetry
+ * entry.
+ */
+async function loadInjectedTelemetryPin(
+  sess: DialogueSessionT,
+  store: StorePort,
+): Promise<{ pin: string; telemetryId: string } | null> {
+  if (sess.current_turn_index <= 0) return null;
+  // current_turn_index points at the *next* turn; the latest persisted
+  // turn is current_turn_index - 1.
+  const lastIdx = sess.current_turn_index - 1;
+  const turnBody = await store.readText(
+    layout.sessionTurn(sess.session_id, lastIdx),
+  );
+  if (turnBody == null) return null;
+  let manifestId: string;
+  try {
+    const turn = JSON.parse(turnBody) as { input_manifest_id?: unknown };
+    if (typeof turn.input_manifest_id !== "string") return null;
+    manifestId = turn.input_manifest_id;
+  } catch {
+    return null;
+  }
+  const manifestBody = await store.readText(layout.manifest(manifestId));
+  if (manifestBody == null) return null;
+  let manifest: ContextManifestT;
+  try {
+    manifest = ContextManifest.parse(JSON.parse(manifestBody));
+  } catch {
+    return null;
+  }
+  const entry = manifest.entries.find((e) => e.object_kind === "slice_telemetry");
+  if (entry == null) return null;
+  return { pin: entry.revision_pin, telemetryId: entry.object_id };
+}
+
+/**
+ * Read a persisted SliceTelemetry record by its `telemetry_id` and return
+ * the Delivery `milestone_id` it was emitted against. Returns null when
+ * the file is missing or unparseable.
+ */
+async function resolvePinnedDeliveryMilestoneId(
+  telemetryId: string,
+  store: StorePort,
+): Promise<string | null> {
+  const body = await store.readText(layout.sliceTelemetry(telemetryId));
+  if (body == null) return null;
+  try {
+    return SliceTelemetry.parse(JSON.parse(body)).milestone_id;
+  } catch {
+    return null;
+  }
 }
