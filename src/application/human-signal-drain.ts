@@ -17,6 +17,10 @@ import type { ClockPort } from "../ports/clock.js";
 import type { HumanSignalPort } from "../ports/human-signal.js";
 import type { StorePort } from "../ports/store.js";
 import {
+  applyControlSignal,
+  type ApplyControlOutcome,
+} from "./control-state.js";
+import {
   bindHumanSignalToSession,
   type HumanSignalBindingDeps,
 } from "./human-signal-binding.js";
@@ -33,6 +37,9 @@ export type DrainOutcome =
       binding?:
         | { kind: "appended"; session_id: string; turn_index: number }
         | { kind: "unsupported"; reason: string };
+      /** Phase 7b: present for pause/resume/stop signals — records the
+       *  control-state machine transition (or noop reason). */
+      control?: ApplyControlOutcome;
     }
   | {
       kind: "invalid";
@@ -62,6 +69,13 @@ export interface DrainDeps {
    * persistence semantics.
    */
   binding?: HumanSignalBindingDeps;
+  /**
+   * Phase 7b: when true, pause/resume/stop envelopes drive the persisted
+   * control state machine (RGC-SIGNALS, Inv #4 / #8). Daemons opt in via
+   * `runDaemonPrelude`; phase-5a callers omit it so the envelope-only test
+   * surface is preserved.
+   */
+  applyControlState?: boolean;
 }
 
 export async function runHumanSignalDrain(
@@ -74,6 +88,17 @@ export async function runHumanSignalDrain(
     const validation = validateEnvelope(env);
     const now = deps.clock.isoNow();
     if (validation.ok) {
+      // Phase 7b: control signals (pause / resume / stop) drive the
+      // persisted control-state machine BEFORE markProcessed so a daemon
+      // pickup that races with markProcessed still sees the new state.
+      let controlDetail: ApplyControlOutcome | undefined;
+      const isControl =
+        env.signal_type === "pause" ||
+        env.signal_type === "resume" ||
+        env.signal_type === "stop";
+      if (isControl && deps.applyControlState === true) {
+        controlDetail = await applyControlSignal(deps.store, deps.clock, env);
+      }
       // Phase 5b.2: bind FIRST (before markProcessed) so the contribution
       // is visible to the next coordinator pickup. If binding emits a turn,
       // its idempotency_key is the SessionTurn's per_turn key — separate
@@ -125,6 +150,7 @@ export async function runHumanSignalDrain(
         target_kind: env.target_kind,
         target_id: env.target_id,
         ...(bindingDetail != null ? { binding: bindingDetail } : {}),
+        ...(controlDetail != null ? { control: controlDetail } : {}),
       });
     } else {
       const r = await deps.signal.markProcessed({
@@ -162,9 +188,12 @@ function validateEnvelope(env: HumanSignalEnvelope): { ok: true } | { ok: false;
     }
   }
   // Some signal_type / target_kind combinations are documented as system-only.
+  // Phase 7b: `stop` joins pause/resume as the third control-state signal —
+  // all three drive the persisted control-state machine.
   const SYSTEM_ONLY: Record<string, true> = {
     pause: true,
     resume: true,
+    stop: true,
   };
   if (SYSTEM_ONLY[env.signal_type] === true && env.target_kind !== "system") {
     return {
