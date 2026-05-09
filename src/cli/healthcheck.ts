@@ -7,18 +7,21 @@
  *   - git worktree support (>= 2.5)
  *   - node engine match against package.json#engines.node (>= 20)
  *   - vitest list (project tests are runnable)
- *   - typecheck/build (opt-in via --include-typecheck / --include-build)
  *   - gh auth status / gh api user (network)
  *   - GH_TOKEN or `gh auth token` presence
  *   - timeout / gtimeout availability
  *   - claude/codex non-live auth subcommand probe
+ *
+ * Stage 1 records `npm run typecheck` / `npm run build` as SKIP because
+ * those compiles exceed the 5s fail-fast budget; they are gated by the PR
+ * build workflow and the planning checklist anchors M-1-5 / M-1-6.
  *
  * Stage 2/3 are reserved for phase-prod-3. Invoking with `--stage 2|3`
  * emits a placeholder "stage X is implemented in phase-prod-3" message.
  *
  * Usage:
  *   tsx src/cli/healthcheck.ts --stage 1 [--target <path>] [--out <dir>]
- *     [--json] [--include-typecheck] [--include-build]
+ *     [--json]
  */
 import { spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -55,8 +58,6 @@ export interface HealthcheckArgs {
   targetPath?: string;
   outDir?: string;
   json: boolean;
-  includeTypecheck: boolean;
-  includeBuild: boolean;
 }
 
 export interface HealthcheckEnv {
@@ -71,8 +72,6 @@ export function parseArgs(argv: readonly string[]): HealthcheckArgs {
   const out: HealthcheckArgs = {
     stage: 1,
     json: false,
-    includeTypecheck: false,
-    includeBuild: false,
   };
   while (a.length > 0) {
     const flag = a.shift()!;
@@ -93,12 +92,6 @@ export function parseArgs(argv: readonly string[]): HealthcheckArgs {
       case "--json":
         out.json = true;
         break;
-      case "--include-typecheck":
-        out.includeTypecheck = true;
-        break;
-      case "--include-build":
-        out.includeBuild = true;
-        break;
       default:
         throw new Error(`unknown flag: ${flag}`);
     }
@@ -109,6 +102,40 @@ export function parseArgs(argv: readonly string[]): HealthcheckArgs {
 function commandExists(run: RunCmd, name: string): boolean {
   const r = run("command", ["-v", name], { shell: true });
   return r.status === 0 && r.stdout.trim().length > 0;
+}
+
+/**
+ * Per-run probe cache. The same `gh auth status` and `<bin> --help` outputs
+ * are consumed by both auth-model detection and the M-2-1/M-2-5 items, so we
+ * memoize them for the lifetime of a single healthcheck invocation.
+ */
+interface ProbeCache {
+  ghAuthStatus?: { status: number | null; stdout: string; stderr: string };
+  cliHelp: Map<string, { status: number | null; stdout: string; stderr: string }>;
+}
+
+function newProbeCache(): ProbeCache {
+  return { cliHelp: new Map() };
+}
+
+function probeGhAuthStatus(
+  run: RunCmd,
+  cache: ProbeCache,
+): { status: number | null; stdout: string; stderr: string } {
+  if (!cache.ghAuthStatus) cache.ghAuthStatus = run("gh", ["auth", "status"]);
+  return cache.ghAuthStatus;
+}
+
+function probeCliHelp(
+  run: RunCmd,
+  cache: ProbeCache,
+  bin: string,
+): { status: number | null; stdout: string; stderr: string } {
+  const hit = cache.cliHelp.get(bin);
+  if (hit) return hit;
+  const r = run(bin, ["--help"]);
+  cache.cliHelp.set(bin, r);
+  return r;
 }
 
 /** Parses output of `git --version`, e.g. "git version 2.43.0". */
@@ -138,11 +165,15 @@ function gteVersion(
   return true;
 }
 
-function detectGhAuthModel(run: RunCmd, env: NodeJS.ProcessEnv): AuthModel {
+function detectGhAuthModel(
+  run: RunCmd,
+  env: NodeJS.ProcessEnv,
+  cache: ProbeCache,
+): AuthModel {
   if (env.GH_TOKEN && env.GH_TOKEN.length > 0) return "env_token";
   // `gh auth status` mentions "keyring" / "Keychain" when the credential is
   // stored via the OS credential store; otherwise default to "other".
-  const r = run("gh", ["auth", "status"]);
+  const r = probeGhAuthStatus(run, cache);
   const text = `${r.stdout}\n${r.stderr}`;
   if (/keychain|keyring/i.test(text)) return "keychain";
   if (r.status === 0) return "other";
@@ -153,6 +184,7 @@ function detectCliAuthModel(
   run: RunCmd,
   bin: string,
   env: NodeJS.ProcessEnv,
+  cache: ProbeCache,
 ): AuthModel {
   if (!commandExists(run, bin)) return "unknown";
   const tokenEnv = bin === "claude" ? env.ANTHROPIC_API_KEY : env.OPENAI_API_KEY;
@@ -161,7 +193,7 @@ function detectCliAuthModel(
   // contract is defined in phase-prod-3; here we only positively classify
   // when the subcommand surface looks plausible, otherwise leave it as
   // `UNKNOWN_UNTIL_STAGE3` so operators know stage 3 will resolve it.
-  const help = run(bin, ["--help"]);
+  const help = probeCliHelp(run, cache, bin);
   const text = `${help.stdout}\n${help.stderr}`;
   if (/\bauth\b/i.test(text) || /\blogin\b/i.test(text)) {
     return "interactive_only";
@@ -188,11 +220,10 @@ export function runStage1(opts: {
   run: RunCmd;
   env: NodeJS.ProcessEnv;
   cwd: string;
-  includeTypecheck: boolean;
-  includeBuild: boolean;
 }): { items: HealthcheckItem[]; auth_models: AuthModels } {
-  const { run, env, cwd, includeTypecheck, includeBuild } = opts;
+  const { run, env, cwd } = opts;
   const items: HealthcheckItem[] = [];
+  const cache = newProbeCache();
 
   // M-1-1 — required binaries (jq optional, SKIP if missing).
   const required = ["claude", "codex", "gh", "git", "node"] as const;
@@ -262,50 +293,26 @@ export function runStage1(opts: {
     anchor: "M-1-4",
   });
 
-  // M-1-5 — typecheck (opt-in; default SKIP because >5s).
-  if (includeTypecheck) {
-    const tc = run("npm", ["run", "typecheck", "--silent"], {
-      cwd,
-      timeout: 120_000,
-    });
-    items.push({
-      id: "M-1-5.typecheck",
-      status: tc.status === 0 ? "PASS" : "FAIL",
-      detail: tc.status === 0 ? "typecheck clean" : "typecheck failed",
-      anchor: "M-1-5",
-    });
-  } else {
-    items.push({
-      id: "M-1-5.typecheck",
-      status: "SKIP",
-      detail: "default skip (>5s); pass --include-typecheck to enable",
-      anchor: "M-1-5",
-    });
-  }
+  // M-1-5 — typecheck. Stage 1 is a 5s fail-fast probe and `npm run
+  // typecheck` is a multi-second compile, so it is always SKIP here. The
+  // PR build (.github/workflows) and `npm run typecheck` cover this gate.
+  items.push({
+    id: "M-1-5.typecheck",
+    status: "SKIP",
+    detail: "out of stage-1 fail-fast budget; run `npm run typecheck` separately",
+    anchor: "M-1-5",
+  });
 
-  // M-1-6 — build (opt-in; default SKIP because >5s).
-  if (includeBuild) {
-    const bd = run("npm", ["run", "build", "--silent"], {
-      cwd,
-      timeout: 120_000,
-    });
-    items.push({
-      id: "M-1-6.build",
-      status: bd.status === 0 ? "PASS" : "FAIL",
-      detail: bd.status === 0 ? "build clean" : "build failed",
-      anchor: "M-1-6",
-    });
-  } else {
-    items.push({
-      id: "M-1-6.build",
-      status: "SKIP",
-      detail: "default skip (>5s); pass --include-build to enable",
-      anchor: "M-1-6",
-    });
-  }
+  // M-1-6 — build. Same reasoning as M-1-5.
+  items.push({
+    id: "M-1-6.build",
+    status: "SKIP",
+    detail: "out of stage-1 fail-fast budget; run `npm run build` separately",
+    anchor: "M-1-6",
+  });
 
   // M-2-1 — gh auth status.
-  const ghAuth = run("gh", ["auth", "status"]);
+  const ghAuth = probeGhAuthStatus(run, cache);
   items.push({
     id: "M-2-1.gh-auth-status",
     status: ghAuth.status === 0 ? "PASS" : "FAIL",
@@ -353,10 +360,10 @@ export function runStage1(opts: {
 
   // M-2-5 — claude/codex non-live auth subcommand probe.
   const claudeProbe = commandExists(run, "claude")
-    ? run("claude", ["--help"])
+    ? probeCliHelp(run, cache, "claude")
     : null;
   const codexProbe = commandExists(run, "codex")
-    ? run("codex", ["--help"])
+    ? probeCliHelp(run, cache, "codex")
     : null;
   const claudeText = claudeProbe ? `${claudeProbe.stdout}\n${claudeProbe.stderr}` : "";
   const codexText = codexProbe ? `${codexProbe.stdout}\n${codexProbe.stderr}` : "";
@@ -386,9 +393,9 @@ export function runStage1(opts: {
   }
 
   const auth_models: AuthModels = {
-    claude: detectCliAuthModel(run, "claude", env),
-    codex: detectCliAuthModel(run, "codex", env),
-    gh: detectGhAuthModel(run, env),
+    claude: detectCliAuthModel(run, "claude", env, cache),
+    codex: detectCliAuthModel(run, "codex", env, cache),
+    gh: detectGhAuthModel(run, env, cache),
   };
 
   return { items, auth_models };
@@ -430,8 +437,6 @@ export function runHealthcheck(
     run,
     env,
     cwd,
-    includeTypecheck: args.includeTypecheck,
-    includeBuild: args.includeBuild,
   });
   const passed = items.every((it) => it.status !== "FAIL");
   const result: HealthcheckResult = {
@@ -460,20 +465,31 @@ function writeOutFile(
   return path;
 }
 
-export async function main(argv: readonly string[]): Promise<number> {
+export interface MainDeps extends HealthcheckEnv {
+  stdout?: (s: string) => void;
+  stderr?: (s: string) => void;
+  /** Suppress filesystem side-effect when --out is set (used in tests). */
+  skipOutFile?: boolean;
+}
+
+export async function main(
+  argv: readonly string[],
+  deps: MainDeps = {},
+): Promise<number> {
+  const stdout = deps.stdout ?? ((s: string) => process.stdout.write(s));
   const args = parseArgs(argv);
-  const result = runHealthcheck(args);
-  writeOutFile(result, args, process.cwd());
+  const result = runHealthcheck(args, deps);
+  if (!deps.skipOutFile) writeOutFile(result, args, deps.cwd ?? process.cwd());
   if (args.json) {
-    process.stdout.write(`${JSON.stringify(result)}\n`);
+    stdout(`${JSON.stringify(result)}\n`);
   } else {
-    process.stdout.write(
+    stdout(
       `stage=${result.stage} passed=${result.passed} items=${result.items.length}\n`,
     );
     for (const it of result.items) {
-      process.stdout.write(`  [${it.status}] ${it.anchor} ${it.id} — ${it.detail}\n`);
+      stdout(`  [${it.status}] ${it.anchor} ${it.id} — ${it.detail}\n`);
     }
-    process.stdout.write(
+    stdout(
       `auth_models: claude=${result.auth_models.claude} codex=${result.auth_models.codex} gh=${result.auth_models.gh}\n`,
     );
   }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  main,
   parseArgs,
   runHealthcheck,
   type RunCmd,
@@ -42,20 +43,16 @@ const ALL_PASS_TABLE: Record<string, { status: number; stdout?: string; stderr?:
 };
 
 describe("healthcheck parseArgs", () => {
-  it("defaults to stage=1, json=false, no opt-ins", () => {
+  it("defaults to stage=1, json=false", () => {
     const a = parseArgs([]);
     expect(a.stage).toBe(1);
     expect(a.json).toBe(false);
-    expect(a.includeTypecheck).toBe(false);
-    expect(a.includeBuild).toBe(false);
   });
   it("parses flags", () => {
     const a = parseArgs([
       "--stage",
       "1",
       "--json",
-      "--include-typecheck",
-      "--include-build",
       "--out",
       "./hc",
       "--target",
@@ -63,8 +60,6 @@ describe("healthcheck parseArgs", () => {
     ]);
     expect(a.stage).toBe(1);
     expect(a.json).toBe(true);
-    expect(a.includeTypecheck).toBe(true);
-    expect(a.includeBuild).toBe(true);
     expect(a.outDir).toBe("./hc");
     expect(a.targetPath).toBe("./target.json");
   });
@@ -74,12 +69,16 @@ describe("healthcheck parseArgs", () => {
   it("rejects unknown flag", () => {
     expect(() => parseArgs(["--what"])).toThrow();
   });
+  it("rejects removed --include-typecheck / --include-build flags", () => {
+    expect(() => parseArgs(["--include-typecheck"])).toThrow();
+    expect(() => parseArgs(["--include-build"])).toThrow();
+  });
 });
 
 describe("healthcheck runHealthcheck", () => {
   it("all-pass mock yields passed=true and conforms to Zod schema", () => {
     const result = runHealthcheck(
-      { stage: 1, json: false, includeTypecheck: false, includeBuild: false },
+      { stage: 1, json: false },
       {
         run: mockRun(ALL_PASS_TABLE),
         env: { GH_TOKEN: "ghp_test" },
@@ -104,7 +103,7 @@ describe("healthcheck runHealthcheck", () => {
     const table = { ...ALL_PASS_TABLE };
     table["command -v claude"] = { status: 1 };
     const result = runHealthcheck(
-      { stage: 1, json: false, includeTypecheck: false, includeBuild: false },
+      { stage: 1, json: false },
       {
         run: mockRun(table),
         env: { GH_TOKEN: "ghp_test" },
@@ -122,7 +121,7 @@ describe("healthcheck runHealthcheck", () => {
     const table = { ...ALL_PASS_TABLE };
     table["git --version"] = { status: 0, stdout: "git version 2.4.0\n" };
     const result = runHealthcheck(
-      { stage: 1, json: false, includeTypecheck: false, includeBuild: false },
+      { stage: 1, json: false },
       {
         run: mockRun(table),
         env: { GH_TOKEN: "ghp_test" },
@@ -135,38 +134,23 @@ describe("healthcheck runHealthcheck", () => {
     expect(m12?.status).toBe("FAIL");
   });
 
-  it("typecheck/build are SKIP by default and PASS when opted in", () => {
-    const table = { ...ALL_PASS_TABLE };
-    table["npm run typecheck --silent"] = { status: 0, stdout: "" };
-    table["npm run build --silent"] = { status: 0, stdout: "" };
-    const skipped = runHealthcheck(
-      { stage: 1, json: false, includeTypecheck: false, includeBuild: false },
+  it("typecheck/build are always SKIP in stage 1 (out of fail-fast budget)", () => {
+    const result = runHealthcheck(
+      { stage: 1, json: false },
       {
-        run: mockRun(table),
+        run: mockRun(ALL_PASS_TABLE),
         env: { GH_TOKEN: "ghp_test" },
         cwd: process.cwd(),
         now: () => new Date("2026-05-09T00:00:00.000Z"),
       },
     );
-    expect(skipped.items.find((i) => i.id === "M-1-5.typecheck")?.status).toBe("SKIP");
-    expect(skipped.items.find((i) => i.id === "M-1-6.build")?.status).toBe("SKIP");
-
-    const optIn = runHealthcheck(
-      { stage: 1, json: false, includeTypecheck: true, includeBuild: true },
-      {
-        run: mockRun(table),
-        env: { GH_TOKEN: "ghp_test" },
-        cwd: process.cwd(),
-        now: () => new Date("2026-05-09T00:00:00.000Z"),
-      },
-    );
-    expect(optIn.items.find((i) => i.id === "M-1-5.typecheck")?.status).toBe("PASS");
-    expect(optIn.items.find((i) => i.id === "M-1-6.build")?.status).toBe("PASS");
+    expect(result.items.find((i) => i.id === "M-1-5.typecheck")?.status).toBe("SKIP");
+    expect(result.items.find((i) => i.id === "M-1-6.build")?.status).toBe("SKIP");
   });
 
   it("stage 2 returns the phase-prod-3 placeholder", () => {
     const result = runHealthcheck(
-      { stage: 2, json: false, includeTypecheck: false, includeBuild: false },
+      { stage: 2, json: false },
       { run: mockRun({}), env: {}, cwd: process.cwd(), now: () => new Date(0) },
     );
     expect(result.stage).toBe(2);
@@ -177,7 +161,7 @@ describe("healthcheck runHealthcheck", () => {
 
   it("auth model detection: gh env_token and claude env_token via ANTHROPIC_API_KEY", () => {
     const result = runHealthcheck(
-      { stage: 1, json: false, includeTypecheck: false, includeBuild: false },
+      { stage: 1, json: false },
       {
         run: mockRun(ALL_PASS_TABLE),
         env: { GH_TOKEN: "ghp_test", ANTHROPIC_API_KEY: "sk-ant" },
@@ -193,7 +177,7 @@ describe("healthcheck runHealthcheck", () => {
 
   it("gh keychain detection when no GH_TOKEN", () => {
     const result = runHealthcheck(
-      { stage: 1, json: false, includeTypecheck: false, includeBuild: false },
+      { stage: 1, json: false },
       {
         run: mockRun(ALL_PASS_TABLE),
         env: {},
@@ -202,5 +186,97 @@ describe("healthcheck runHealthcheck", () => {
       },
     );
     expect(result.auth_models.gh).toBe("keychain");
+  });
+
+  it("caches `gh auth status` and `<bin> --help` (one spawn per probe)", () => {
+    const calls: string[] = [];
+    const countingRun: RunCmd = (cmd, args) => {
+      const key = `${cmd} ${args.join(" ")}`.trim();
+      calls.push(key);
+      const hit = ALL_PASS_TABLE[key];
+      if (hit) return { status: hit.status, stdout: hit.stdout ?? "", stderr: hit.stderr ?? "" };
+      return { status: 127, stdout: "", stderr: `mock: no entry for ${key}` };
+    };
+    runHealthcheck(
+      { stage: 1, json: false },
+      {
+        run: countingRun,
+        // No GH_TOKEN forces detectGhAuthModel to actually probe `gh auth status`.
+        env: {},
+        cwd: process.cwd(),
+        now: () => new Date("2026-05-09T00:00:00.000Z"),
+      },
+    );
+    const ghAuthCalls = calls.filter((k) => k === "gh auth status").length;
+    const claudeHelpCalls = calls.filter((k) => k === "claude --help").length;
+    const codexHelpCalls = calls.filter((k) => k === "codex --help").length;
+    expect(ghAuthCalls).toBe(1);
+    expect(claudeHelpCalls).toBe(1);
+    expect(codexHelpCalls).toBe(1);
+  });
+});
+
+describe("healthcheck main() integration", () => {
+  it("returns exit 0 when all checks pass and writes valid JSON to stdout in --json mode", async () => {
+    let captured = "";
+    const code = await main(["--stage", "1", "--json"], {
+      run: mockRun(ALL_PASS_TABLE),
+      env: { GH_TOKEN: "ghp_test" },
+      cwd: process.cwd(),
+      now: () => new Date("2026-05-09T00:00:00.000Z"),
+      stdout: (s) => {
+        captured += s;
+      },
+      skipOutFile: true,
+    });
+    expect(code).toBe(0);
+    // stdout must be parseable JSON (no progress noise mixed in).
+    const parsed = JSON.parse(captured.trim());
+    expect(() => HealthcheckResult.parse(parsed)).not.toThrow();
+    expect(parsed.passed).toBe(true);
+  });
+
+  it("returns exit 1 when at least one check fails", async () => {
+    const table = { ...ALL_PASS_TABLE };
+    table["command -v claude"] = { status: 1 };
+    let captured = "";
+    const code = await main(["--stage", "1", "--json"], {
+      run: mockRun(table),
+      env: { GH_TOKEN: "ghp_test" },
+      cwd: process.cwd(),
+      now: () => new Date("2026-05-09T00:00:00.000Z"),
+      stdout: (s) => {
+        captured += s;
+      },
+      skipOutFile: true,
+    });
+    expect(code).toBe(1);
+    const parsed = JSON.parse(captured.trim());
+    expect(parsed.passed).toBe(false);
+  });
+
+  it("propagates parseArgs errors so the module-level handler can map them to exit 2", async () => {
+    // Unknown flag → parseArgs throws → main rejects.
+    // Module isMain handler maps this to process.exit(2).
+    await expect(
+      main(["--unknown-flag"], { skipOutFile: true }),
+    ).rejects.toThrow(/unknown flag/);
+  });
+
+  it("non-json mode emits human-readable lines and exits 0 on all-pass", async () => {
+    let captured = "";
+    const code = await main(["--stage", "1"], {
+      run: mockRun(ALL_PASS_TABLE),
+      env: { GH_TOKEN: "ghp_test" },
+      cwd: process.cwd(),
+      now: () => new Date("2026-05-09T00:00:00.000Z"),
+      stdout: (s) => {
+        captured += s;
+      },
+      skipOutFile: true,
+    });
+    expect(code).toBe(0);
+    expect(captured).toMatch(/stage=1 passed=true/);
+    expect(captured).toMatch(/auth_models:/);
   });
 });
