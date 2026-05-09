@@ -35,6 +35,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import { redactSecrets } from "../adapters/llm-runner/common/redact.js";
 import {
   appendLedger,
   checkCaps,
@@ -144,8 +145,13 @@ function writeArtifactSet(
 ): void {
   const writeFile =
     deps.writeFile ?? ((p, c) => writeFileSync(p, c, { encoding: "utf8" }));
-  writeFile(resolve(runDir, `${probeId}.stdout`), result.stdout);
-  writeFile(resolve(runDir, `${probeId}.stderr`), result.stderr);
+  // Sink-boundary redaction (phase-prod-2 pattern). Provider CLIs may emit
+  // tokens or `Bearer` headers in stderr on auth errors; scrub before any
+  // RUN_DIR file is written.
+  const stdout = redactSecrets(result.stdout, deps.env);
+  const stderr = redactSecrets(result.stderr, deps.env);
+  writeFile(resolve(runDir, `${probeId}.stdout`), stdout);
+  writeFile(resolve(runDir, `${probeId}.stderr`), stderr);
   writeFile(
     resolve(runDir, `${probeId}.exit`),
     `${result.status ?? "null"}\n`,
@@ -168,13 +174,13 @@ function writeArtifactSet(
       "## stdout",
       "",
       "```",
-      result.stdout.trimEnd(),
+      stdout.trimEnd(),
       "```",
       "",
       "## stderr",
       "",
       "```",
-      result.stderr.trimEnd(),
+      stderr.trimEnd(),
       "```",
       "",
     ].join("\n"),
@@ -193,11 +199,18 @@ interface ProbeSpec {
 }
 
 function buildClaudeArgv(env: NodeJS.ProcessEnv): { cmd: string; args: string[] } {
-  const cmd = env.LLM_TEAM_CLAUDE_BIN || "claude";
-  const args = ["-p", "--output-format", "text"];
+  // Mirror ClaudeCodeAdapter.buildArgv: support multi-token launchers
+  // (e.g. `npx claude`) by splitting on whitespace and passing the tail as
+  // leading argv. Without this, `LLM_TEAM_CLAUDE_BIN="npx claude"` would
+  // ENOENT because spawn would look for an executable literally named
+  // "npx claude".
+  const tokens = (env.LLM_TEAM_CLAUDE_BIN || "claude").split(/\s+/).filter(Boolean);
+  const cmd = tokens[0] ?? "claude";
+  const baseArgs = tokens.slice(1);
+  const flags: string[] = ["-p", "--output-format", "text"];
   const model = env.LLM_TEAM_CLAUDE_MODEL;
-  if (model) args.push("--model", model);
-  return { cmd, args };
+  if (model) flags.push("--model", model);
+  return { cmd, args: [...baseArgs, ...flags] };
 }
 
 function buildCodexArgv(
@@ -228,10 +241,15 @@ function probeStatus(result: Stage3SpawnResult): "PASS" | "FAIL" {
 function summarizeFailure(
   probeId: string,
   result: Stage3SpawnResult,
+  env: NodeJS.ProcessEnv,
 ): string {
   if (result.timedOut) return "timed out (60s)";
   if (result.status === null) return "spawn aborted (no status)";
-  return `exit ${result.status}: ${(result.stderr || result.stdout).trim().slice(0, 200)}`;
+  // Sink-boundary redaction: detail is persisted into result.items (and
+  // ultimately healthcheck-failure.md). Apply the same scrubbing as the
+  // RUN_DIR artifacts so neither path leaks tokens.
+  const raw = (result.stderr || result.stdout).trim().slice(0, 200);
+  return `exit ${result.status}: ${redactSecrets(raw, env)}`;
 }
 
 function makeSurface(
@@ -285,6 +303,9 @@ export async function runStage3(deps: Stage3Deps): Promise<Stage3Outcome> {
   } else {
     dailyTotal = readDailyTotalUsd(ledgerPath, now);
   }
+  // Per-run accumulator — same pattern as dailyTotal but reset every
+  // invocation. Increments only after a probe PASSes (matches ledger append).
+  let runTotal = 0;
 
   const prompt = SMOKE_PROMPT_DEFAULT;
 
@@ -362,6 +383,7 @@ export async function runStage3(deps: Stage3Deps): Promise<Stage3Outcome> {
       perRunUsd: caps.perRunUsd,
       dailyUsd: caps.dailyUsd,
       dailyTotalUsd: dailyTotal,
+      runTotalUsd: runTotal,
     });
     if (!cap.ok) {
       items.push({
@@ -384,12 +406,12 @@ export async function runStage3(deps: Stage3Deps): Promise<Stage3Outcome> {
       detail:
         status === "PASS"
           ? `argv: ${input.cmd} ${input.args.join(" ")}`
-          : summarizeFailure(probe.id, result),
+          : summarizeFailure(probe.id, result, env),
       anchor: probe.anchor,
     });
     surfaces[surfaceKeyFor(probe.kind)] = makeSurface(
       status,
-      status === "PASS" ? "live 1-shot ok" : summarizeFailure(probe.id, result),
+      status === "PASS" ? "live 1-shot ok" : summarizeFailure(probe.id, result, env),
     );
 
     // Append ledger AFTER spawn (only if we actually spawned).
@@ -401,6 +423,7 @@ export async function runStage3(deps: Stage3Deps): Promise<Stage3Outcome> {
     };
     appendLedger(ledgerPath, entry, { appendFile: deps.appendLedger });
     dailyTotal += probe.estimatedUsd;
+    runTotal += probe.estimatedUsd;
   }
 
   // failure markdown (if any FAIL).

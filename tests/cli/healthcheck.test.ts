@@ -278,6 +278,39 @@ describe("healthcheck main() integration", () => {
     ).rejects.toThrow(/unknown flag/);
   });
 
+  it("stage 3 default-SKIP gate (P1-A): no LLM_TEAM_LIVE_HEALTHCHECK ⇒ stage 2 fetch NOT called, stage 3 spawn NOT called, exit 0", async () => {
+    const fetchCalls: string[] = [];
+    const spawnCalls: { cmd: string }[] = [];
+    const result = await runHealthcheck(
+      { stage: 3, json: false },
+      {
+        // run is irrelevant here — neither stage 2 nor stage 3 should call it.
+        run: mockRun({}),
+        env: {}, // explicitly NOT setting LLM_TEAM_LIVE_HEALTHCHECK.
+        cwd: process.cwd(),
+        now: () => new Date("2026-05-09T00:00:00.000Z"),
+        fetch: async (url: string) => {
+          fetchCalls.push(url);
+          return { status: 200, text: async () => "" };
+        },
+        stage3Spawn: async (input) => {
+          spawnCalls.push({ cmd: input.cmd });
+          return { status: 0, stdout: "", stderr: "" };
+        },
+      },
+    );
+    // Default-SKIP invariant: nothing spawned, nothing fetched.
+    expect(spawnCalls).toHaveLength(0);
+    expect(fetchCalls).toHaveLength(0);
+    expect(result.stage).toBe(3);
+    expect(result.passed).toBe(true);
+    // The single SKIP item explains why.
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.status).toBe("SKIP");
+    expect(result.items[0]?.id).toBe("M-3-opt-in");
+    expect(result.items[0]?.detail).toContain("LLM_TEAM_LIVE_HEALTHCHECK");
+  });
+
   it("non-json mode emits human-readable lines and exits 0 on all-pass", async () => {
     let captured = "";
     const code = await main(["--stage", "1"], {

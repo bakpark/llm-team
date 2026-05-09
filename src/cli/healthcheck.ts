@@ -461,6 +461,31 @@ export async function runHealthcheck(
   }
 
   if (args.stage === 3) {
+    // Default-SKIP gate: without `LLM_TEAM_LIVE_HEALTHCHECK=1`, stage 3 must
+    // not spawn anything AND must not run stage 2's network probes (qwen
+    // ping, gh rate_limit). Return a SKIP-only result so an unauthenticated
+    // host on a CI runner cannot accidentally fail this stage.
+    if (env.LLM_TEAM_LIVE_HEALTHCHECK !== "1") {
+      const skipItem: HealthcheckItem = {
+        id: "M-3-opt-in",
+        status: "SKIP",
+        detail:
+          "LLM_TEAM_LIVE_HEALTHCHECK not set to '1'; stage 3 (and its stage-2 prerequisites) skipped (no spawn, no network)",
+        anchor: "M-3-0",
+      };
+      const result: HealthcheckResult = {
+        stage: 3,
+        items: [skipItem],
+        passed: true,
+        generatedAt,
+        auth_models: {
+          claude: "UNKNOWN_UNTIL_STAGE3",
+          codex: "UNKNOWN_UNTIL_STAGE3",
+          gh: env.GH_TOKEN && env.GH_TOKEN.length > 0 ? "env_token" : "unknown",
+        },
+      };
+      return HealthcheckResult.parse(result);
+    }
     // Stage 3 needs the qwen ping outcome to gate codex-qwen smoke. Run
     // stage 2 first as a prerequisite (its own probes also surface in the
     // stage-3 result so an operator sees the full picture).

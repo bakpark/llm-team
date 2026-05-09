@@ -100,6 +100,14 @@ export interface CapCheckInput {
   perRunUsd: number;
   dailyUsd: number;
   dailyTotalUsd: number;
+  /**
+   * Cumulative USD already spent in the current run (sum of estimated_usd of
+   * probes that already PASSed in this invocation). Defaults to 0 for
+   * backward compatibility, but Stage 3's loop MUST track and pass this so
+   * that several individually-cheap probes cannot collectively exceed the
+   * per-run cap.
+   */
+  runTotalUsd?: number;
 }
 
 export type CapCheckResult =
@@ -107,11 +115,12 @@ export type CapCheckResult =
   | { ok: false; reason: "per_run" | "daily"; detail: string };
 
 export function checkCaps(input: CapCheckInput): CapCheckResult {
-  if (input.estimatedUsd > input.perRunUsd) {
+  const runTotal = input.runTotalUsd ?? 0;
+  if (runTotal + input.estimatedUsd > input.perRunUsd) {
     return {
       ok: false,
       reason: "per_run",
-      detail: `estimated $${input.estimatedUsd.toFixed(4)} > per-run cap $${input.perRunUsd.toFixed(2)}`,
+      detail: `run $${runTotal.toFixed(4)} + $${input.estimatedUsd.toFixed(4)} > per-run cap $${input.perRunUsd.toFixed(2)}`,
     };
   }
   if (input.dailyTotalUsd + input.estimatedUsd > input.dailyUsd) {

@@ -352,3 +352,143 @@ describe("healthcheck stage 3 — verified-auth-model.json", () => {
     expect(json.codex_qwen.status).toBe("SKIP");
   });
 });
+
+describe("healthcheck stage 3 — per-run cost cap accumulator (P1-B)", () => {
+  it("cap=$0.010 with 3 probes × $0.005 ⇒ first two PASS, third SKIP (per_run)", async () => {
+    const fs = newFs();
+    const recorded: RecordedSpawn = { inputs: [] };
+    const out = await runStage3({
+      env: {
+        LLM_TEAM_LIVE_HEALTHCHECK: "1",
+        LLM_TEAM_LIVE_COST_CAP_USD: "0.010",
+      },
+      spawn: recordingSpawn(recorded, () => ({ status: 0, stdout: "ok", stderr: "" })),
+      qwenPassed: true,
+      now: NOW,
+      home: "/tmp/home",
+      ...makeFsDeps(fs),
+    });
+    // Two probes spawned, third gated by cumulative per-run cap.
+    expect(recorded.inputs).toHaveLength(2);
+    const passes = out.items.filter((i) => i.status === "PASS");
+    expect(passes).toHaveLength(2);
+    const skips = out.items.filter((i) => i.status === "SKIP");
+    expect(skips).toHaveLength(1);
+    expect(skips[0]?.detail).toContain("per_run");
+    // Ledger reflects only the two PASSes.
+    const ledger = fs.appended.get(
+      "/tmp/home/.llm-team/healthcheck-cost-ledger.ndjson",
+    );
+    expect(ledger!.trim().split("\n")).toHaveLength(2);
+  });
+});
+
+describe("healthcheck stage 3 — redactSecrets at sink boundary (P1-C)", () => {
+  it("redacts ghp_… token from stdout/stderr/.md and detail before persisting", async () => {
+    const fs = newFs();
+    const recorded: RecordedSpawn = { inputs: [] };
+    const leak = "auth failed: ghp_ABCDEFGHIJKLMNOPQRST123456 invalid";
+    const out = await runStage3({
+      env: { LLM_TEAM_LIVE_HEALTHCHECK: "1" },
+      spawn: recordingSpawn(recorded, () => ({
+        status: 1,
+        stdout: `prefix ${leak} suffix`,
+        stderr: leak,
+      })),
+      qwenPassed: true,
+      now: NOW,
+      home: "/tmp/home",
+      ...makeFsDeps(fs),
+    });
+    const stdoutFile = [...fs.files.entries()].find(([k]) =>
+      k.endsWith("claude-attempt1.stdout"),
+    );
+    const stderrFile = [...fs.files.entries()].find(([k]) =>
+      k.endsWith("claude-attempt1.stderr"),
+    );
+    const mdFile = [...fs.files.entries()].find(([k]) =>
+      k.endsWith("claude-attempt1.md"),
+    );
+    expect(stdoutFile?.[1]).not.toContain("ghp_ABCDEFGHIJKLMNOPQRST123456");
+    expect(stdoutFile?.[1]).toContain("[REDACTED]");
+    expect(stderrFile?.[1]).not.toContain("ghp_ABCDEFGHIJKLMNOPQRST123456");
+    expect(stderrFile?.[1]).toContain("[REDACTED]");
+    expect(mdFile?.[1]).not.toContain("ghp_ABCDEFGHIJKLMNOPQRST123456");
+    // detail (in items + failure md) is also scrubbed.
+    const failItem = out.items.find((i) => i.id === "claude-attempt1");
+    expect(failItem?.detail).not.toContain("ghp_ABCDEFGHIJKLMNOPQRST123456");
+    expect(failItem?.detail).toContain("[REDACTED]");
+    const failureMd = fs.files.get(out.failureMdPath!);
+    expect(failureMd).not.toContain("ghp_ABCDEFGHIJKLMNOPQRST123456");
+  });
+
+  it("redacts secret-suspected env values that leak into stderr", async () => {
+    const fs = newFs();
+    const recorded: RecordedSpawn = { inputs: [] };
+    const secret = "supersecret-xyz-123";
+    await runStage3({
+      env: {
+        LLM_TEAM_LIVE_HEALTHCHECK: "1",
+        ANTHROPIC_API_KEY: secret,
+      },
+      spawn: recordingSpawn(recorded, () => ({
+        status: 1,
+        stdout: "",
+        stderr: `boom: leaked ${secret}`,
+      })),
+      qwenPassed: true,
+      now: NOW,
+      home: "/tmp/home",
+      ...makeFsDeps(fs),
+    });
+    const stderrFile = [...fs.files.entries()].find(([k]) =>
+      k.endsWith("claude-attempt1.stderr"),
+    );
+    expect(stderrFile?.[1]).not.toContain(secret);
+    expect(stderrFile?.[1]).toContain("[REDACTED]");
+  });
+});
+
+describe("healthcheck stage 3 — LLM_TEAM_CLAUDE_BIN multi-token (P1-D)", () => {
+  it('LLM_TEAM_CLAUDE_BIN="npx claude" splits into cmd="npx" + leading args ["claude", ...]', async () => {
+    const fs = newFs();
+    const recorded: RecordedSpawn = { inputs: [] };
+    await runStage3({
+      env: {
+        LLM_TEAM_LIVE_HEALTHCHECK: "1",
+        LLM_TEAM_CLAUDE_BIN: "npx claude",
+      },
+      spawn: recordingSpawn(recorded, () => ({ status: 0, stdout: "", stderr: "" })),
+      qwenPassed: true,
+      now: NOW,
+      home: "/tmp/home",
+      ...makeFsDeps(fs),
+    });
+    const claude = recorded.inputs.find((i) => i.cmd === "npx");
+    expect(claude).toBeDefined();
+    expect(claude!.cmd).toBe("npx");
+    expect(claude!.args[0]).toBe("claude");
+    expect(claude!.args.slice(1, 4)).toEqual(["-p", "--output-format", "text"]);
+    // The literal "npx claude" must NOT appear as a single argv token.
+    expect(recorded.inputs.find((i) => i.cmd === "npx claude")).toBeUndefined();
+  });
+
+  it("collapses repeated whitespace in LLM_TEAM_CLAUDE_BIN", async () => {
+    const fs = newFs();
+    const recorded: RecordedSpawn = { inputs: [] };
+    await runStage3({
+      env: {
+        LLM_TEAM_LIVE_HEALTHCHECK: "1",
+        LLM_TEAM_CLAUDE_BIN: "  npx   claude  ",
+      },
+      spawn: recordingSpawn(recorded, () => ({ status: 0, stdout: "", stderr: "" })),
+      qwenPassed: true,
+      now: NOW,
+      home: "/tmp/home",
+      ...makeFsDeps(fs),
+    });
+    const claude = recorded.inputs.find((i) => i.cmd === "npx");
+    expect(claude).toBeDefined();
+    expect(claude!.args[0]).toBe("claude");
+  });
+});
