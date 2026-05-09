@@ -406,3 +406,57 @@ describe("dual-track scheduler — cross-slot stale", () => {
     expect(recoverRows[0]!.result_detail).toBe("cross_slot_stale");
   });
 });
+
+describe("dual-track scheduler — concurrent promotion (PR #70 P0-2 regression)", () => {
+  it("two schedulers racing on the same Discovery slot promote at most one milestone", async () => {
+    // Setup: two M_INTAKE_QUEUED candidates share an empty Discovery slot.
+    // Without the in-lock guard re-evaluation (PR #70 P0-2 fix), two
+    // scheduler instances could both observe an empty slot in their
+    // pre-lock snapshots, then sequentially acquire withFileLock on
+    // DIFFERENT milestone files and both promote — leaving two milestones
+    // co-occupying the slot. The fix re-runs the promotion guard inside
+    // each lock against a freshly-read milestone snapshot.
+    const store = new MemoryStore();
+    const clock = new FixedClock(Date.parse(ISO_BASE));
+    const depsA = makeDeps(store, clock);
+    const depsB = makeDeps(store, clock);
+
+    await dropMilestone(
+      store,
+      M_INTAKE,
+      "M_INTAKE_QUEUED",
+      "2026-05-08T00:00:00.000Z",
+    );
+    await dropMilestone(
+      store,
+      M_INTAKE2,
+      "M_INTAKE_QUEUED",
+      "2026-05-08T00:00:01.000Z",
+    );
+
+    const [outA, outB] = await Promise.all([
+      runOneDualTrackTurn(depsA),
+      runOneDualTrackTurn(depsB),
+    ]);
+
+    const promoted = [outA, outB].filter((o) => o.kind === "promoted");
+    // Exactly one milestone is permitted into the Discovery slot.
+    expect(promoted.length).toBe(1);
+
+    // Single-occupancy invariant on disk: at most one milestone in
+    // Discovery-family states.
+    const m1 = await readMilestone(store, M_INTAKE);
+    const m2 = await readMilestone(store, M_INTAKE2);
+    const inDiscovery = [m1, m2].filter(
+      (m) => m.state === "M_DISCOVERY_DRAFT",
+    );
+    expect(inDiscovery.length).toBe(1);
+
+    // The other instance must surface a structured "lease_unavailable"
+    // outcome — guard re-run inside the lock OR slot_lock CAS race —
+    // never a silent dual-promotion or thrown error.
+    const losers = [outA, outB].filter((o) => o.kind !== "promoted");
+    expect(losers.length).toBe(1);
+    expect(losers[0]!.kind).toBe("lease_unavailable");
+  });
+});

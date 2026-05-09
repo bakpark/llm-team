@@ -48,7 +48,10 @@ import {
 } from "./cross-slot-stale.js";
 import {
   orderByCrossSlotPriority,
+  type LastBalancedSlot,
 } from "./cross-slot-fairness.js";
+import { LedgerRow } from "../domain/schema/ledger.js";
+import { LEDGER_TRANSITIONS_PATH } from "./persistence-layout.js";
 import {
   flattenSnapshot,
   snapshotDualGateQueues,
@@ -117,16 +120,23 @@ export async function runOneDualTrackTurn(
   if (flat.length === 0) {
     // Even with no promotion candidates, run cross-slot stale once so a
     // late Delivery update doesn't leave stale Discovery N+1 sessions
-    // hanging until the next promotion fires.
-    await detectCrossSlotStaleSessions(deps);
+    // hanging until the next promotion fires. Best-effort — a stale-pass
+    // failure must not mask the noop outcome (PR #70 P1-1).
+    await runStaleBestEffort(deps);
     return { kind: "noop", reason: "no_candidates" };
   }
 
   const priority = deps.dualTrack?.priority ?? "delivery_first";
+  // For `balanced`, look up the last applied slot_promotion row so the
+  // alternation persists across cycles (PR #70 P1-3). For other priorities
+  // this read is unnecessary and skipped.
+  const lastBalancedSlot =
+    priority === "balanced" ? await readLastBalancedSlot(deps.store) : null;
   const ordered = orderByCrossSlotPriority({
     intake: flat.filter((c) => c.queue === "intake_queue"),
     delivery: flat.filter((c) => c.queue === "delivery_promotion_queue"),
     priority,
+    lastBalancedSlot,
   });
 
   // Snapshot of all milestones (for promotion guard) — derive from the
@@ -149,12 +159,9 @@ export async function runOneDualTrackTurn(
     if (!guard.allowed) {
       await emitGuardBlockedRow(deps, candidate, promotion, guard);
       // Run cross-slot stale once, then return — first blocked candidate
-      // surfaces in the outcome so the daemon log shows it.
-      const stale = await detectCrossSlotStaleSessions(deps);
-      // Continue to next candidate; if every candidate is blocked, the
-      // outcome reports the LAST blocker. Reduce to first-blocker for
-      // determinism by short-circuiting here.
-      void stale;
+      // surfaces in the outcome so the daemon log shows it. Best-effort:
+      // stale failure must not mask the guard_blocked outcome (PR #70 P1-1).
+      await runStaleBestEffort(deps);
       return {
         kind: "guard_blocked",
         milestone_id: candidate.milestone.milestone_id,
@@ -167,13 +174,16 @@ export async function runOneDualTrackTurn(
     // scheduler raced us), surface that and stop — sibling will continue.
     const result = await promoteCandidate(deps, candidate, promotion);
     if (result.kind === "lease_unavailable") {
-      await detectCrossSlotStaleSessions(deps);
+      await runStaleBestEffort(deps);
       return result;
     }
     // promoted — run cross-slot stale AFTER persisting the new state so
     // any Discovery N+1 session that read the prior Delivery N gets
-    // marked stale immediately.
-    const stale = await detectCrossSlotStaleSessions(deps);
+    // marked stale immediately. Best-effort: a stale-pass failure must
+    // NOT roll back the already-applied promotion ledger row (PR #70
+    // P1-1) — caller would otherwise see failure while the ledger holds
+    // an applied row.
+    const stale = await runStaleBestEffort(deps);
     if (result.kind === "promoted") {
       return { ...result, stale_sessions: stale.staledSessionIds };
     }
@@ -182,8 +192,23 @@ export async function runOneDualTrackTurn(
 
   // ordered was non-empty but all guarded — covered above by early return.
   // Defensive: still run stale + report noop.
-  await detectCrossSlotStaleSessions(deps);
+  await runStaleBestEffort(deps);
   return { kind: "noop", reason: "no_candidates" };
+}
+
+/**
+ * Run cross-slot stale detection without ever propagating exceptions.
+ * Stale detection is a side-effect on top of promotion; failing it must not
+ * roll back an applied promotion (PR #70 P1-1).
+ */
+async function runStaleBestEffort(
+  deps: DualTrackSchedulerDeps,
+): Promise<CrossSlotStaleResult> {
+  try {
+    return await detectCrossSlotStaleSessions(deps);
+  } catch {
+    return { staledSessionIds: [] };
+  }
 }
 
 function guardReason(guard: PromotionGuardResult): string {
@@ -289,6 +314,31 @@ async function promoteCandidate(
         milestone_id: live.milestone_id,
         promotion,
         detail: `expected_state=${fromState} actual=${live.state}`,
+      } as const;
+    }
+
+    // (i.b) Re-evaluate promotion guard against a FRESH milestone snapshot
+    // (PR #70 P0-2 fix). Two scheduler instances can both observe the same
+    // pre-lock `allMilestones` snapshot and pass the outer guard, but only
+    // one can hold `withFileLock(milestonePath)` at a time. The OTHER slot's
+    // milestone may have been promoted by a sibling scheduler in the
+    // meantime, so re-running the guard inside the lock prevents two
+    // milestones from co-occupying the same slot.
+    const liveAll = await readAllMilestones(deps.store);
+    const reGuard = evaluatePromotionGuard({
+      promotion,
+      candidate: live,
+      allMilestones: liveAll,
+      refactorScheduledCount: deps.refactorScheduledCount ?? 0,
+      refactorScheduledCapacity:
+        deps.dualTrack?.refactor_scheduled_capacity ?? null,
+    });
+    if (!reGuard.allowed) {
+      return {
+        kind: "lease_unavailable",
+        milestone_id: live.milestone_id,
+        promotion,
+        detail: `promotion_guard_blocked:${guardReason(reGuard)}`,
       } as const;
     }
 
@@ -398,6 +448,38 @@ async function promoteCandidate(
       }
     }
   });
+}
+
+/**
+ * Walk the ledger from the tail and return the slot_kind of the most recent
+ * applied `slot_promotion` row. Returns `null` when no prior promotion has
+ * been recorded. Used by the balanced fairness selector so alternation
+ * persists across cycles (PR #70 P1-3).
+ */
+async function readLastBalancedSlot(
+  store: StorePort,
+): Promise<LastBalancedSlot> {
+  const body = await store.readText(LEDGER_TRANSITIONS_PATH);
+  if (body == null || body.length === 0) return null;
+  const lines = body.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (line == null || line.length === 0) continue;
+    let row: LedgerRow;
+    try {
+      row = LedgerRow.parse(JSON.parse(line));
+    } catch {
+      continue;
+    }
+    if (
+      row.action_kind === "slot_promotion" &&
+      row.result === "applied" &&
+      (row.slot_kind === "discovery" || row.slot_kind === "delivery")
+    ) {
+      return row.slot_kind;
+    }
+  }
+  return null;
 }
 
 async function readAllMilestones(store: StorePort): Promise<MilestoneT[]> {

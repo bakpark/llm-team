@@ -131,6 +131,12 @@ export async function detectCrossSlotStaleSessions(
   const deliveryFamily = milestones.filter((m) =>
     DELIVERY_FAMILY.includes(m.state),
   );
+  // Edge case (PR #70 P1-4): when no Delivery N has reached
+  // M_DELIVERY_BUILDING/VALIDATING/DONE — including the case where the
+  // Delivery slot is empty entirely or only holds M_DELIVERY_PLANNING —
+  // there is no Delivery N artefact for Discovery N+1 to be stale against.
+  // Skip the pass; an explicit check rather than relying on the reduce
+  // below makes the intent visible to readers.
   if (deliveryFamily.length === 0) return { staledSessionIds: [] };
   // Latest Delivery activity timestamp — the conservative trigger.
   const latestDeliveryUpdate = deliveryFamily.reduce(
