@@ -3,6 +3,7 @@
  * Phase 4 daemon CLI — runs continuous loops with lease-protected pickup.
  *
  *   tsx src/cli/daemon.ts --role turn-worker | dialogue-coordinator | recovery
+ *     | drift-observer
  *     --target ./target.json [--workdir <path>]
  *     [--once] [--cycle-interval-ms 1000]
  *     [--fake-llm-fixtures <dir>] [--fake-workspace] [--fake-verification]
@@ -11,6 +12,10 @@
  *   - `turn-worker`         — phase-2 inner cycle (forge solo).
  *   - `dialogue-coordinator` — phase-3 middle review pickup.
  *   - `recovery`            — phase-4 sweeper. Cycles through expired leases.
+ *   - `drift-observer`      — phase-7c (G1-2). Polls external surfaces for
+ *     non-signal drift and writes `external_observation` ledger rows. Uses
+ *     the FsMirror IssueTracker / GitHost adapters; production GitHub-API
+ *     wiring is out of scope for this phase.
  *
  * Atomicity (RGC-DAEMON-STARTUP): every daemon role takes a per-role PID
  * lockdir under `<workdir>/log/daemon-<role>.pid.lock`. Sibling failure on
@@ -36,11 +41,14 @@ import { ShellVerification } from "../adapters/verification/shell.js";
 import { GitWorktreeWorkspace } from "../adapters/workspace/git-worktree.js";
 import { FakeWorkspace } from "../adapters/workspace/fake.js";
 import { FsHumanSignal } from "../adapters/human-signal/fs.js";
+import { FsMirrorIssueTracker } from "../adapters/issue-tracker/fs-mirror.js";
+import { FsMirrorGitHost } from "../adapters/git-host/fs-mirror.js";
 import { validateOrThrow } from "../application/config-validator.js";
 import { runDaemonPrelude } from "../application/control-state.js";
 import { runOneMiddleReviewTurn } from "../application/dialogue-coordinator.js";
 import { runOneDualTrackTurn } from "../application/dual-track-scheduler.js";
 import { runHumanSignalDrain } from "../application/human-signal-drain.js";
+import { runDriftObserverSweep } from "../application/drift-observer.js";
 import { FileLedger } from "../application/ledger.js";
 import { runOneOuterTurn } from "../application/outer-turn.js";
 import { LOG_DAEMON_PATH } from "../application/persistence-layout.js";
@@ -53,7 +61,8 @@ type DaemonRole =
   | "dialogue-coordinator"
   | "outer-coordinator"
   | "dual-track-scheduler"
-  | "recovery";
+  | "recovery"
+  | "drift-observer";
 
 interface CliArgs {
   role: DaemonRole;
@@ -68,8 +77,15 @@ interface CliArgs {
   callerId: string;
 }
 
+// PR #75 review (P1): drift-observer is an external surface poller and
+// should not run at the default 1s cadence. When `--cycle-interval-ms` is
+// omitted for `--role drift-observer`, fall back to ~60s.
+const DEFAULT_CYCLE_INTERVAL_MS = 1_000;
+const DRIFT_OBSERVER_DEFAULT_CYCLE_INTERVAL_MS = 60_000;
+
 function parseArgs(argv: readonly string[]): CliArgs {
   const a = [...argv];
+  let cycleIntervalMsExplicit = false;
   const out: Partial<CliArgs> & {
     fakeWorkspace: boolean;
     fakeVerification: boolean;
@@ -81,7 +97,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
     fakeWorkspace: false,
     fakeVerification: false,
     once: false,
-    cycleIntervalMs: 1_000,
+    cycleIntervalMs: DEFAULT_CYCLE_INTERVAL_MS,
     callerId: process.env.LLM_TEAM_CALLER_ID ?? `daemon-${process.pid}`,
     targetPath: "./target.json",
   };
@@ -95,10 +111,11 @@ function parseArgs(argv: readonly string[]): CliArgs {
           v !== "dialogue-coordinator" &&
           v !== "outer-coordinator" &&
           v !== "dual-track-scheduler" &&
-          v !== "recovery"
+          v !== "recovery" &&
+          v !== "drift-observer"
         )
           throw new Error(
-            `--role must be turn-worker | dialogue-coordinator | outer-coordinator | dual-track-scheduler | recovery (got ${v ?? "<missing>"})`,
+            `--role must be turn-worker | dialogue-coordinator | outer-coordinator | dual-track-scheduler | recovery | drift-observer (got ${v ?? "<missing>"})`,
           );
         out.role = v;
         break;
@@ -117,6 +134,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
         if (!Number.isFinite(n) || n < 0)
           throw new Error("--cycle-interval-ms must be a non-negative integer");
         out.cycleIntervalMs = n;
+        cycleIntervalMsExplicit = true;
         break;
       }
       case "--fake-llm-fixtures":
@@ -140,8 +158,11 @@ function parseArgs(argv: readonly string[]): CliArgs {
   }
   if (out.role == null)
     throw new Error(
-      "--role is required (turn-worker | dialogue-coordinator | outer-coordinator | dual-track-scheduler | recovery)",
+      "--role is required (turn-worker | dialogue-coordinator | outer-coordinator | dual-track-scheduler | recovery | drift-observer)",
     );
+  if (out.role === "drift-observer" && !cycleIntervalMsExplicit) {
+    out.cycleIntervalMs = DRIFT_OBSERVER_DEFAULT_CYCLE_INTERVAL_MS;
+  }
   return out as CliArgs;
 }
 
@@ -197,7 +218,9 @@ async function main(argv: readonly string[]): Promise<number> {
     // `LLM_TEAM_ALLOW_FAKE_RUNNER=1`; production deployments never set it,
     // so a smuggled `runner: "fake"` in target.json fails fast.
     const needsLlmRunner =
-      args.role !== "recovery" && args.role !== "dual-track-scheduler";
+      args.role !== "recovery" &&
+      args.role !== "dual-track-scheduler" &&
+      args.role !== "drift-observer";
     const allowFake = process.env.LLM_TEAM_ALLOW_FAKE_RUNNER === "1";
     const llmRunner = args.fakeLlmFixtures
       ? new AdapterRunnerPort(new FakeAdapter({ fixtureDir: args.fakeLlmFixtures }))
@@ -397,6 +420,33 @@ async function main(argv: readonly string[]): Promise<number> {
         case "recovery": {
           // Recovery sweep already ran above — emit a noop outcome.
           outcomeJson = JSON.stringify({ role: args.role, outcome: { kind: "swept" } });
+          break;
+        }
+        case "drift-observer": {
+          // Phase 7c (G1-2) — poll external surfaces for non-signal drift.
+          // Uses FsMirror adapters; production GitHub-API wiring is out of
+          // scope for this phase. Slice/SliceMerge edits inside the sweep
+          // are protected by store.withFileLock, and the per-role lockdir
+          // already excludes a sibling drift-observer daemon, so no
+          // additional lease is required here.
+          const issueTracker = new FsMirrorIssueTracker(store);
+          const gitHost = new FsMirrorGitHost(store);
+          const out = await runDriftObserverSweep({
+            store,
+            clock,
+            ledger,
+            issueTracker,
+            gitHost,
+            callerId: args.callerId,
+            targetId: cfg.identity.target_id,
+            // PR #75 review (P1): provider guard — only refs whose
+            // `provider` matches the wired adapter (fs-mirror) are swept.
+            adapterProvider: FsMirrorIssueTracker.provider,
+          });
+          outcomeJson = JSON.stringify({
+            role: args.role,
+            outcome: { kind: "swept", conflicts: out.conflicts.length },
+          });
           break;
         }
       }

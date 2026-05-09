@@ -51,6 +51,16 @@ export interface DriftObserverDeps {
   gitHost: GitHostPort;
   callerId: string;
   targetId: string;
+  /**
+   * PR #75 review (P1): provider tag of the wired IssueTracker / GitHost
+   * adapters (e.g. `"fs-mirror"`). Refs whose `provider` does not match are
+   * skipped to avoid the FsMirror adapter answering for a `provider: "github"`
+   * ref (which would return `null` and falsely flip the ref to `conflict`).
+   *
+   * The current daemon wiring is fs-mirror only; once GitHub adapters are
+   * wired here, this can become a multi-provider dispatcher.
+   */
+  adapterProvider: string;
 }
 
 export interface DriftObserverResult {
@@ -141,6 +151,8 @@ export async function runDriftObserverSweep(
     for (const ref of ms.external_refs) {
       if (ref.kind !== "milestone") continue;
       if (ref.sync_status === "conflict") continue;
+      // PR #75 review (P1): skip refs the wired adapter cannot answer for.
+      if (ref.provider !== deps.adapterProvider) continue;
       const observed = await deps.issueTracker.fetchMilestone({
         provider: ref.provider,
         id: ref.id,
@@ -175,6 +187,8 @@ export async function runDriftObserverSweep(
     for (const ref of sl.external_refs) {
       if (ref.kind !== "tracker") continue;
       if (ref.sync_status === "conflict") continue;
+      // PR #75 review (P1): skip refs the wired adapter cannot answer for.
+      if (ref.provider !== deps.adapterProvider) continue;
       const observed = await deps.issueTracker.fetchIssue({
         provider: ref.provider,
         id: ref.id,
@@ -209,6 +223,8 @@ export async function runDriftObserverSweep(
     for (const ref of sm.external_refs) {
       if (ref.kind !== "review_surface") continue;
       if (ref.sync_status === "conflict") continue;
+      // PR #75 review (P1): skip refs the wired adapter cannot answer for.
+      if (ref.provider !== deps.adapterProvider) continue;
       const observed = await deps.gitHost.fetchPullRequest({
         provider: ref.provider,
         id: ref.id,

@@ -139,6 +139,7 @@ describe("drift-observer (Phase 6b)", () => {
       gitHost,
       callerId: "drift",
       targetId: "demo",
+      adapterProvider: "fs-mirror",
     });
     expect(out.conflicts.length).toBe(1);
     expect(out.conflicts[0]!.reason).toBe("revision_mismatch");
@@ -176,6 +177,7 @@ describe("drift-observer (Phase 6b)", () => {
       gitHost,
       callerId: "drift",
       targetId: "demo",
+      adapterProvider: "fs-mirror",
     });
     expect(out.conflicts.length).toBe(1);
     expect(out.conflicts[0]!.reason).toBe("disappeared");
@@ -205,6 +207,7 @@ describe("drift-observer (Phase 6b)", () => {
       gitHost,
       callerId: "drift",
       targetId: "demo",
+      adapterProvider: "fs-mirror",
     });
     expect(out.conflicts.length).toBe(0);
     const after = await store.readText(LEDGER_TRANSITIONS_PATH);
@@ -233,6 +236,7 @@ describe("drift-observer (Phase 6b)", () => {
       gitHost,
       callerId: "drift",
       targetId: "demo",
+      adapterProvider: "fs-mirror",
     });
     const ledgerSize1 = (
       await store.readText(LEDGER_TRANSITIONS_PATH)
@@ -245,6 +249,7 @@ describe("drift-observer (Phase 6b)", () => {
       gitHost,
       callerId: "drift",
       targetId: "demo",
+      adapterProvider: "fs-mirror",
     });
     expect(out2.conflicts.length).toBe(0);
     const ledgerSize2 = (
@@ -278,6 +283,7 @@ describe("drift-observer (Phase 6b)", () => {
       gitHost,
       callerId: "drift",
       targetId: "demo",
+      adapterProvider: "fs-mirror",
     });
     expect(out.conflicts.length).toBe(1);
     expect(out.conflicts[0]!.object_kind).toBe("slice_merge");
