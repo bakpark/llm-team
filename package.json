@@ -15,7 +15,8 @@
     "healthcheck": "tsx src/cli/healthcheck.ts",
     "healthcheck:stage1": "tsx src/cli/healthcheck.ts --stage 1",
     "healthcheck:stage2": "tsx src/cli/healthcheck.ts --stage 2",
-    "healthcheck:stage3": "tsx src/cli/healthcheck.ts --stage 3"
+    "healthcheck:stage3": "tsx src/cli/healthcheck.ts --stage 3",
+    "ledger-summary": "tsx src/cli/ledger-summary.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
