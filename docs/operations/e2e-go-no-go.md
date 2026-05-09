@@ -23,8 +23,9 @@ live smoke / e2e 비용을 운영자가 사전에 승인한다. 기본값은 `do
 
 | 항목 | 기본 | 승인값 | 비고 |
 |---|---|---|---|
-| `LLM_TEAM_LIVE_COST_CAP_USD` (per-run) | $0.10 | $______ | rehearsal 1회당 상한 |
+| `LLM_TEAM_LIVE_COST_CAP_USD` (healthcheck Stage 3 per-run) | $0.10 | $______ | healthcheck Stage 3 1회 상한 (cost ledger). e2e harness 비용에는 적용되지 않음 |
 | `LLM_TEAM_LIVE_DAILY_COST_CAP_USD` (daily) | $1.00 | $______ | UTC day 누적 ledger 합 |
+| `LLM_TEAM_E2E_COST_CAP_USD` (e2e harness per-run) | $0.20 | $______ | `tests/helpers/e2e-harness.ts` rehearsal 1회 상한 |
 | 1회 e2e 예상 비용 (claude smoke + codex default + codex qwen + 시나리오) | — | $______ | 견적 |
 
 승인일: `____-__-__` 승인자: `____________`

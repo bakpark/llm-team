@@ -1,6 +1,6 @@
 # Production Runbook
 
-production target 진입 후의 daemon / 인증 / workdir / cycle bundle / rate-limit 운영 절차. operator 가 5분 안에 읽고 실행한다. 인증 분기는 `verified_auth_model` (Phase 1 stage 1 + Phase 3 stage 3) 의 4 모드 (`env_token` / `credential_file` / `interactive_only` / `unknown`) 를 따른다.
+production target 진입 후의 daemon / 인증 / workdir / cycle bundle / rate-limit 운영 절차. operator 가 5분 안에 읽고 실행한다. 인증 분기는 Stage 1 healthcheck 산출 `Stage1Result.auth_models.{claude,codex,gh}` 의 4 모드 (`env_token` / `credential_file` / `interactive_only` / `unknown`) 를 따른다. Stage 3 의 `verified-auth-model.json.<surface>.status` 는 별개 enum (`PASS` / `FAIL` / `SKIP`) 으로 live-probe 결과만 기록한다.
 
 ## 1. Daemon User ↔ CLI Auth User 일치
 
@@ -17,9 +17,9 @@ gh auth status                          # gh 인증 상태
 
 운영 권장: daemon 을 systemd / launchd 로 띄울 때도 `User=` 가 위 `whoami` 와 동일해야 한다. 검증은 Stage 1 healthcheck (`npm run healthcheck:stage1`) 가 cover.
 
-## 2. 인증 갱신 절차 — `verified_auth_model` 모드별 분기
+## 2. 인증 갱신 절차 — `auth_models` 모드별 분기
 
-`<RUN_DIR>/verified-auth-model.json` (Stage 3 산출) 에서 `claude.status` / `codex.status` / 운영 정보로 모드를 판정한다. Stage 1 의 `auth_models.{claude,codex,gh}` 도 동일 enum 사용.
+Stage 1 healthcheck 산출 `Stage1Result.auth_models.{claude,codex,gh}` 에서 4 모드 (`env_token` / `credential_file` / `interactive_only` / `unknown`) 를 읽어 모드를 판정한다. Stage 3 의 `<RUN_DIR>/verified-auth-model.json` 은 surface 별 live-probe 결과 (`PASS` / `FAIL` / `SKIP`) 와 `detail` 문자열만 기록하므로 모드 판정에는 사용하지 않는다.
 
 ### 2-a. `env_token`
 
@@ -43,17 +43,17 @@ launchctl kickstart -k gui/$(id -u)/llm-team.daemon
 CLI 가 OS 의 credential file 을 읽는 모드. 갱신은 interactive login 후 file mode 0600 강제.
 
 ```bash
-# claude — credential path 후보 (실제 경로는 binary 버전 의존, healthcheck stage 3 산출에서 확정)
+# claude — phase-prod-5 e2e workflow 와 동일 경로
 claude /login                              # interactive login
-chmod 0600 ~/.claude/credentials.json      # 또는 ~/.config/claude/credentials.json
-# codex — credential path 후보 (binary 버전 의존)
+chmod 0600 ~/.config/claude/credentials
+# codex — phase-prod-5 e2e workflow 와 동일 경로
 codex login                                # interactive (정확한 명령은 codex --help 참조)
-chmod 0600 ~/.codex/credentials.json       # 또는 ~/.config/codex/auth.json
+chmod 0600 ~/.config/codex/credentials
 # 재기동
 launchctl kickstart -k gui/$(id -u)/llm-team.daemon
 ```
 
-실제 credential path 는 운영 시점 healthcheck Stage 3 의 `verified-auth-model.json.detail` 에서 확정. file mode 0600 미충족 시 daemon healthcheck 가 advisory 로 warn.
+위 경로는 phase-prod-5 `.github/workflows/e2e.yml` 이 materialize 하는 위치와 정렬된다. binary 버전이 다른 경로를 사용하는 경우 운영자가 수동 확인 — file mode 0600 강제는 운영자 책임 (자동 검사 미구현).
 
 ### 2-c. `interactive_only`
 
@@ -97,7 +97,7 @@ gh auth refresh -s repo,workflow             # interactive
 # 3. daemon 재기동
 launchctl kickstart -k gui/$(id -u)/llm-team.daemon
 # 4. phase-9a TeamMembership cache 만료 대기 또는 강제 무효화
-#    (cache TTL 은 target.governance.team_membership_cache_ttl_ms 참조)
+#    (cache TTL 은 target.governance.human_team_cache_ttl_seconds 참조 — 단위: 초, default 300)
 ```
 
 cache TTL 이 길게 설정된 경우 daemon 재기동만으로는 즉시 반영되지 않을 수 있다 — 재기동이 cache 를 비우는지 target 별로 확인.
@@ -123,7 +123,7 @@ phase-10b 정식 retention 구현 전 수동 가이드. cycle bundle 위치: `<w
 
 ```bash
 # 30일 이상 디렉토리 archive
-WORKDIR="<identity.workdir_path>/cycles"
+WORKDIR="<identity.workdir_path>/<target_id>/cycles"
 find "$WORKDIR" -maxdepth 1 -type d -mtime +30 -print
 # 검토 후 tarball 로 archive
 find "$WORKDIR" -maxdepth 1 -type d -mtime +30 -print0 | \
@@ -133,20 +133,20 @@ find "$WORKDIR" -maxdepth 1 -type d -mtime +30 -print0 | \
 find "$WORKDIR" -maxdepth 1 -name "*.tar.gz" -mtime +90 -delete
 ```
 
-`LLM_TEAM_CYCLE_BUNDLE_DISABLED=1` 로 신규 bundle 생성을 일시 차단 가능. 정식 retention / prune 은 phase-10b backlog.
+정식 retention / prune (자동 archive, 신규 bundle 생성 차단 토글 등) 은 phase-10b backlog — 현재 소스에는 미구현. `LLM_TEAM_CYCLE_BUNDLE_DISABLED` 같은 차단 env 도 미구현이므로 수동 cleanup 만 가능.
 
 ## 6. Rate-Limit / Backoff
 
-Phase-prod-2 의 adapter 가 `transport_error` (`reason: "rate_limit"`) 로 분류한 attempt 는 retry 정책에 따라 자동 backoff. 운영자 대응:
+Phase-prod-2 의 adapter 는 `transport_error` (`reason: "rate_limit"`) 를 invalid outcome 으로 분류하고 **자동 재시도하지 않는다** (`src/application/turn-worker.ts` — "No retry"). 현재 cycle 은 실패로 종료되며, 다음 trigger 또는 daemon 재기동 시점까지 대기. 운영자 대응:
 
-- **단일 attempt 실패**: adapter 가 다음 attempt 로 자동 재시도. 운영자 개입 불필요.
-- **연속 N회 rate_limit**: cycle bundle 의 `attempts/*/diagnostics.txt` 에 `reason=rate_limit` 누적 → 운영자가 daemon 일시 정지 + provider quota 확인.
+- **단일 attempt rate_limit**: cycle 종료 후 다음 trigger / daemon 재기동 시 자연 재시도. 즉시 회복이 필요하면 daemon 재기동.
+- **연속 N회 rate_limit**: adapter diagnostics metadata (`os.tmpdir()/llm-team/runner/*.metadata.json`) 에 `"reason":"rate_limit"` 누적 → 운영자가 daemon 일시 정지 + provider quota 확인.
 - **daily cap 도달**: healthcheck cost ledger (`~/.llm-team/healthcheck-cost-ledger.ndjson`) SKIP. 운영자가 cap 상향 또는 다음 UTC day 까지 대기.
 
 ```bash
-# rate_limit 이 누적 중인지 빠르게 확인
-WORKDIR="<identity.workdir_path>/cycles"
-grep -lr 'reason=rate_limit' "$WORKDIR" | tail -20
+# rate_limit 이 누적 중인지 빠르게 확인 — adapter diagnostics metadata
+DIAGDIR="$(node -e 'console.log(require("os").tmpdir())')/llm-team/runner"
+grep -lE '"reason":\s*"rate_limit"' "$DIAGDIR"/*.metadata.json 2>/dev/null | tail -20
 # daemon 일시 정지 (운영체계 의존)
 launchctl unload ~/Library/LaunchAgents/llm-team.daemon.plist
 # provider 에서 quota 회복 후 재기동
