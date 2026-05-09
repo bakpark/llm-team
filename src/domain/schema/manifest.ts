@@ -43,6 +43,16 @@ export const ManifestEntry = z
     revision_pin: z.string().min(1),
     required: z.boolean(),
     purpose: z.string().min(1),
+    /**
+     * AGC-CONTEXT-BUDGET / TCC-CONTEXT-BUDGET — deterministic token-cost
+     * forecast used by `application/prompt-compose.ts` to apply the
+     * `(parent_loop, phase_or_purpose)` cap before the 1-shot LLM call. The
+     * estimate is computed by `application/manifest-builder.ts` from a
+     * char/4 heuristic over the entry's serialized header (no body fetch is
+     * required at manifest-build time). Optional for backward compatibility
+     * with manifests created before phase 8a.
+     */
+    token_estimate: z.number().int().nonnegative().optional(),
   })
   .strict();
 export type ManifestEntry = z.infer<typeof ManifestEntry>;

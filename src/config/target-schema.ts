@@ -245,6 +245,82 @@ export const InvariantEnforcement = z
   .strict();
 export type InvariantEnforcement = z.infer<typeof InvariantEnforcement>;
 
+/**
+ * TCC-CONTEXT-BUDGET — `(parent_loop, phase_or_purpose)` 쌍별 1-shot context
+ * window hard cap (phase 8a, G2-1).
+ *
+ * Keys match the `parent_loop`/`phase_or_purpose` enum the AGC envelope
+ * already carries (`docs/contracts/agent-and-context-contract.md#AGC-OUTPUT`)
+ * — `outer.{Discovery,Specification,Planning,Validation}`,
+ * `middle.{review,merge}`, `inner.tdd_build`. The architecture default values
+ * are reproduced verbatim from `target-config-contract.md#TCC-CONTEXT-BUDGET`
+ * so target operators can omit keys they do not customize.
+ *
+ * `prompt-compose` reads the cap via `resolveContextBudget(...)` and applies
+ * AGC-CONTEXT-BUDGET truncation priority (low fetch_scope → high) before the
+ * 1-shot call. Persistent overflow surfaces as the AGC-INVALID reason
+ * `context_budget_truncation` (`src/application/envelope.ts`).
+ */
+export const LoopStep = z.enum([
+  "outer.Discovery",
+  "outer.Specification",
+  "outer.Planning",
+  "outer.Validation",
+  "middle.review",
+  "middle.merge",
+  "inner.tdd_build",
+]);
+export type LoopStep = z.infer<typeof LoopStep>;
+
+export const ContextBudgetEntry = z
+  .object({
+    token_hard_cap: z.number().int().positive(),
+    soft_warn_pct: z.number().min(0).max(1).optional(),
+  })
+  .strict();
+export type ContextBudgetEntry = z.infer<typeof ContextBudgetEntry>;
+
+export const ContextBudget = z
+  .record(LoopStep, ContextBudgetEntry)
+  .default(() => ({}));
+export type ContextBudget = z.infer<typeof ContextBudget>;
+
+/**
+ * Architecture defaults from `target-config-contract.md#TCC-CONTEXT-BUDGET`.
+ * Provider limits are not fixed here; operators override per (loop, step).
+ */
+export const CONTEXT_BUDGET_DEFAULTS: Readonly<
+  Record<LoopStep, ContextBudgetEntry>
+> = Object.freeze({
+  "outer.Discovery": { token_hard_cap: 256_000 },
+  "outer.Specification": { token_hard_cap: 256_000 },
+  "outer.Planning": { token_hard_cap: 256_000 },
+  "outer.Validation": { token_hard_cap: 256_000 },
+  "middle.review": { token_hard_cap: 192_000 },
+  "middle.merge": { token_hard_cap: 128_000 },
+  "inner.tdd_build": { token_hard_cap: 128_000 },
+});
+
+/**
+ * Resolves the `(parent_loop, phase_or_purpose)` budget for a target. Returns
+ * the operator override when present, falling back to the architecture
+ * default. `null` is returned only when the (loop, step) pair is not a known
+ * `LoopStep` — callers MUST treat that as a programmer error and refuse to
+ * compose a prompt.
+ */
+export function resolveContextBudget(
+  cfg: ContextBudget | undefined,
+  parentLoop: string,
+  phaseOrPurpose: string,
+): ContextBudgetEntry | null {
+  const key = `${parentLoop}.${phaseOrPurpose}`;
+  const parsed = LoopStep.safeParse(key);
+  if (!parsed.success) return null;
+  const override = cfg?.[parsed.data];
+  if (override != null) return override;
+  return CONTEXT_BUDGET_DEFAULTS[parsed.data];
+}
+
 export const TargetConfig = z
   .object({
     identity: Identity,
@@ -261,6 +337,7 @@ export const TargetConfig = z
     internal_escalation_rules: InternalEscalationRules.optional(),
     dual_track: DualTrack.optional(),
     invariant_enforcement: InvariantEnforcement.optional(),
+    context_budget: ContextBudget.optional(),
   })
   .strict();
 

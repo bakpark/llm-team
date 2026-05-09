@@ -53,13 +53,20 @@ export class ManifestBuilder {
   async build(input: BuildManifestInput): Promise<ContextManifestT> {
     const entries: ManifestEntry[] = [];
     for (const d of input.drafts) {
-      entries.push({
+      const partial = {
         object_kind: d.object_kind,
         object_id: d.object_id,
         fetch_scope: d.fetch_scope,
         revision_pin: await this.resolver.resolve(d),
         required: d.required,
         purpose: d.purpose,
+      };
+      // TCC-CONTEXT-BUDGET / phase 8a — char/4 heuristic over the entry's
+      // serialized header. Body fetch is not required at manifest-build
+      // time; this is a deterministic forecast consumed by prompt-compose.
+      entries.push({
+        ...partial,
+        token_estimate: estimateTokensFromHeader(partial),
       });
     }
     return ContextManifest.parse({
@@ -90,4 +97,19 @@ export class ManifestBuilder {
     }
     return stale;
   }
+}
+
+/**
+ * Deterministic token estimate for a manifest entry header. Uses the
+ * canonical char/4 heuristic over the JSON serialization. Body content is
+ * not fetched here — adapters compute body-aware costs separately if needed.
+ *
+ * The estimate is forecast-grade: prompt-compose adds a fixed per-entry
+ * envelope overhead before comparing to the budget cap.
+ */
+export function estimateTokensFromHeader(
+  entry: Omit<ManifestEntry, "token_estimate">,
+): number {
+  const serialized = JSON.stringify(entry);
+  return Math.ceil(serialized.length / 4);
 }
