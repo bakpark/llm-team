@@ -25,6 +25,7 @@ import type {
   CompositeRule,
   FinalizationDecision,
   FinalizationRule,
+  Participant,
   RequiredEvidence,
   SessionTermination,
 } from "../domain/schema/dialogue-session.js";
@@ -37,6 +38,13 @@ export interface TurnSummary {
   verdict: Verdict | null;
   /** Verification result attached to that turn (inner / middle reverify). */
   verification: VerificationRun | null;
+  /**
+   * Phase 5b.3 (PR #69 P0-2 / P0-3 fix): identify which participant emitted
+   * the turn so unanimous_approve / quorum_then_lead can require votes from
+   * the registered reviewer set rather than counting raw turn occurrences.
+   * Optional for back-compat with inner / middle review evaluators.
+   */
+  agent_profile_id?: string;
 }
 
 export interface TerminationInputs {
@@ -45,6 +53,15 @@ export interface TerminationInputs {
   turns: readonly TurnSummary[];
   /** Hard cap: SOC-SESSION-LIFECYCLE TIMEOUT trigger. */
   max_turns: number;
+  /**
+   * Phase 5b.3 (PR #69 P0-2 / P0-3 fix): the session's registered
+   * participants. When provided, unanimous_approve requires every non-
+   * human reviewer to have approved (distinct profile vote count) and
+   * quorum_then_lead refuses to converge while a `human` reviewer is
+   * registered but has not yet voted. Optional for back-compat — when
+   * absent, the legacy turn-count semantics apply.
+   */
+  participants?: readonly Participant[];
   /**
    * Optional runtime hints. Phase 3 ignores these; reserved for phase 4
    * recovery (no_progress / regression / scope_violation hints).
@@ -123,6 +140,7 @@ export function evaluateTermination(
     input.termination.finalization_rule,
     input.turns,
     input.termination.quorum_min_approvals,
+    input.participants,
   );
   const evidenceOk = checkEvidence(
     input.termination.required_evidence,
@@ -167,6 +185,7 @@ function checkFinalization(
   rule: FinalizationRule,
   turns: readonly TurnSummary[],
   quorumMin: number | null,
+  participants: readonly Participant[] | undefined,
 ): FinalizationOutcome {
   switch (rule) {
     case "lead_only": {
@@ -189,27 +208,92 @@ function checkFinalization(
       return { ok: true, verdict: v };
     }
     case "unanimous_approve": {
-      const reviewers = turns.filter(
+      // PR #69 P0-2 fix: count distinct reviewer participants who approved,
+      // not raw reviewer turn occurrences. When the session's registered
+      // reviewer roster is supplied, every non-human reviewer must have
+      // approved at least once before convergence. Falls back to the legacy
+      // turn-count semantics when participants is absent (inner / middle
+      // callers don't supply it).
+      const reviewerTurns = turns.filter(
         (t) => t.agent_role_in_session === "reviewer",
       );
-      if (reviewers.length === 0) return { ok: false, verdict: "" };
       // Phase 5b.3: outer Planning reviewers vote `plan_accept` (matrix-
       // exclusive verdict). Discovery/Specification reviewers vote
       // `spec_accept`. Either of these — alongside the inner/middle
       // `approve` — counts as a unanimous approval here.
-      if (reviewers.every((t) => isApproveLike(t.verdict?.result)))
-        return { ok: true, verdict: reviewers[0]!.verdict!.result };
+      if (participants != null) {
+        const requiredReviewerProfiles = participants
+          .filter(
+            (p) => p.role === "reviewer" && p.agent_profile_id !== "human",
+          )
+          .map((p) => p.agent_profile_id);
+        if (requiredReviewerProfiles.length === 0)
+          return { ok: false, verdict: "" };
+        const approvedProfiles = new Set(
+          reviewerTurns
+            .filter((t) => isApproveLike(t.verdict?.result))
+            .map((t) => t.agent_profile_id ?? "")
+            .filter((p) => p.length > 0),
+        );
+        const allApproved = requiredReviewerProfiles.every((p) =>
+          approvedProfiles.has(p),
+        );
+        if (!allApproved) return { ok: false, verdict: "" };
+        const sample = reviewerTurns.find((t) =>
+          isApproveLike(t.verdict?.result),
+        );
+        return { ok: true, verdict: sample!.verdict!.result };
+      }
+      if (reviewerTurns.length === 0) return { ok: false, verdict: "" };
+      if (reviewerTurns.every((t) => isApproveLike(t.verdict?.result)))
+        return { ok: true, verdict: reviewerTurns[0]!.verdict!.result };
       return { ok: false, verdict: "" };
     }
     case "quorum_then_lead": {
+      // PR #69 P0-3 fix: count only reviewer-role distinct approvals (the
+      // lead's verdict is excluded from quorum). When a `human` reviewer is
+      // on the registered roster, refuse to converge until that participant
+      // has voted approve — the human signal binding pipeline (5b.2)
+      // appends the synthetic SessionTurn carrying the human's vote.
       // Phase 5b.3: count outer `spec_accept` / `plan_accept` alongside the
       // inner/middle `approve` verdict. quorum_then_lead is used by outer
       // Discovery / Specification where reviewers do not emit `approve`.
-      const approvals = turns.filter((t) =>
-        isApproveLike(t.verdict?.result),
-      ).length;
+      const reviewerApprovalProfiles = new Set(
+        turns
+          .filter(
+            (t) =>
+              t.agent_role_in_session === "reviewer" &&
+              isApproveLike(t.verdict?.result),
+          )
+          .map((t) => t.agent_profile_id ?? "")
+          .filter((p) => p.length > 0),
+      );
+      // Fallback for legacy callers that don't populate agent_profile_id —
+      // count distinct reviewer turns.
+      const approvalCount =
+        reviewerApprovalProfiles.size > 0
+          ? reviewerApprovalProfiles.size
+          : turns.filter(
+              (t) =>
+                t.agent_role_in_session === "reviewer" &&
+                isApproveLike(t.verdict?.result),
+            ).length;
       const min = quorumMin ?? 1;
-      if (approvals < min) return { ok: false, verdict: "" };
+      if (approvalCount < min) return { ok: false, verdict: "" };
+      if (participants != null) {
+        const humanReviewer = participants.find(
+          (p) => p.role === "reviewer" && p.agent_profile_id === "human",
+        );
+        if (humanReviewer != null) {
+          const humanApproved = turns.some(
+            (t) =>
+              t.agent_role_in_session === "reviewer" &&
+              t.agent_profile_id === "human" &&
+              isApproveLike(t.verdict?.result),
+          );
+          if (!humanApproved) return { ok: false, verdict: "" };
+        }
+      }
       const leadTurn = lastBy(turns, (t) => t.agent_role_in_session === "lead");
       const v = leadTurn?.verdict?.result ?? null;
       if (v == null) return { ok: false, verdict: "" };

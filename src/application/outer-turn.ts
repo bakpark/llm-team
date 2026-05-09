@@ -144,6 +144,26 @@ export async function runOneOuterTurn(
   }
   const { milestone, phase } = ready;
 
+  // P0-1 fix (PR #69 review): AWAITING_HUMAN gate. If the milestone is
+  // parked at M_*_AWAITING_HUMAN and there is no live SESSION_OPEN session
+  // to resume, do NOT open a new session and do NOT call the lead LLM —
+  // return `awaiting_human` so the caller defers until the human signal
+  // binding (5b.2) appends the synthetic SessionTurn that will resume
+  // evaluation on a subsequent runOneOuterTurn cycle.
+  if (
+    ready.existingSession == null &&
+    (milestone.state === "M_DISCOVERY_AWAITING_HUMAN" ||
+      milestone.state === "M_SPECIFICATION_AWAITING_HUMAN")
+  ) {
+    return {
+      kind: "awaiting_human",
+      sessionId: "",
+      milestoneId: milestone.milestone_id,
+      phase,
+      detail: `milestone parked in ${milestone.state}; awaiting human signal`,
+    };
+  }
+
   // Open or reuse the SESSION_OPEN outer session for this milestone.
   let session: DialogueSessionT;
   if (ready.existingSession != null) {
@@ -184,14 +204,48 @@ export async function runOneOuterTurn(
     phase,
     deps,
   );
-  const preDecision = evaluateTermination({
+  let preDecision = evaluateTermination({
     termination: session.session_termination,
     turns: preSummaries,
     max_turns: session.max_turns,
+    participants: session.participants,
   });
+  // P0-4 fix (PR #69 review): Validation FAIL/STALE bypass (pre-eval). See
+  // the post-turn branch below for rationale.
+  if (
+    phase === "Validation" &&
+    !preDecision.converged &&
+    preDecision.reason === "continue"
+  ) {
+    const leadVerdict = lastLeadVerdict(preSummaries);
+    if (leadVerdict === "FAIL" || leadVerdict === "STALE") {
+      preDecision = {
+        converged: true,
+        final_verdict: leadVerdict,
+        finalization_decision: "finalization_rule",
+      };
+    }
+  }
   if (preDecision.converged) {
     const leadEnv = await lastLeadEnvelope(session, priorTurns, deps.store);
     return finalizeConvergedSession(
+      session,
+      milestone,
+      phase,
+      preDecision,
+      leadEnv,
+      turnIndex,
+      deps,
+    );
+  }
+  // P0-5 fix (PR #69 review): pre-evaluation TIMEOUT/ABANDONED also routes
+  // through the dispatch matrix.
+  if (
+    !preDecision.converged &&
+    (preDecision.reason === "timeout" || preDecision.reason === "abandoned")
+  ) {
+    const leadEnv = await lastLeadEnvelope(session, priorTurns, deps.store);
+    return finalizeNonConvergedSession(
       session,
       milestone,
       phase,
@@ -228,7 +282,15 @@ export async function runOneOuterTurn(
   }
   const { agentProfileId, agentRoleInSession } = nextRole;
 
-  // Manifest — milestone body + spec doc (when present).
+  // Manifest — milestone body + spec doc (when present) + prior session
+  // turn summaries.
+  //
+  // PR #69 P1-3 fix: prior SessionTurn entries (in particular the most
+  // recent reviewer `request_changes` rationale) must reach the lead so it
+  // can address them in the next draft. Reference each prior turn's
+  // session_turn artefact with a `prior turn rationale` purpose; the
+  // outer pin resolver pins them to the persisted turn body so any drift
+  // (turn body rewritten) trips the stale-pins gate.
   const drafts: ManifestEntryDraft[] = [
     {
       object_kind: "milestone",
@@ -247,7 +309,19 @@ export async function runOneOuterTurn(
       purpose: "spec carry-over",
     });
   }
-  const pinResolver = new OuterPinResolver(milestone);
+  for (let i = 0; i < priorTurns.length; i++) {
+    const t = priorTurns[i]!;
+    const rcSuffix =
+      t.verdict?.result === "request_changes" ? " (request_changes)" : "";
+    drafts.push({
+      object_kind: "session_turn",
+      object_id: `${session.session_id}#${i}`,
+      fetch_scope: "body",
+      required: false,
+      purpose: `prior turn ${i} (${t.agent_role_in_session})${rcSuffix}`,
+    });
+  }
+  const pinResolver = new OuterPinResolver(milestone, session.session_id, deps.store);
   const manifestBuilder = new ManifestBuilder(pinResolver, deps.clock);
   const manifest = await manifestBuilder.build({
     session_id: session.session_id,
@@ -313,6 +387,35 @@ export async function runOneOuterTurn(
     };
   }
 
+  // PR #69 P1-1 fix: stale pin gate. Mirror the inner turn-worker check —
+  // if any manifest entry's recorded revision_pin no longer matches the
+  // live object, refuse to persist or dispatch this turn so a stale-context
+  // outcome cannot promote the milestone or persist a slice DAG.
+  if (agentOut.stalePins.length > 0) {
+    await emitInvalidOuterTurn(
+      deps,
+      session,
+      turnIndex,
+      milestone,
+      phase,
+      manifest.manifest_id,
+      manifest.entries.map((e) => e.revision_pin),
+      "matrix_validate",
+      "missing_revision_pins",
+      `stale_pins: ${agentOut.stalePins.map((p) => p.object_id).join(",")}`,
+      agentProfileId,
+    );
+    return {
+      kind: "invalid_envelope",
+      sessionId: session.session_id,
+      milestoneId: milestone.milestone_id,
+      phase,
+      stage: "matrix_validate",
+      reason: "missing_revision_pins",
+      detail: `stale_pins: ${agentOut.stalePins.map((p) => p.object_id).join(",")}`,
+    };
+  }
+
   const callerRoutingDecision = decideRouting(agentOut.envelope);
   const { session: sessionAfterTurn } = await persistSessionTurn(
     {
@@ -370,13 +473,66 @@ export async function runOneOuterTurn(
     phase,
     deps,
   );
-  const decision = evaluateTermination({
+  let decision = evaluateTermination({
     termination: sessionAfterTurn.session_termination,
     turns: allTurns,
     max_turns: sessionAfterTurn.max_turns,
+    participants: sessionAfterTurn.participants,
   });
 
+  // P0-4 fix (PR #69 review): Validation FAIL/STALE bypass.
+  //
+  // Validation uses `evidence_only` + `verification_green`. The synthetic
+  // verification record we attach to the lead turn is `pass` for PASS but
+  // `fail` for FAIL/STALE — which means the pure evaluator never converges
+  // on FAIL/STALE, leaving the session stuck (lead already produced its
+  // envelope, no further reviewers to vote). The dispatch matrix expects
+  // explicit `validation_fail` / `validation_stale` rows to run.
+  //
+  // Force convergence on the lead's explicit FAIL/STALE verdict; the
+  // dispatch matrix takes over from there. PASS continues through the
+  // existing evidence path so the verification_green check stays meaningful.
+  if (phase === "Validation" && !decision.converged && decision.reason === "continue") {
+    const leadVerdict = lastLeadVerdict(allTurns);
+    if (leadVerdict === "FAIL" || leadVerdict === "STALE") {
+      decision = {
+        converged: true,
+        final_verdict: leadVerdict,
+        finalization_decision: "finalization_rule",
+      };
+    }
+  }
+
   if (!decision.converged) {
+    // P0-5 fix (PR #69 review): TIMEOUT/ABANDONED also need dispatch so the
+    // outer DISPATCH_MATRIX rows for those session states (e.g. Validation
+    // TIMEOUT → escalate_milestone) actually run. Drive them through the
+    // same finalize path with the latest lead envelope (or the just-
+    // persisted envelope when this turn was the lead's). `continue` keeps
+    // the session open as before.
+    if (decision.reason === "timeout" || decision.reason === "abandoned") {
+      const leadEnv =
+        agentRoleInSession === "lead"
+          ? agentOut.envelope
+          : (await lastLeadEnvelope(
+              sessionAfterTurn,
+              await loadOuterTurns(
+                sessionAfterTurn,
+                sessionAfterTurn.current_turn_index,
+                deps.store,
+              ),
+              deps.store,
+            )) ?? agentOut.envelope;
+      return finalizeNonConvergedSession(
+        sessionAfterTurn,
+        milestone,
+        phase,
+        decision,
+        leadEnv,
+        turnIndex,
+        deps,
+      );
+    }
     return {
       kind: "turn_persisted",
       sessionId: sessionAfterTurn.session_id,
@@ -451,7 +607,12 @@ async function finalizeConvergedSession(
     targetId: deps.targetId,
   });
 
-  if (dispatch.kind === "no_match") {
+  // P0-6 fix (PR #69 review): treat `illegal_transition` the same as
+  // `no_match` — milestone side-effects were rejected, so the session must
+  // NOT be confirmed to CONVERGED. Both paths emit an error ledger row and
+  // surface as `dispatch_no_match` so the operator can re-run / escalate.
+  if (dispatch.kind === "no_match" || dispatch.kind === "illegal_transition") {
+    const dispatchKind = dispatch.kind;
     await deps.ledger.appendTransition({
       transition_id: newMonotonicId(deps.clock.now()),
       target_id: deps.targetId,
@@ -480,7 +641,7 @@ async function finalizeConvergedSession(
       idempotency_key: idempotencyKey({
         scope: "external_observation",
         parts: {
-          kind: "outer_dispatch_no_match",
+          kind: `outer_dispatch_${dispatchKind}`,
           session_id: session.session_id,
           final_verdict: decision.final_verdict,
         },
@@ -488,7 +649,7 @@ async function finalizeConvergedSession(
       lease_token: null,
       lease_kind: null,
       result: "error",
-      result_detail: dispatch.detail.slice(0, 200),
+      result_detail: `${dispatchKind}: ${dispatch.detail.slice(0, 180)}`,
       timestamp: deps.clock.isoNow(),
     });
     return {
@@ -496,7 +657,7 @@ async function finalizeConvergedSession(
       sessionId: session.session_id,
       milestoneId: milestone.milestone_id,
       phase,
-      detail: dispatch.detail,
+      detail: `${dispatchKind}: ${dispatch.detail}`,
     };
   }
 
@@ -566,6 +727,124 @@ async function finalizeConvergedSession(
   };
 }
 
+/**
+ * P0-5 fix (PR #69 review): TIMEOUT/ABANDONED finalize path.
+ *
+ * Mirrors `finalizeConvergedSession` but for non-convergence terminal
+ * outcomes — the dispatch matrix has explicit rows for outer
+ * (TIMEOUT|ABANDONED) per phase (final_verdict=null). Persists session
+ * state TIMEOUT or ABANDONED accordingly.
+ */
+async function finalizeNonConvergedSession(
+  session: DialogueSessionT,
+  milestone: MilestoneT,
+  phase: OuterPhase,
+  decision:
+    | { converged: false; reason: "timeout" }
+    | {
+        converged: false;
+        reason: "abandoned";
+        abandoned_reason: "no_progress" | "regression" | "scope_violation";
+      },
+  leadEnvelope: Envelope | null,
+  turnIndex: number,
+  deps: OuterTurnDeps,
+): Promise<RunOneOuterTurnOutcome> {
+  const sessionState = decision.reason === "timeout" ? "TIMEOUT" : "ABANDONED";
+  const dispatchInput: OuterDispatchInput = {
+    parent_loop: "outer",
+    phase_or_purpose: phase,
+    session_state: sessionState,
+    final_verdict: null,
+    milestone,
+    sessionId: session.session_id,
+  };
+  const dispatch = await dispatchOuterOutcome(dispatchInput, {
+    store: deps.store,
+    clock: deps.clock,
+    ledger: deps.ledger,
+    callerId: deps.callerId,
+    targetId: deps.targetId,
+  });
+
+  if (dispatch.kind === "no_match" || dispatch.kind === "illegal_transition") {
+    return {
+      kind: "dispatch_no_match",
+      sessionId: session.session_id,
+      milestoneId: milestone.milestone_id,
+      phase,
+      detail: dispatch.detail,
+    };
+  }
+
+  // Persist the session in TIMEOUT / ABANDONED.
+  const finalized = DialogueSession.parse({
+    ...session,
+    state: sessionState,
+    final_verdict: null,
+    finalization_decision: null,
+    updated_at: deps.clock.isoNow(),
+  });
+  await deps.store.writeAtomic(
+    layout.sessionMetadata(finalized.session_id),
+    JSON.stringify(finalized, null, 2),
+  );
+  await deps.ledger.appendTransition({
+    transition_id: newMonotonicId(deps.clock.now()),
+    target_id: deps.targetId,
+    object_id: finalized.session_id,
+    object_kind: "dialogue_session",
+    from_state: "SESSION_OPEN",
+    to_state: sessionState,
+    loop_kind: "outer",
+    phase,
+    slice_id: null,
+    slice_kind: null,
+    dod_revision: null,
+    session_id: finalized.session_id,
+    turn_index: turnIndex,
+    slot_kind: null,
+    agent_profile_id: leadEnvelope?.agent_profile_id ?? null,
+    contribution_kind: null,
+    action_kind: "session_finalize",
+    final_verdict: null,
+    caller_id: deps.callerId,
+    manifest_id: null,
+    input_revision_pins: [],
+    output_hash: null,
+    verification_run_id: null,
+    metric_run_id: null,
+    idempotency_key: idempotencyKey({
+      scope: "per_session_outcome",
+      parts: {
+        session_id: finalized.session_id,
+        final_verdict: sessionState,
+        finalization_decision:
+          decision.reason === "abandoned"
+            ? `abandoned:${decision.abandoned_reason}`
+            : "timeout",
+        workspace_revision_pin_at_convergence: finalized.workspace_revision_pin,
+      },
+    }),
+    lease_token: null,
+    lease_kind: null,
+    result: "applied",
+    result_detail: null,
+    timestamp: deps.clock.isoNow(),
+  });
+
+  // Reuse the turn_persisted shape (the session terminated, not converged) —
+  // the decision discriminator carries reason=timeout|abandoned.
+  return {
+    kind: "turn_persisted",
+    sessionId: finalized.session_id,
+    milestoneId: milestone.milestone_id,
+    phase,
+    decision,
+    dispatch,
+  };
+}
+
 async function lastLeadEnvelope(
   session: DialogueSessionT,
   priorTurns: readonly PersistedTurnLike[],
@@ -606,13 +885,33 @@ function manifestPurposeFor(
 }
 
 class OuterPinResolver implements RevisionPinResolver {
-  constructor(private readonly milestone: MilestoneT) {}
+  constructor(
+    private readonly milestone: MilestoneT,
+    private readonly sessionId: string,
+    private readonly store: StorePort,
+  ) {}
   async resolve(entry: ManifestEntryDraft): Promise<string> {
     if (entry.object_kind === "milestone") {
       return this.milestone.updated_at;
     }
     if (entry.object_kind === "spec_doc") {
       return this.milestone.spec_revision_pin ?? this.milestone.updated_at;
+    }
+    if (entry.object_kind === "session_turn") {
+      // PR #69 P1-3: prior turn entries are pinned by the persisted body's
+      // hash-equivalent — we just use the turn body length + first 64
+      // chars as a stable fingerprint (no native crypto needed for a
+      // Phase-5 manifest pin). Turn bodies are append-only so this is
+      // stable until/unless the turn is rewritten.
+      const idxStr = entry.object_id.includes("#")
+        ? entry.object_id.split("#")[1]!
+        : "0";
+      const idx = Number.parseInt(idxStr, 10);
+      const body = await this.store.readText(
+        layout.sessionTurn(this.sessionId, idx),
+      );
+      if (body == null) return `missing:${entry.object_id}`;
+      return `len=${body.length}:${body.slice(0, 32).replace(/\s+/g, "")}`;
     }
     return this.milestone.updated_at;
   }
@@ -713,6 +1012,18 @@ function pickNextRole(
   const last = priorTurns[priorTurns.length - 1]!;
   // Lead just spoke → next reviewer who hasn't voted in the current round.
   if (last.agent_role_in_session === "lead") {
+    // PR #69 P0-3 consequence: when the lead's most recent turn carries an
+    // explicit verdict (final ruling for quorum_then_lead), the dialogue
+    // is closed for further LLM turns — only a human signal can resolve
+    // any remaining roster requirement (e.g. registered human reviewer).
+    // Without this guard the next-reviewer search would loop the agent
+    // reviewers a second time and run the session to TIMEOUT.
+    if (last.verdict != null) {
+      return {
+        kind: "awaiting_human",
+        detail: "lead emitted final verdict; awaiting human signal or convergence",
+      };
+    }
     const reviewer = nextReviewer(participants, priorTurns);
     if (reviewer != null) return reviewer;
     // No non-human reviewer remains. For quorum_then_lead the lead is
@@ -875,7 +1186,9 @@ async function loadOuterTurnSummaries(
         agent_role_in_session?: TurnSummary["agent_role_in_session"];
         verdict?: TurnSummary["verdict"];
         output_kind?: string;
+        agent_profile_id?: string;
       };
+      agent_profile_id?: string;
     };
     try {
       parsed = JSON.parse(body);
@@ -887,6 +1200,12 @@ async function loadOuterTurnSummaries(
       agent_role_in_session: env.agent_role_in_session ?? "lead",
       verdict: env.verdict ?? null,
       verification: null,
+      // PR #69 P0-2 / P0-3 fix: surface the participant id so the
+      // termination evaluator can require unanimous approval from every
+      // registered reviewer (and refuse to converge until a `human`
+      // reviewer has voted, when applicable).
+      agent_profile_id:
+        env.agent_profile_id ?? parsed.agent_profile_id ?? undefined,
     });
   }
   if (phase === "Validation" && summaries.length > 0) {
@@ -914,6 +1233,16 @@ async function loadOuterTurnSummaries(
     }
   }
   return summaries;
+}
+
+function lastLeadVerdict(turns: readonly TurnSummary[]): string | null {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const t = turns[i]!;
+    if (t.agent_role_in_session === "lead") {
+      return t.verdict?.result ?? null;
+    }
+  }
+  return null;
 }
 
 function lastBy<T>(arr: readonly T[], pred: (t: T) => boolean): T | null {

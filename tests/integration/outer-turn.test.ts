@@ -228,6 +228,70 @@ function setup() {
   return { workdir, store, clock, logger, ledger };
 }
 
+/**
+ * PR #69 P0-3 fix consequence: Discovery / Specification quorum_then_lead
+ * now requires the registered `human` reviewer to vote approve before
+ * convergence. The 5b.2 human-signal-binding pipeline appends the
+ * synthetic SessionTurn at runtime; in unit tests we inject it directly
+ * via the store so we don't have to wire the entire signal-drain path.
+ */
+async function appendHumanApproveTurn(
+  store: FsStore,
+  sessionId: string,
+  turnIndex: number,
+  result: string,
+): Promise<void> {
+  const sessionMeta = DialogueSession.parse(
+    JSON.parse((await store.readText(layout.sessionMetadata(sessionId)))!),
+  );
+  const turn = {
+    session_id: sessionId,
+    turn_index: turnIndex,
+    agent_profile_id: "human",
+    input_manifest_id: null,
+    input_turn_log_snapshot_ref: null,
+    output_envelope: {
+      session_id: sessionId,
+      turn_index: turnIndex,
+      parent_loop: "outer",
+      phase_or_purpose: "Discovery",
+      agent_profile_id: "human",
+      agent_role_in_session: "reviewer",
+      manifest_id: null,
+      contribution_kind: "review_verdict",
+      output_kind: "verdict",
+      object_id: MILESTONE_ID,
+      summary: `human verdict=${result}`,
+      artifacts: null,
+      verdict: { result, rationale: null },
+      next_action_request: null,
+      failure: null,
+    },
+    next_action_request: null,
+    caller_routing_decision: {
+      decision: "dropped",
+      decision_reason: "human signal turn",
+      resolved_addressed_to: null,
+    },
+    workspace_commit: null,
+    verification_result_ref: null,
+    recorded_at: ISO,
+  };
+  await store.writeAtomic(
+    layout.sessionTurn(sessionId, turnIndex),
+    JSON.stringify(turn, null, 2),
+  );
+  const updated = DialogueSession.parse({
+    ...sessionMeta,
+    current_turn_index: Math.max(sessionMeta.current_turn_index, turnIndex + 1),
+    updated_at: ISO,
+  });
+  await store.writeAtomic(
+    layout.sessionMetadata(sessionId),
+    JSON.stringify(updated, null, 2),
+  );
+}
+
 describe("runOneOuterTurn — Discovery quorum_then_lead spec_accept", () => {
   it("lead draft → reviewer approves → lead spec_accept → milestone → SPECIFICATION_DRAFT", async () => {
     const env = setup();
@@ -262,20 +326,30 @@ describe("runOneOuterTurn — Discovery quorum_then_lead spec_accept", () => {
     if (t0.kind !== "turn_persisted") return;
     expect(t0.decision.converged).toBe(false);
 
-    // Turn 1: reviewer approves (quorum=1) — quorum_then_lead still needs the
-    // lead's verdict, so we don't converge yet.
+    // Turn 1: sentinel reviewer approves (quorum=1).
     const t1 = await runOneOuterTurn(baseDeps);
     expect(t1.kind).toBe("turn_persisted");
     if (t1.kind !== "turn_persisted") return;
 
-    // Turn 2: lead emits spec_accept → converge.
+    // Turn 2: lead emits spec_accept verdict — but human reviewer hasn't
+    // approved yet (PR #69 P0-3), so the session continues.
     const t2 = await runOneOuterTurn(baseDeps);
     expect(t2.kind).toBe("turn_persisted");
     if (t2.kind !== "turn_persisted") return;
-    expect(t2.decision.converged).toBe(true);
-    if (!t2.decision.converged) return;
-    expect(t2.decision.final_verdict).toBe("spec_accept");
-    expect(t2.dispatch?.kind).toBe("applied");
+    expect(t2.decision.converged).toBe(false);
+
+    // PR #69 P0-3: Discovery has a `human` reviewer registered — inject the
+    // synthetic human-approve turn (5b.2 signal binding) so the next cycle
+    // converges via the pre-eval path.
+    await appendHumanApproveTurn(env.store, t2.sessionId, 3, "spec_accept");
+
+    const t3 = await runOneOuterTurn(baseDeps);
+    expect(t3.kind).toBe("turn_persisted");
+    if (t3.kind !== "turn_persisted") return;
+    expect(t3.decision.converged).toBe(true);
+    if (!t3.decision.converged) return;
+    expect(t3.decision.final_verdict).toBe("spec_accept");
+    expect(t3.dispatch?.kind).toBe("applied");
 
     const m = Milestone.parse(
       JSON.parse((await env.store.readText(layout.milestone(MILESTONE_ID)))!),
@@ -287,7 +361,7 @@ describe("runOneOuterTurn — Discovery quorum_then_lead spec_accept", () => {
 
     const session = DialogueSession.parse(
       JSON.parse(
-        (await env.store.readText(layout.sessionMetadata(t2.sessionId)))!,
+        (await env.store.readText(layout.sessionMetadata(t3.sessionId)))!,
       ),
     );
     expect(session.state).toBe("CONVERGED");
@@ -366,18 +440,28 @@ describe("runOneOuterTurn — Specification quorum=2 spec_accept", () => {
       targetId: "demo",
     };
 
-    // Specification needs quorum_min=2 reviewers + lead — at most 4 turns.
+    // Specification needs quorum_min=2 reviewers + lead.
+    // PR #69 P0-3 fix: Specification has a `human` reviewer on the roster;
+    // we drive 3 LLM turns (lead draft + forge + sentinel), then inject the
+    // human approve turn, then drive the lead's final verdict.
     let last;
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 5; i++) {
       last = await runOneOuterTurn(baseDeps);
       if (
-        last.kind === "turn_persisted" &&
-        "decision" in last &&
-        last.decision.converged
+        last.kind === "awaiting_human" ||
+        (last.kind === "turn_persisted" &&
+          "decision" in last &&
+          last.decision.converged)
       ) {
         break;
       }
     }
+    expect(last?.kind).toBe("awaiting_human");
+    if (last?.kind !== "awaiting_human") return;
+    // 4 turns persisted (lead draft + forge + sentinel + lead final verdict);
+    // human approve turn fills index 4 so the next cycle's pre-eval converges.
+    await appendHumanApproveTurn(env.store, last.sessionId, 4, "spec_accept");
+    last = await runOneOuterTurn(baseDeps);
     expect(last?.kind).toBe("turn_persisted");
     if (last?.kind !== "turn_persisted") return;
     expect(last.decision.converged).toBe(true);
@@ -480,7 +564,7 @@ describe("runOneOuterTurn — Validation lead_only PASS finalizes M_DONE", () =>
     expect(m.context_summary_id).not.toBeNull();
   });
 
-  it("sentinel lead FAIL → no convergence (fails verification_green evidence)", async () => {
+  it("sentinel lead FAIL → converges validation_fail → milestone reverts to M_DELIVERY_BUILDING (PR #69 P0-4)", async () => {
     const env = setup();
     await seedMilestone(env.store, "M_DELIVERY_VALIDATING", { specPin: "spec-rev-1" });
     const { adapter } = makeStub({
@@ -498,10 +582,19 @@ describe("runOneOuterTurn — Validation lead_only PASS finalizes M_DONE", () =>
     const out = await runOneOuterTurn(baseDeps);
     expect(out.kind).toBe("turn_persisted");
     if (out.kind !== "turn_persisted") return;
-    // evidence_only with verification_green requires PASS → FAIL keeps the
-    // session open so the next runOneOuterTurn cycle (5b.3 minimal seam:
-    // awaiting_human) can re-run after the scout aggregator (5c) is wired.
-    expect(out.decision.converged).toBe(false);
+    // PR #69 P0-4 fix: Validation FAIL now bypasses the evidence_only +
+    // verification_green gate (which would otherwise block FAIL/STALE
+    // forever) and converges directly on the lead's explicit verdict so the
+    // dispatch matrix's `validation_fail` row runs.
+    expect(out.decision.converged).toBe(true);
+    if (!out.decision.converged) return;
+    expect(out.decision.final_verdict).toBe("FAIL");
+    expect(out.dispatch?.kind).toBe("applied");
+
+    const m = Milestone.parse(
+      JSON.parse((await env.store.readText(layout.milestone(MILESTONE_ID)))!),
+    );
+    expect(m.state).toBe("M_DELIVERY_BUILDING");
   });
 });
 
