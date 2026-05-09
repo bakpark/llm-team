@@ -444,7 +444,7 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 <a id="TCC-ENFORCEMENT-AUDIT"></a>
 ## TCC-ENFORCEMENT-AUDIT: Call-site Matrix (phase 9c, G4-5)
 
-본 절은 `TCC-ENFORCEMENT` 의 `always_hard` / `stage_graded` invariant 가 실제 코드에서 어디에서 평가되는지, 그리고 평가 경로가 `resolveEnforcementLevel(...)` 을 통과하는지를 추적한다. Stage 5 default 동작 (모든 `stage_graded` 항목이 block 으로 강제) 은 `src/application/invariant-enforcement.ts` 에 이미 박혀 있으므로, 미배선 평가자도 위반 시 block 한다 — 다만 운영자가 target.invariant_enforcement 를 통해 개별 항목을 warn 으로 downgrade 해도 효력을 발휘하지 못한다 (gap).
+본 절은 `TCC-ENFORCEMENT` 의 `always_hard` / `stage_graded` invariant 가 실제 코드에서 어디에서 평가되는지, 그리고 평가 경로가 `resolveEnforcementLevel(...)` 을 통과하는지를 추적한다. Stage 5 default 동작 (모든 `stage_graded` 항목이 block 으로 강제) 은 `src/application/invariant-enforcement.ts` 의 `resolveEnforcementLevel` 함수 내부에 박혀 있다. 따라서 해당 함수를 호출하지 않는 call-site 에서는 Stage 5 promotion 이 적용되지 않으며, 미배선 항목의 실제 block/warn 거동은 항목별로 (자체 경로 hardcoded / detector 미구현 / branch 부재) 달라진다. 자세한 분기는 아래 *Audit 결론* 을 참조.
 
 ### `stage_graded` 호출처 매트릭스
 
@@ -471,8 +471,11 @@ amendment 직후의 enforcement 상태는 `target.invariant_enforcement` (TCC-EN
 
 ### Audit 결론
 
-- **wired**: 1 / 8 stage_graded invariants (actor_team_membership_unreachable, phase 9a).
-- **deferred**: 7 stage_graded invariants. 모두 Stage 5 default 동작 덕분에 *block 효과* 는 달성되어 있으나, target operator 가 warn 으로 downgrade 할 수 있는 hook 은 미배선이다.
-- **always_hard**: 5 항목 모두 block 동작이 보장된다 (`caller_only_operational_write` / `manifest_external_read_write` / `lease_acquisition_order` / `stateless_per_call` 은 코드 경로상 block, `direct_invocation_forbidden` 은 contract-only).
+- **wired**: 1 / 8 stage_graded invariants (actor_team_membership_unreachable, phase 9a). `resolveEnforcementLevel(...)` 호출이 실제 call-site 에 박혀 있어, target operator 가 warn 으로 downgrade 하면 효력을 갖는다.
+- **deferred (7 stage_graded)**: matrix 의 *Routes through resolver? = no* 행이 모두 deferred 다. Stage 5 promotion 로직은 `resolveEnforcementLevel` 함수 내부에서만 동작하므로, 해당 함수를 호출하지 않는 call-site 에는 적용되지 않는다. 실제 block/warn 거동은 항목별로 다음과 같이 갈린다:
+  - **자체 경로 hardcoded block** — `scope_violation` (AGC-INVALID), `required_evidence_unmet` (invalid envelope unconditionally). 위반 시 block 은 발생하나 Stage 5 promotion 덕분이 아니라 자체 로직이며, operator override hook 은 없다.
+  - **detector 미구현** — `fairness_violation` (detector 자체 부재), `refactor_metric_missing` (metric 부재 silent). 위반 자체가 감지되지 않아 block 도 warn 도 발생하지 않는다.
+  - **enforcement-level branch 부재** — `dual_slot_fairness` (config-driven ordering only), `telemetry_enrichment_missing` (comment-only ack), `turn_log_compaction_delay` (boolean trigger). evaluator 가 존재해도 warn/block 분기 자체가 없다.
+- **always_hard**: 5 항목 중 4 항목 (`caller_only_operational_write` / `manifest_external_read_write` / `lease_acquisition_order` / `stateless_per_call`) 은 코드 경로상 block 이 보장된다. `direct_invocation_forbidden` 은 contract spec-only 이며 runtime 구현 표면이 없으므로 "감사됨" 일 뿐 runtime block 보장 항목에서는 제외된다.
 
 배선되지 않은 7 stage_graded invariant 의 평가자에 `resolveEnforcementLevel(...)` 을 통과시키는 작업은 본 phase 의 범위를 벗어난다 (각각 별도 detector / branching 도입 필요). 추적은 본 매트릭스의 *deferred* 행으로 남기며, 후속 cycle 이 invariant 단위로 wire 한다.

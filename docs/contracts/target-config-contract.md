@@ -402,6 +402,9 @@ target.invariant_enforcement.stage_graded:
   turn_log_compaction_delay: warn
   refactor_metric_missing: warn
   required_evidence_unmet: warn              # Stage 3b 부터 block
+  actor_team_membership_unreachable: block   # Inv #5 — phase 9a 추가 (TCC-GOVERNANCE 행)
+  scope_violation: warn                      # AGC-WORKSPACE 행에서 stage_graded 로 참조 (Stage 3b block)
+  fairness_violation: warn                   # RGC-FAIRNESS 행에서 stage_graded 로 참조 (detector 미구현)
 ```
 
 ### 의미
