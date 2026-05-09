@@ -131,14 +131,28 @@ export async function transitionRefactor(
     }
     const live = RefactorBacklogItem.parse(JSON.parse(body));
     if (live.state === input.to_state) {
-      // Idempotent re-run — emit the ledger row but skip the writeAtomic.
-      await emitLedgerRow(live, live.state, input.to_state, deps);
+      // PR #72 P1-1 fix: idempotent re-entry must NOT emit a duplicate
+      // ledger row. The idempotency_key is keyed on (kind, proposal_id,
+      // from_state, to_state) — since from==to here, the key collides with
+      // the first transition's key, leading to either ledger duplication
+      // or an idempotency-violation error depending on `FileLedger`'s
+      // policy. Skip the emit entirely; the original transition's ledger
+      // row remains the canonical record.
       return live;
     }
     const allowed = ALLOWED_TRANSITIONS[live.state];
     if (!allowed.includes(input.to_state)) {
       throw new Error(
         `transitionRefactor: illegal ${live.state} → ${input.to_state}`,
+      );
+    }
+    // PR #72 P1-2 fix: SUPERSEDED requires a non-null `superseded_by` per
+    // KAC-REFACTOR-BACKLOG. Allowing null produces audit-incomplete items
+    // (state=SUPERSEDED but no replacement reference), which downstream
+    // consumers treat as an integrity violation.
+    if (input.to_state === "SUPERSEDED" && input.superseded_by == null) {
+      throw new Error(
+        `transitionRefactor: SUPERSEDED requires superseded_by (proposal ${input.proposal_id})`,
       );
     }
     const nextBody = {
@@ -158,7 +172,7 @@ export async function transitionRefactor(
           : live.spawning_slice_id,
       superseded_by:
         input.to_state === "SUPERSEDED"
-          ? (input.superseded_by ?? null)
+          ? input.superseded_by!
           : live.superseded_by,
       updated_at: deps.clock.isoNow(),
     };

@@ -232,6 +232,69 @@ describe("refactor-backlog — idempotent re-transition", () => {
   });
 });
 
+describe("refactor-backlog — PR #72 P1-1 idempotent re-entry skips ledger emit", () => {
+  it("does not append a ledger row on idempotent re-transition", async () => {
+    const env = setup();
+    const item = await proposeRefactor(
+      {
+        proposed_by: "scout",
+        scope: "x",
+        suggested_refactor: "x",
+        rationale: "x",
+        code_location: "x",
+      },
+      env.deps,
+    );
+    await transitionRefactor(
+      { proposal_id: item.proposal_id, to_state: "CURATED" },
+      env.deps,
+    );
+    const ledgerBefore = (await env.store.readText("ledger/transitions.ndjson")) ?? "";
+    const linesBefore = ledgerBefore.split("\n").filter((l) => l.length > 0).length;
+
+    // Idempotent re-entry — must NOT emit any ledger row.
+    await transitionRefactor(
+      { proposal_id: item.proposal_id, to_state: "CURATED" },
+      env.deps,
+    );
+    const ledgerAfter = (await env.store.readText("ledger/transitions.ndjson")) ?? "";
+    const linesAfter = ledgerAfter.split("\n").filter((l) => l.length > 0).length;
+    expect(linesAfter).toBe(linesBefore);
+  });
+});
+
+describe("refactor-backlog — PR #72 P1-2 SUPERSEDED requires superseded_by", () => {
+  it("throws when transitioning to SUPERSEDED without superseded_by", async () => {
+    const env = setup();
+    const item = await proposeRefactor(
+      {
+        proposed_by: "scout",
+        scope: "x",
+        suggested_refactor: "x",
+        rationale: "x",
+        code_location: "x",
+      },
+      env.deps,
+    );
+    await expect(
+      transitionRefactor(
+        { proposal_id: item.proposal_id, to_state: "SUPERSEDED" },
+        env.deps,
+      ),
+    ).rejects.toThrow(/SUPERSEDED requires superseded_by/);
+    await expect(
+      transitionRefactor(
+        {
+          proposal_id: item.proposal_id,
+          to_state: "SUPERSEDED",
+          superseded_by: null,
+        },
+        env.deps,
+      ),
+    ).rejects.toThrow(/SUPERSEDED requires superseded_by/);
+  });
+});
+
 describe("scoutScan — dedups by (scope, code_location, suggested_refactor) fingerprint", () => {
   it("first scan adds the candidate; second scan skips it as duplicate", async () => {
     const env = setup();

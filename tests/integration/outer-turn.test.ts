@@ -645,6 +645,47 @@ describe("runOneOuterTurn — Validation lead_only PASS finalizes M_DONE", () =>
     expect(ctxParsed.slices[0].slice_id).toBe(SLICE_A);
   });
 
+  it("PR #72 P0-1: Validation PASS persists exactly one aggregate VerificationRun (single aggregation invariant)", async () => {
+    const env = setup();
+    await seedMilestone(env.store, "M_DELIVERY_VALIDATING", { specPin: "spec-rev-1" });
+    await seedValidatedSliceWithEvidence(env.store);
+    // Capture the verifications dir before the outer turn so we can isolate
+    // the aggregate(s) added by Validation evidence aggregation.
+    const before = new Set(await env.store.list("verifications"));
+    const { adapter } = makeStub({
+      sentinel: [validationLead(MILESTONE_ID, "PASS")],
+    });
+    const llmRunner = new AdapterRunnerPort(adapter);
+    const out = await runOneOuterTurn({
+      store: env.store,
+      clock: env.clock,
+      llmRunner,
+      ledger: env.ledger,
+      callerId: "test",
+      targetId: "demo",
+    });
+    expect(out.kind).toBe("turn_persisted");
+
+    const after = await env.store.list("verifications");
+    const newOnes: string[] = [];
+    for (const name of after) {
+      if (!before.has(name)) newOnes.push(name);
+    }
+    // Exactly one new aggregate VR (the scout-aggregated one). Two would
+    // indicate the dual aggregation regression (loadOuterTurnSummaries +
+    // buildDispatchInput each persisting their own).
+    const aggregates: unknown[] = [];
+    for (const name of newOnes) {
+      const body = await env.store.readText(`verifications/${name}`);
+      if (body == null) continue;
+      const parsed = VerificationRun.parse(JSON.parse(body));
+      if (parsed.environment_fingerprint === "scout-observer") {
+        aggregates.push(parsed);
+      }
+    }
+    expect(aggregates.length).toBe(1);
+  });
+
   it("sentinel lead FAIL → converges validation_fail → milestone reverts to M_DELIVERY_BUILDING (PR #69 P0-4)", async () => {
     const env = setup();
     await seedMilestone(env.store, "M_DELIVERY_VALIDATING", { specPin: "spec-rev-1" });

@@ -73,12 +73,16 @@ export async function aggregateValidationEvidence(
 ): Promise<ScoutEvidenceResult> {
   const slices = await loadMilestoneSlices(input.milestoneId, deps.store);
 
+  // PR #72 P0-2 fix: bulk-read slice_merges once and group by slice_id, so
+  // the per-slice lookup is O(1) instead of O(K×M) full-directory scans.
+  const sliceMergesBySliceId = await loadSliceMergesBySliceId(deps.store);
+
   const perSlice: VerificationRunT[] = [];
   const slicesCovered: ContextSummarySliceRef[] = [];
   const slicesMissing: string[] = [];
 
   for (const slice of slices) {
-    const sm = await findValidatedSliceMerge(slice, deps.store);
+    const sm = pickLatestMerged(sliceMergesBySliceId.get(slice.slice_id));
     if (sm == null || sm.verification_run_id == null) {
       slicesMissing.push(slice.slice_id);
       continue;
@@ -115,10 +119,18 @@ export async function aggregateValidationEvidence(
     failed_tests: collectFailedTests(perSlice),
     log_ref: null,
   });
-  await deps.store.writeAtomic(
-    layout.verification(aggregate.verification_run_id),
-    JSON.stringify(aggregate, null, 2),
-  );
+  // PR #72 P1-3 fix: STALE means "evidence absent", not "verification
+  // failed". Persisting a STALE-derived aggregate VR each call would (a)
+  // pollute audit chain with synthesised "fail" runs that aren't real
+  // failures and (b) accumulate unbounded VR files per Validation turn.
+  // Return the synthetic aggregate in-memory only on STALE; PASS / FAIL
+  // are real evidence summaries and stay persisted.
+  if (derivedVerdict !== "STALE") {
+    await deps.store.writeAtomic(
+      layout.verification(aggregate.verification_run_id),
+      JSON.stringify(aggregate, null, 2),
+    );
+  }
 
   return {
     aggregate,
@@ -182,17 +194,20 @@ async function loadMilestoneSlices(
   return out;
 }
 
-async function findValidatedSliceMerge(
-  slice: SliceT,
+/**
+ * PR #72 P0-2 fix: bulk-read slice_merges once and group by slice_id. The
+ * caller picks the latest SM_MERGED entry per slice via `pickLatestMerged`.
+ */
+async function loadSliceMergesBySliceId(
   store: StorePort,
-): Promise<SliceMergeT | null> {
+): Promise<Map<string, SliceMergeT[]>> {
   let entries: string[];
   try {
     entries = await store.list("slice_merges");
   } catch {
-    return null;
+    return new Map();
   }
-  let best: SliceMergeT | null = null;
+  const out = new Map<string, SliceMergeT[]>();
   for (const name of entries) {
     if (!name.endsWith(".json")) continue;
     const body = await store.readText(`slice_merges/${name}`);
@@ -203,13 +218,28 @@ async function findValidatedSliceMerge(
     } catch {
       continue;
     }
-    if (sm.slice_id !== slice.slice_id) continue;
     if (sm.state !== "SM_MERGED") continue;
-    // Pick latest by merged_at (or audit predecessor depth fallback).
+    const list = out.get(sm.slice_id);
+    if (list == null) {
+      out.set(sm.slice_id, [sm]);
+    } else {
+      list.push(sm);
+    }
+  }
+  return out;
+}
+
+function pickLatestMerged(
+  candidates: readonly SliceMergeT[] | undefined,
+): SliceMergeT | null {
+  if (candidates == null || candidates.length === 0) return null;
+  let best: SliceMergeT | null = null;
+  for (const sm of candidates) {
     if (best == null) {
       best = sm;
       continue;
     }
+    // ISO-8601 timestamps compare correctly as strings.
     const a = sm.merged_at ?? sm.updated_at;
     const b = best.merged_at ?? best.updated_at;
     if (a > b) best = sm;

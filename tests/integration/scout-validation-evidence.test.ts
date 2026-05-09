@@ -225,6 +225,40 @@ describe("aggregateValidationEvidence — STALE on missing evidence", () => {
   });
 });
 
+describe("aggregateValidationEvidence — STALE does not persist (PR #72 P1-3)", () => {
+  it("returns synthetic aggregate without writing a VR file when STALE", async () => {
+    const env = setup();
+    await seedMilestone(env.store);
+    await seedSlice(env.store, SLICE_A, "SLICE_BUILDING"); // not validated → STALE
+
+    const before = await env.store.list("verifications");
+    const out1 = await aggregateValidationEvidence(
+      { milestoneId: MILESTONE_ID },
+      { store: env.store, clock: env.clock, targetId: "demo" },
+    );
+    expect(out1.derivedVerdict).toBe("STALE");
+    const after1 = await env.store.list("verifications");
+    expect(after1.length).toBe(before.length);
+    // Synthetic aggregate body is NOT persisted on STALE.
+    const persisted = await env.store.readText(
+      layout.verification(out1.aggregate.verification_run_id),
+    );
+    expect(persisted).toBeNull();
+
+    // Repeated calls must not accumulate VR files either.
+    await aggregateValidationEvidence(
+      { milestoneId: MILESTONE_ID },
+      { store: env.store, clock: env.clock, targetId: "demo" },
+    );
+    await aggregateValidationEvidence(
+      { milestoneId: MILESTONE_ID },
+      { store: env.store, clock: env.clock, targetId: "demo" },
+    );
+    const after3 = await env.store.list("verifications");
+    expect(after3.length).toBe(before.length);
+  });
+});
+
 describe("aggregateValidationEvidence — milestone scoping", () => {
   it("ignores slices belonging to other milestones", async () => {
     const env = setup();
