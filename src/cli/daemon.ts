@@ -49,7 +49,7 @@ import { FakeWorkspace } from "../adapters/workspace/fake.js";
 import { FsHumanSignal } from "../adapters/human-signal/fs.js";
 import { FsMirrorIssueTracker } from "../adapters/issue-tracker/fs-mirror.js";
 import { FsMirrorGitHost } from "../adapters/git-host/fs-mirror.js";
-import { FsMirrorTeamMembership } from "../adapters/team-membership/fs-mirror.js";
+import { buildTeamMembership } from "../adapters/team-membership/factory.js";
 import { resolveEnforcementLevel } from "../application/invariant-enforcement.js";
 import { validateOrThrow } from "../application/config-validator.js";
 import { runDaemonPrelude } from "../application/control-state.js";
@@ -273,11 +273,13 @@ async function main(argv: readonly string[]): Promise<number> {
 
     // Phase 9a (G2-4): TCC-GOVERNANCE actor verification. Only the
     // outer-coordinator binds approve/reject signals to outer sessions, so
-    // the membership port is wired alongside that binding. The FS-mirror
-    // adapter is used here for parity with the other governance adapters
-    // (FsMirrorIssueTracker / FsMirrorGitHost) — the GitHub Teams adapter
-    // is opt-in via target config in a follow-up cycle.
-    const teamMembership = new FsMirrorTeamMembership(store);
+    // the membership port is wired alongside that binding.
+    //
+    // Phase 9d follow-up to PR #79 P0 #1: the adapter is now selected by
+    // `cfg.governance.human_team_provider` ("fs-mirror" | "github").
+    // Default = fs-mirror keeps phase-9a parity wiring; "github" routes to
+    // the `gh api` Teams adapter (auth via `GH_TOKEN`/login state per Inv #4).
+    const teamMembership = buildTeamMembership(cfg.governance, { store, clock });
     const humanTeam = cfg.governance?.human_team ?? null;
     const unreachablePolicy = resolveEnforcementLevel(
       cfg.invariant_enforcement,
