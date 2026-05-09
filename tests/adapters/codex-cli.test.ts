@@ -45,4 +45,12 @@ describe("CodexCliAdapter argv", () => {
     expect(cmd).toBe("/usr/local/bin/codex");
     expect(args[0]).toBe("exec");
   });
+
+  it("accepts envAllowlist/envOverride in cfg without throwing", () => {
+    const a = new CodexCliAdapter({
+      envAllowlist: ["PATH"],
+      envOverride: { OPENAI_API_KEY: "test" },
+    });
+    expect(a.buildArgv(baseInput).cmd).toBe("codex");
+  });
 });

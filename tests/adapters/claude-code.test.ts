@@ -29,4 +29,13 @@ describe("ClaudeCodeAdapter argv", () => {
     const { args } = a.buildArgv();
     expect(args.at(-1)).toBe("--verbose");
   });
+
+  it("accepts envAllowlist/envOverride in cfg without throwing", () => {
+    // Smoke check — the runtime env composition is covered by spawn tests.
+    const a = new ClaudeCodeAdapter({
+      envAllowlist: ["PATH"],
+      envOverride: { ANTHROPIC_API_KEY: "test" },
+    });
+    expect(a.buildArgv().cmd).toBe("claude");
+  });
 });
