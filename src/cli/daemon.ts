@@ -43,6 +43,8 @@ import { FakeWorkspace } from "../adapters/workspace/fake.js";
 import { FsHumanSignal } from "../adapters/human-signal/fs.js";
 import { FsMirrorIssueTracker } from "../adapters/issue-tracker/fs-mirror.js";
 import { FsMirrorGitHost } from "../adapters/git-host/fs-mirror.js";
+import { FsMirrorTeamMembership } from "../adapters/team-membership/fs-mirror.js";
+import { resolveEnforcementLevel } from "../application/invariant-enforcement.js";
 import { validateOrThrow } from "../application/config-validator.js";
 import { runDaemonPrelude } from "../application/control-state.js";
 import { runOneMiddleReviewTurn } from "../application/dialogue-coordinator.js";
@@ -250,6 +252,19 @@ async function main(argv: readonly string[]): Promise<number> {
     // `<workdir>/control/state.json` (see runDaemonPrelude).
     const humanSignal = new FsHumanSignal(store);
 
+    // Phase 9a (G2-4): TCC-GOVERNANCE actor verification. Only the
+    // outer-coordinator binds approve/reject signals to outer sessions, so
+    // the membership port is wired alongside that binding. The FS-mirror
+    // adapter is used here for parity with the other governance adapters
+    // (FsMirrorIssueTracker / FsMirrorGitHost) — the GitHub Teams adapter
+    // is opt-in via target config in a follow-up cycle.
+    const teamMembership = new FsMirrorTeamMembership(store);
+    const humanTeam = cfg.governance?.human_team ?? null;
+    const unreachablePolicy = resolveEnforcementLevel(
+      cfg.invariant_enforcement,
+      "actor_team_membership_unreachable",
+    );
+
     do {
       // Every cycle starts with a recovery sweep (RGC-RECOVERY).
       const sweep = await runRecoverySweep({
@@ -306,6 +321,13 @@ async function main(argv: readonly string[]): Promise<number> {
                 ledger,
                 callerId: args.callerId,
                 targetId: cfg.identity.target_id,
+                // Phase 9a (G2-4): actor membership check before any
+                // human_approval contribution is created. When humanTeam
+                // is null (operator did not configure governance), the
+                // hook is bypassed — phase-5b semantics retained.
+                teamMembership,
+                humanTeam,
+                unreachablePolicy,
               },
             }
           : {}),

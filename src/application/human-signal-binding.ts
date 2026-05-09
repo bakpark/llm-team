@@ -37,10 +37,20 @@ import {
 import { SessionTurn } from "../domain/schema/session-turn.js";
 import type { ClockPort } from "../ports/clock.js";
 import type { StorePort } from "../ports/store.js";
+import type { TeamMembershipPort } from "../ports/team-membership.js";
 import { enrichEnvelope, validateEnvelope } from "./envelope.js";
 import type { LedgerAppender } from "./ledger.js";
 import { outerPhaseForState, type OuterPhase } from "./outer-session.js";
 import { layout } from "./persistence-layout.js";
+
+/**
+ * Phase 9a (G2-4): operator-declared policy when the team-membership lookup
+ * is unreachable. `block` rejects the signal (fail-closed); `warn` admits
+ * the signal but the binding hook is required to emit an audit-only ledger
+ * row separate from the normal applied row. The default is `block` —
+ * unknown invariants resolve to `block` per `resolveEnforcementLevel`.
+ */
+export type UnreachablePolicy = "warn" | "block";
 
 export interface HumanSignalBindingDeps {
   store: StorePort;
@@ -48,6 +58,17 @@ export interface HumanSignalBindingDeps {
   ledger: LedgerAppender;
   callerId: string;
   targetId: string;
+  /**
+   * Phase 9a: when set, the binding hook verifies that `signal.actor` is a
+   * member of `humanTeam` BEFORE creating any contribution. Adapters MAY
+   * cache positive results (`governance.human_team_cache_ttl_seconds`).
+   * Omit (or `humanTeam=null`) to skip the check — phase-5b callers without
+   * a configured team retain the legacy "any actor" behaviour.
+   */
+  teamMembership?: TeamMembershipPort;
+  humanTeam?: string | null;
+  /** See `UnreachablePolicy`. Defaults to `block`. */
+  unreachablePolicy?: UnreachablePolicy;
 }
 
 export type BindingOutcome =
@@ -56,9 +77,52 @@ export type BindingOutcome =
       session_id: string;
       turn_index: number;
       verdict: VerdictResult;
+      /**
+       * PR #79 P1 review: present when an `unreachable + warn` admit must
+       * be paired with an audit-only ledger row. The caller (drain) emits
+       * `emitMembershipRejection(deps, signal, "actor_team_lookup_unreachable")`
+       * AFTER `markProcessed` succeeds with `alreadyProcessed=false`, so
+       * a crash between bind and markProcessed does not leak a duplicate
+       * audit row on the next drain cycle.
+       */
+      pendingMembershipAudit?: typeof ACTOR_TEAM_LOOKUP_UNREACHABLE;
     }
   | { kind: "no_session"; reason: string }
-  | { kind: "unsupported"; reason: string };
+  | { kind: "unsupported"; reason: string }
+  /**
+   * Phase 9a (G2-4): the actor is not a member of the configured human team
+   * (or the lookup was unreachable and policy resolved to `block`). The
+   * binding hook NO LONGER emits the ledger row inline — the caller (drain)
+   * MUST `markProcessed(state="invalid")` first and THEN call
+   * `emitMembershipRejection(deps, signal, pendingMembershipAudit)` so a
+   * mid-flight crash + retry does not produce duplicate `result=invalid`
+   * audit rows (PR #79 P1 review). `result=invalid` is not part of
+   * `FileLedger.replay()`'s applied-keys set so dedup cannot absorb it.
+   */
+  | {
+      kind: "invalid";
+      reason: string;
+      pendingMembershipAudit:
+        | typeof ACTOR_NOT_IN_HUMAN_TEAM
+        | typeof ACTOR_TEAM_LOOKUP_UNREACHABLE;
+    }
+  /**
+   * PR #79 P0 review (gpt5.5): TCC-GOVERNANCE mandates fail-closed
+   * `human_team` lookup with **backoff retry** (envelope queue 보류) — not
+   * permanent rejection. Returned when the membership lookup is unreachable
+   * and policy resolves to `block`. Caller (drain) MUST NOT `markProcessed`
+   * and MUST NOT emit a `result=invalid` ledger row — the signal stays
+   * pending so the next drain cycle re-runs the lookup once GitHub Teams
+   * API recovers.
+   */
+  | { kind: "unreachable_retry"; reason: string };
+
+/**
+ * Sentinel `result_detail` written to the ledger when membership rejects
+ * the actor. Surfaces in audit queries (TCC-GOVERNANCE conformance).
+ */
+export const ACTOR_NOT_IN_HUMAN_TEAM = "actor_not_in_human_team";
+export const ACTOR_TEAM_LOOKUP_UNREACHABLE = "actor_team_lookup_unreachable";
 
 const VERDICT_FOR: Partial<Record<HumanSignalEnvelope["signal_type"], VerdictResult>> =
   {
@@ -156,6 +220,118 @@ async function resolvePhaseForBinding(
   return null;
 }
 
+/**
+ * Emit a `signal_apply` ledger row with `result=invalid` for an actor that
+ * failed the team-membership check. Mirrors the applied-row shape so audit
+ * queries can group by `idempotency_key` (here: signal_id-derived) and the
+ * downstream consumer sees a single authoritative reason.
+ *
+ * This row is NOT tied to a SessionTurn — `session_id` / `turn_index` are
+ * null because no contribution was created.
+ *
+ * PR #79 P1 review: callers (drain) MUST invoke this AFTER `markProcessed`
+ * succeeds with `alreadyProcessed=false`, so a crash between binding and
+ * markProcessed does not leak a duplicate `result=invalid` row on the next
+ * drain cycle. `result=invalid` rows are not in
+ * `FileLedger.replay()`'s applied-keys set so dedup cannot absorb retries.
+ */
+export async function emitMembershipRejection(
+  deps: HumanSignalBindingDeps,
+  signal: HumanSignalEnvelope,
+  detail: typeof ACTOR_NOT_IN_HUMAN_TEAM | typeof ACTOR_TEAM_LOOKUP_UNREACHABLE,
+): Promise<void> {
+  await deps.ledger.appendTransition({
+    transition_id: newMonotonicId(deps.clock.now()),
+    target_id: deps.targetId,
+    object_id: signal.signal_id,
+    object_kind: "session_turn",
+    from_state: null,
+    // No state machine transition occurred — the row records the rejection
+    // event itself. `rejected` is the audit-only sentinel; downstream
+    // queries filter by `result=invalid` + `action_kind=signal_apply`.
+    to_state: "rejected",
+    loop_kind: "outer",
+    phase: null,
+    slice_id: null,
+    slice_kind: null,
+    dod_revision: null,
+    session_id: null,
+    turn_index: null,
+    slot_kind: null,
+    agent_profile_id: "human",
+    contribution_kind: "human_approval",
+    action_kind: "signal_apply",
+    final_verdict: null,
+    caller_id: deps.callerId,
+    manifest_id: null,
+    input_revision_pins: [],
+    output_hash: null,
+    verification_run_id: null,
+    metric_run_id: null,
+    idempotency_key: `signal_apply::${signal.signal_id}::membership`,
+    lease_token: null,
+    lease_kind: null,
+    result: "invalid",
+    result_detail: detail,
+    timestamp: deps.clock.isoNow(),
+  });
+}
+
+/**
+ * Phase 9a (G2-4): verify the signal author belongs to the configured
+ * human team before any contribution is created.
+ *
+ * Returned non-null outcome shapes (PR #79 review):
+ *   - `invalid` (non-member, OR unreachable+block when `unreachablePolicy=block`
+ *     was historically used): caller MUST `markProcessed(invalid)` and then
+ *     emit the audit ledger row via `pendingMembershipAudit`.
+ *   - `unreachable_retry` (NEW; unreachable + block, contract-aligned):
+ *     caller MUST NOT `markProcessed` and MUST NOT emit a ledger row; the
+ *     signal stays pending so the next drain cycle re-runs the lookup
+ *     (TCC-GOVERNANCE backoff retry).
+ *   - `null` ADMIT: includes member + unreachable+warn. When the lookup
+ *     was unreachable+warn, the membership audit detail is signalled to
+ *     the caller via the `pendingWarnAudit` parameter so the audit row
+ *     can be emitted AFTER markProcessed succeeds.
+ *
+ * No ledger emission happens inside this function — that responsibility
+ * is delegated to the caller (drain) so retries cannot leak duplicate
+ * `result=invalid` rows.
+ */
+async function verifyActorMembership(
+  signal: HumanSignalEnvelope,
+  deps: HumanSignalBindingDeps,
+  pendingWarnAudit: { detail: typeof ACTOR_TEAM_LOOKUP_UNREACHABLE | null },
+): Promise<BindingOutcome | null> {
+  if (deps.teamMembership == null || deps.humanTeam == null) return null;
+  const policy: UnreachablePolicy = deps.unreachablePolicy ?? "block";
+  const result = await deps.teamMembership.isMember(deps.humanTeam, signal.actor);
+  if (result.kind === "member") return null;
+  if (result.kind === "non_member") {
+    return {
+      kind: "invalid",
+      reason: ACTOR_NOT_IN_HUMAN_TEAM,
+      pendingMembershipAudit: ACTOR_NOT_IN_HUMAN_TEAM,
+    };
+  }
+  // unreachable — apply policy.
+  if (policy === "block") {
+    // PR #79 P0 review (gpt5.5): TCC-GOVERNANCE line 102 mandates
+    // fail-closed via "envelope 큐 진입 보류, backoff 재시도". Returning
+    // `unreachable_retry` keeps the signal pending so a transient
+    // 401/403/network blip does not permanently consume the approval.
+    return {
+      kind: "unreachable_retry",
+      reason: ACTOR_TEAM_LOOKUP_UNREACHABLE,
+    };
+  }
+  // warn: admit the signal but record an audit row so the gap is visible.
+  // The audit emission is deferred to the caller (after markProcessed)
+  // via `pendingWarnAudit` to preserve the same anti-duplication guarantee.
+  pendingWarnAudit.detail = ACTOR_TEAM_LOOKUP_UNREACHABLE;
+  return null;
+}
+
 export async function bindHumanSignalToSession(
   signal: HumanSignalEnvelope,
   deps: HumanSignalBindingDeps,
@@ -167,6 +343,14 @@ export async function bindHumanSignalToSession(
       reason: `signal_type=${signal.signal_type} is not bindable to human_approval contribution`,
     };
   }
+
+  // Phase 9a (G2-4): actor must be a member of the configured human team
+  // before any contribution is created. Hook is opt-in via deps.teamMembership.
+  const pendingWarnAudit: { detail: typeof ACTOR_TEAM_LOOKUP_UNREACHABLE | null } = {
+    detail: null,
+  };
+  const membership = await verifyActorMembership(signal, deps, pendingWarnAudit);
+  if (membership != null) return membership;
 
   const session = await findOuterSession(deps.store, signal);
   if (session == null) {
@@ -332,6 +516,9 @@ export async function bindHumanSignalToSession(
       session_id: live.session_id,
       turn_index,
       verdict: verdictResult,
+      ...(pendingWarnAudit.detail != null
+        ? { pendingMembershipAudit: pendingWarnAudit.detail }
+        : {}),
     } as const;
   });
 }
