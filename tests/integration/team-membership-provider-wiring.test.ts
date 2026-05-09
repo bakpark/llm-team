@@ -168,6 +168,35 @@ describe("Phase 9d — buildTeamMembership routes by governance.human_team_provi
     expect(exec.calls.length).toBe(1);
   });
 
+  it("github provider: transport error → unreachable_retry (phase-9a P0 #2 backoff)", async () => {
+    // PR #82 review (P1, both models): exercise the unreachable arm of
+    // `GitHubTeamMembership.isMember()` together with the binding's
+    // `unreachable + block → unreachable_retry` contract from phase-9a.
+    // A non-404 gh failure (transport / auth) MUST keep the signal
+    // pending so the outer-coordinator backoff can retry instead of
+    // permanently consuming the approval.
+    const d = deps();
+    await seedMilestoneAndOpenSession(d);
+    const exec = new StubGhExec(async () => {
+      throw new Error("gh exited 1: socket hang up");
+    });
+    const port = buildTeamMembership(parseGovernance("github"), {
+      store: d.store,
+      clock: d.clock,
+      ghExec: exec,
+    });
+    const direct = await port.isMember(TEAM, "alice");
+    expect(direct.kind).toBe("unreachable");
+    const r = await bindHumanSignalToSession(approveEnvelope("alice"), {
+      ...d,
+      teamMembership: port,
+      humanTeam: TEAM,
+      unreachablePolicy: "block",
+    });
+    expect(r.kind).toBe("unreachable_retry");
+    expect(exec.calls.length).toBe(2);
+  });
+
   it("github provider: active state → binding appends contribution (production-wiring smoke)", async () => {
     const d = deps();
     await seedMilestoneAndOpenSession(d);

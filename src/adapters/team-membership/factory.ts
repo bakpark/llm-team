@@ -16,6 +16,14 @@
  * can substitute a deterministic stub instead of spawning the real `gh`
  * CLI — the planning constraint mandates that real GitHub Teams API calls
  * stay confined to the adapter module.
+ *
+ * Statelessness contract (PR #82 review): this factory is a pure function —
+ * every call returns a fresh adapter instance with no module-level cache.
+ * The daemon invokes it once at startup (see `src/cli/daemon.ts`); a
+ * `governance.human_team_provider` (or TTL/team) change is therefore only
+ * picked up after a daemon restart. If runtime config hot-reload is added
+ * later, the call site MUST re-invoke `buildTeamMembership` per cycle to
+ * avoid stale-adapter retention.
  */
 
 import type { ClockPort } from "../../ports/clock.js";
@@ -51,6 +59,14 @@ export function buildTeamMembership(
         clock: deps.clock,
         ttlMs: ttlSeconds * 1_000,
       });
+    }
+    default: {
+      // PR #82 review (P1, qwen): exhaustive check — adding a new variant to
+      // `HumanTeamProvider` must force this switch to be updated at compile
+      // time, otherwise the factory would silently return `undefined` and
+      // every `isMember` call would crash with `TypeError`.
+      const _exhaustive: never = provider;
+      throw new Error(`unknown human_team_provider: ${String(_exhaustive)}`);
     }
   }
 }

@@ -279,6 +279,13 @@ async function main(argv: readonly string[]): Promise<number> {
     // `cfg.governance.human_team_provider` ("fs-mirror" | "github").
     // Default = fs-mirror keeps phase-9a parity wiring; "github" routes to
     // the `gh api` Teams adapter (auth via `GH_TOKEN`/login state per Inv #4).
+    //
+    // PR #82 review (P1, both models): `buildTeamMembership` is invoked once
+    // at daemon startup. Operators changing `governance.human_team_provider`,
+    // `human_team`, or `human_team_cache_ttl_seconds` MUST restart the daemon
+    // for the new adapter / cache settings to take effect — the running
+    // process keeps the original adapter and its in-memory cache. Same goes
+    // for `humanTeam` / `unreachablePolicy` resolved alongside.
     const teamMembership = buildTeamMembership(cfg.governance, { store, clock });
     const humanTeam = cfg.governance?.human_team ?? null;
     const unreachablePolicy = resolveEnforcementLevel(
