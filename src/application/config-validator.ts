@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { ZodError } from "zod";
 import { TargetConfig, parseTargetConfig } from "../config/target-schema.js";
 
@@ -19,6 +20,28 @@ export interface ConfigValidationResult {
 export function validateTargetConfig(raw: unknown): ConfigValidationResult {
   try {
     const config = parseTargetConfig(raw);
+    // Self-hosting cross-field invariant: agent_cwd must escape workdir_path
+    // so operational writes never collide with controller workdir state.
+    if (
+      config.identity.kind === "self-hosting" &&
+      config.identity.workdir_path != null &&
+      config.identity.agent_cwd != null
+    ) {
+      const wd = resolve(config.identity.workdir_path);
+      const ac = resolve(config.identity.agent_cwd);
+      if (ac === wd || ac.startsWith(`${wd}/`)) {
+        return {
+          ok: false,
+          errors: [
+            {
+              path: "identity.agent_cwd",
+              message:
+                "self-hosting target requires agent_cwd to be outside workdir_path (controller / agent isolation, see worktree-pr-lifecycle §self-hosting)",
+            },
+          ],
+        };
+      }
+    }
     return { ok: true, config, errors: [] };
   } catch (err) {
     if (err instanceof ZodError) {
