@@ -226,6 +226,25 @@ export const Identity = z
 
 export type Identity = z.infer<typeof Identity>;
 
+/**
+ * TCC-ENFORCEMENT — invariant enforcement level table (phase 6b Stage 5).
+ *
+ * `always_hard` items block in every Stage. `stage_graded` items declare a
+ * per-Stage mode (`warn` or `block`). Phase 6b reaches Stage 5: callers
+ * resolve via `application/invariant-enforcement.ts` which forces every
+ * `stage_graded` entry to `block` once `stage>=5`.
+ */
+export const EnforcementMode = z.enum(["warn", "block"]);
+export type EnforcementMode = z.infer<typeof EnforcementMode>;
+
+export const InvariantEnforcement = z
+  .object({
+    always_hard: z.array(z.string().min(1)).default(() => []),
+    stage_graded: z.record(z.string().min(1), EnforcementMode).default(() => ({})),
+  })
+  .strict();
+export type InvariantEnforcement = z.infer<typeof InvariantEnforcement>;
+
 export const TargetConfig = z
   .object({
     identity: Identity,
@@ -241,6 +260,7 @@ export const TargetConfig = z
     lease: LeaseConfig.optional(),
     internal_escalation_rules: InternalEscalationRules.optional(),
     dual_track: DualTrack.optional(),
+    invariant_enforcement: InvariantEnforcement.optional(),
   })
   .strict();
 
