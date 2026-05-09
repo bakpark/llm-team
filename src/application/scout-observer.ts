@@ -32,7 +32,13 @@ import {
 } from "../domain/schema/verification.js";
 import type { ClockPort } from "../ports/clock.js";
 import type { StorePort } from "../ports/store.js";
+import type { LedgerAppender } from "./ledger.js";
 import { layout } from "./persistence-layout.js";
+import {
+  scoutScan,
+  type ScoutScanCandidate,
+  type ScoutScanResult,
+} from "./refactor-backlog.js";
 
 export type ScoutDerivedVerdict = "PASS" | "FAIL" | "STALE";
 
@@ -472,4 +478,124 @@ async function readVerificationRun(
   } catch {
     return null;
   }
+}
+
+/**
+ * Phase 9b (G1-3) — scout periodic scan daemon role.
+ *
+ * KAC-REFACTOR-BACKLOG requires *정기 스캔* of architectural debt while
+ * Delivery is in progress (independent of outer Validation cadence). This
+ * sweep is the daemon entry point invoked by `--role scout-scanner` in
+ * `src/cli/daemon.ts`; it loads in-progress Delivery slices (states
+ * SLICE_PENDING / SLICE_READY / SLICE_BUILDING / SLICE_REVIEWING /
+ * SLICE_INTEGRATING — matches KAC-SLICE-TELEMETRY's `in_progress_slices`
+ * partition), hands them to an injected `scan` callback that produces
+ * RefactorBacklog candidates, and routes those candidates through
+ * `scoutScan` for fingerprint dedup + PROPOSED row persistence + ledger
+ * row emission.
+ *
+ * The actual metric-collection adapter (TCC-REFACTOR-METRICS) is still
+ * spec-only — it slots into `input.scan` in a later phase. Until then the
+ * daemon wiring uses a no-op scanner so the role runs idempotently with
+ * zero RefactorBacklog mutations; tests inject a concrete scan to assert
+ * the lifecycle end-to-end.
+ *
+ * Pure helper — `store` / `clock` / `ledger` only. The daemon's per-role
+ * lockdir (RGC-DAEMON-STARTUP) excludes a sibling scout-scanner; per the
+ * planning §lease note (`scope: "in_progress_slices"`), no slice-anchored
+ * lease is taken — RefactorBacklog writes are append-only and idempotent
+ * via `scoutScan`'s fingerprint dedup, and slice files are read-only here.
+ */
+const SCOUT_SCANNER_IN_PROGRESS_STATES = new Set<SliceT["state"]>([
+  "SLICE_PENDING",
+  "SLICE_READY",
+  "SLICE_BUILDING",
+  "SLICE_REVIEWING",
+  "SLICE_INTEGRATING",
+]);
+
+export interface ScoutScannerSweepDeps {
+  store: StorePort;
+  clock: ClockPort;
+  ledger: LedgerAppender;
+  callerId: string;
+  targetId: string;
+}
+
+export interface ScoutScannerSweepInput {
+  /**
+   * Convert the live in-progress Delivery slices into RefactorBacklog
+   * candidates. Receives the slice list (sorted by slice_id) so the
+   * adapter can derive metric-anchored proposals deterministically.
+   *
+   * Default daemon wiring passes a no-op scanner (returns []) — the
+   * production metric adapter is out of scope for phase 9b.
+   */
+  scan: (slices: readonly SliceT[]) => Promise<readonly ScoutScanCandidate[]>;
+}
+
+export interface ScoutScannerSweepResult extends ScoutScanResult {
+  /** in-progress slices observed this sweep (count). */
+  scannedSliceCount: number;
+}
+
+/**
+ * Lock path for the scout-scanner sweep critical section. PR #80 review
+ * (P1, gpt5.5): although the production daemon role is currently the only
+ * caller and per-role lockdir already excludes a sibling daemon, the sweep
+ * function is exported and may be reused by other wirings. Wrap scan +
+ * scoutScan (read-before-write fingerprint dedup + PROPOSED append) in a
+ * scope-level `withFileLock` so concurrent callers cannot both pass dedup
+ * and double-append the same candidate.
+ */
+const SCOUT_SCANNER_SWEEP_LOCK_PATH =
+  "knowledge/refactor_proposals/.scout-scanner-sweep.lock";
+
+export async function runScoutScannerSweep(
+  input: ScoutScannerSweepInput,
+  deps: ScoutScannerSweepDeps,
+): Promise<ScoutScannerSweepResult> {
+  return deps.store.withFileLock(SCOUT_SCANNER_SWEEP_LOCK_PATH, async () => {
+    const slices = await loadInProgressSlices(deps.store);
+    const result = await scoutScan(
+      { scan: () => input.scan(slices) },
+      deps,
+    );
+    return {
+      ...result,
+      scannedSliceCount: slices.length,
+    };
+  });
+}
+
+async function loadInProgressSlices(
+  store: StorePort,
+): Promise<readonly SliceT[]> {
+  let entries: string[];
+  try {
+    entries = await store.list("slices");
+  } catch {
+    return [];
+  }
+  const out: SliceT[] = [];
+  for (const name of entries) {
+    if (!name.endsWith(".json")) continue;
+    const body = await store.readText(`slices/${name}`);
+    if (body == null) continue;
+    let parsed: SliceT;
+    try {
+      parsed = Slice.parse(JSON.parse(body));
+    } catch {
+      // Corrupt slice files surface loudly elsewhere (aggregateAcTraceability
+      // / loadMilestoneSlices throw). The scanner is read-only and best-
+      // effort — silently skipping a malformed slice cannot lose evidence
+      // (RefactorBacklog has no per-slice invariant) and avoids a daemon
+      // crash loop on a transient half-written file.
+      continue;
+    }
+    if (!SCOUT_SCANNER_IN_PROGRESS_STATES.has(parsed.state)) continue;
+    out.push(parsed);
+  }
+  out.sort((a, b) => a.slice_id.localeCompare(b.slice_id));
+  return out;
 }
