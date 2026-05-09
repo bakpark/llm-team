@@ -37,10 +37,20 @@ import {
 import { SessionTurn } from "../domain/schema/session-turn.js";
 import type { ClockPort } from "../ports/clock.js";
 import type { StorePort } from "../ports/store.js";
+import type { TeamMembershipPort } from "../ports/team-membership.js";
 import { enrichEnvelope, validateEnvelope } from "./envelope.js";
 import type { LedgerAppender } from "./ledger.js";
 import { outerPhaseForState, type OuterPhase } from "./outer-session.js";
 import { layout } from "./persistence-layout.js";
+
+/**
+ * Phase 9a (G2-4): operator-declared policy when the team-membership lookup
+ * is unreachable. `block` rejects the signal (fail-closed); `warn` admits
+ * the signal but the binding hook is required to emit an audit-only ledger
+ * row separate from the normal applied row. The default is `block` —
+ * unknown invariants resolve to `block` per `resolveEnforcementLevel`.
+ */
+export type UnreachablePolicy = "warn" | "block";
 
 export interface HumanSignalBindingDeps {
   store: StorePort;
@@ -48,6 +58,17 @@ export interface HumanSignalBindingDeps {
   ledger: LedgerAppender;
   callerId: string;
   targetId: string;
+  /**
+   * Phase 9a: when set, the binding hook verifies that `signal.actor` is a
+   * member of `humanTeam` BEFORE creating any contribution. Adapters MAY
+   * cache positive results (`governance.human_team_cache_ttl_seconds`).
+   * Omit (or `humanTeam=null`) to skip the check — phase-5b callers without
+   * a configured team retain the legacy "any actor" behaviour.
+   */
+  teamMembership?: TeamMembershipPort;
+  humanTeam?: string | null;
+  /** See `UnreachablePolicy`. Defaults to `block`. */
+  unreachablePolicy?: UnreachablePolicy;
 }
 
 export type BindingOutcome =
@@ -58,7 +79,22 @@ export type BindingOutcome =
       verdict: VerdictResult;
     }
   | { kind: "no_session"; reason: string }
-  | { kind: "unsupported"; reason: string };
+  | { kind: "unsupported"; reason: string }
+  /**
+   * Phase 9a (G2-4): the actor is not a member of the configured human team
+   * (or the lookup was unreachable and policy resolved to `block`). The
+   * binding hook emits a `signal_apply` ledger row with `result=invalid` and
+   * `result_detail=actor_not_in_human_team` — caller MUST markProcessed
+   * with state=`invalid`.
+   */
+  | { kind: "invalid"; reason: string };
+
+/**
+ * Sentinel `result_detail` written to the ledger when membership rejects
+ * the actor. Surfaces in audit queries (TCC-GOVERNANCE conformance).
+ */
+export const ACTOR_NOT_IN_HUMAN_TEAM = "actor_not_in_human_team";
+const ACTOR_TEAM_LOOKUP_UNREACHABLE = "actor_team_lookup_unreachable";
 
 const VERDICT_FOR: Partial<Record<HumanSignalEnvelope["signal_type"], VerdictResult>> =
   {
@@ -156,6 +192,94 @@ async function resolvePhaseForBinding(
   return null;
 }
 
+/**
+ * Emit a `signal_apply` ledger row with `result=invalid` for an actor that
+ * failed the team-membership check. Mirrors the applied-row shape so audit
+ * queries can group by `idempotency_key` (here: signal_id-derived) and the
+ * downstream consumer sees a single authoritative reason.
+ *
+ * This row is NOT tied to a SessionTurn — `session_id` / `turn_index` are
+ * null because no contribution was created.
+ */
+async function emitMembershipRejection(
+  deps: HumanSignalBindingDeps,
+  signal: HumanSignalEnvelope,
+  detail: typeof ACTOR_NOT_IN_HUMAN_TEAM | typeof ACTOR_TEAM_LOOKUP_UNREACHABLE,
+): Promise<void> {
+  await deps.ledger.appendTransition({
+    transition_id: newMonotonicId(deps.clock.now()),
+    target_id: deps.targetId,
+    object_id: signal.signal_id,
+    object_kind: "session_turn",
+    from_state: null,
+    // No state machine transition occurred — the row records the rejection
+    // event itself. `rejected` is the audit-only sentinel; downstream
+    // queries filter by `result=invalid` + `action_kind=signal_apply`.
+    to_state: "rejected",
+    loop_kind: "outer",
+    phase: null,
+    slice_id: null,
+    slice_kind: null,
+    dod_revision: null,
+    session_id: null,
+    turn_index: null,
+    slot_kind: null,
+    agent_profile_id: "human",
+    contribution_kind: "human_approval",
+    action_kind: "signal_apply",
+    final_verdict: null,
+    caller_id: deps.callerId,
+    manifest_id: null,
+    input_revision_pins: [],
+    output_hash: null,
+    verification_run_id: null,
+    metric_run_id: null,
+    idempotency_key: `signal_apply::${signal.signal_id}::membership`,
+    lease_token: null,
+    lease_kind: null,
+    result: "invalid",
+    result_detail: detail,
+    timestamp: deps.clock.isoNow(),
+  });
+}
+
+/**
+ * Phase 9a (G2-4): verify the signal author belongs to the configured
+ * human team before any contribution is created. Returns null when the
+ * actor is admitted (member, or `warn` policy on unreachable, or no team
+ * configured); returns an `invalid` BindingOutcome otherwise.
+ *
+ * Side effect: on rejection, a `signal_apply` ledger row with
+ * `result=invalid` is appended via `emitMembershipRejection`.
+ */
+async function verifyActorMembership(
+  signal: HumanSignalEnvelope,
+  deps: HumanSignalBindingDeps,
+): Promise<BindingOutcome | null> {
+  if (deps.teamMembership == null || deps.humanTeam == null) return null;
+  const policy: UnreachablePolicy = deps.unreachablePolicy ?? "block";
+  const result = await deps.teamMembership.isMember(deps.humanTeam, signal.actor);
+  if (result.kind === "member") return null;
+  if (result.kind === "non_member") {
+    await emitMembershipRejection(deps, signal, ACTOR_NOT_IN_HUMAN_TEAM);
+    return {
+      kind: "invalid",
+      reason: ACTOR_NOT_IN_HUMAN_TEAM,
+    };
+  }
+  // unreachable — apply policy.
+  if (policy === "block") {
+    await emitMembershipRejection(deps, signal, ACTOR_TEAM_LOOKUP_UNREACHABLE);
+    return {
+      kind: "invalid",
+      reason: ACTOR_TEAM_LOOKUP_UNREACHABLE,
+    };
+  }
+  // warn: admit the signal but record an audit row so the gap is visible.
+  await emitMembershipRejection(deps, signal, ACTOR_TEAM_LOOKUP_UNREACHABLE);
+  return null;
+}
+
 export async function bindHumanSignalToSession(
   signal: HumanSignalEnvelope,
   deps: HumanSignalBindingDeps,
@@ -167,6 +291,11 @@ export async function bindHumanSignalToSession(
       reason: `signal_type=${signal.signal_type} is not bindable to human_approval contribution`,
     };
   }
+
+  // Phase 9a (G2-4): actor must be a member of the configured human team
+  // before any contribution is created. Hook is opt-in via deps.teamMembership.
+  const membership = await verifyActorMembership(signal, deps);
+  if (membership != null) return membership;
 
   const session = await findOuterSession(deps.store, signal);
   if (session == null) {

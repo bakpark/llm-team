@@ -144,6 +144,26 @@ export async function runHumanSignalDrain(
           });
           continue;
         }
+        if (b.kind === "invalid") {
+          // Phase 9a (G2-4): team-membership check rejected the signal.
+          // The binding hook already wrote a `signal_apply` ledger row
+          // with `result=invalid`. Mark the signal record as invalid so
+          // it stops being re-emitted by listPending.
+          const r = await deps.signal.markProcessed({
+            signalId: env.signal_id,
+            state: "invalid",
+            reason: b.reason,
+            contributionId: null,
+            appliedAt: now,
+          });
+          if (r.alreadyProcessed) continue;
+          results.push({
+            kind: "invalid",
+            signal_id: env.signal_id,
+            reason: b.reason,
+          });
+          continue;
+        }
         if (b.kind === "appended") {
           bindingDetail = {
             kind: "appended",
