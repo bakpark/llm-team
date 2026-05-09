@@ -1,4 +1,4 @@
-import { spawnWithTimeout } from "./common/spawn.js";
+import { resolveSpawnEnv, spawnWithTimeout } from "./common/spawn.js";
 import type {
   LlmAdapterInput,
   LlmAdapterResult,
@@ -11,6 +11,10 @@ export interface CodexCliAdapterCfg {
   profile?: string;
   extraArgs?: string[];
   killGraceMs?: number;
+  /** Optional env allowlist (defaults to inheriting process.env). */
+  envAllowlist?: readonly string[];
+  /** Optional env additions/overrides applied after the allowlist filter. */
+  envOverride?: NodeJS.ProcessEnv;
 }
 
 // Codex CLI invocation:
@@ -25,14 +29,20 @@ export class CodexCliAdapter implements LlmRunnerAdapter {
 
   async run(input: LlmAdapterInput): Promise<LlmAdapterResult> {
     const { cmd, args } = this.buildArgv(input);
-    return spawnWithTimeout({
+    const env = resolveSpawnEnv({
+      allowlist: this.cfg.envAllowlist,
+      override: this.cfg.envOverride,
+    });
+    const r = await spawnWithTimeout({
       cmd,
       args,
       cwd: input.agentCwd,
+      env,
       stdin: input.stdin,
       timeoutSec: input.timeoutSec,
       killGraceMs: this.cfg.killGraceMs,
     });
+    return { ...r, spawnEnv: env };
   }
 
   buildArgv(input: LlmAdapterInput): { cmd: string; args: string[] } {

@@ -1,70 +1,106 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import {
-  openDiagnosticsSlot,
-  openEnvelopeSlot,
+  type AttemptMetadata,
+  type AttemptSlots,
+  openAttemptSlots,
 } from "../adapters/llm-runner/common/diagnostics.js";
 import { extractEnvelope } from "../adapters/llm-runner/common/envelope-extract.js";
 import { assertFourPartLayout } from "../adapters/llm-runner/common/prompt-relay.js";
+import { redactSecrets } from "../adapters/llm-runner/common/redact.js";
 import type { LlmRunnerAdapter } from "../adapters/llm-runner/types.js";
 import type { ExitStatus, LlmRunnerInput, LlmRunnerResult } from "./llm-runner.js";
-import { classifyExit } from "./llm-runner.js";
+import { classifyExit, classifyTransportReason } from "./llm-runner.js";
 
 // runInvoke — contract-shaped port executor. Always returns the 4-tuple
 // (exitStatus, envelopeRef, diagnosticsRef, consumedAt) per ARC-PORT-SIGNATURE,
 // even on preflight failure or unexpected throw. Adapter primitives never
 // see the contract refs directly; this function resolves them into stdin.
+//
+// Per attempt, four files are written under LLM_TEAM_RUNNER_DIAG_DIR:
+//   - <base>.stdout       (raw stdout, redacted at write boundary)
+//   - <base>.stderr       (raw stderr, redacted at write boundary; this is
+//                          the path returned as `diagnosticsRef`)
+//   - <base>.envelope     (extracted envelope JSON, or empty)
+//   - <base>.metadata.json
+//
+// Even on preflight failure all four files are written (with empty bodies)
+// so cycle bundles always reference a complete attempt directory.
 export async function runInvoke(
   input: LlmRunnerInput,
   adapter: LlmRunnerAdapter,
 ): Promise<LlmRunnerResult> {
-  const diagnostics = await openDiagnosticsSlot(input);
-  const envelope = await openEnvelopeSlot(input);
+  const slots = await openAttemptSlots(input);
 
   const finish = async (
     exitStatus: ExitStatus,
-    envelopeBody: string,
-    diagBody: string,
+    bodies: {
+      stdout?: string;
+      stderr?: string;
+      envelope?: string;
+      reason?: string;
+      rawCode?: number | null;
+      signal?: NodeJS.Signals | null;
+      timedOut?: boolean;
+      spawnEnv?: NodeJS.ProcessEnv;
+    },
   ): Promise<LlmRunnerResult> => {
-    await envelope.write(envelopeBody);
-    await diagnostics.write(diagBody);
+    const consumedAt = new Date().toISOString();
+    const meta: AttemptMetadata = {
+      rawExitCode: bodies.rawCode ?? null,
+      signal: bodies.signal ?? null,
+      timedOut: bodies.timedOut ?? false,
+      consumedAt,
+      ...(bodies.reason ? { reason: bodies.reason } : {}),
+    };
+    // Redact against the resolved spawn env when the adapter exposes it.
+    // This catches secrets injected via envOverride that are not present in
+    // process.env. When unavailable (preflight failures, fake adapters), we
+    // fall back to process.env via the default branch in redactSecrets.
+    const envSources: NodeJS.ProcessEnv[] = bodies.spawnEnv
+      ? [process.env, bodies.spawnEnv]
+      : [process.env];
+    await writeRedacted(slots.stdout, bodies.stdout ?? "", envSources);
+    await writeRedacted(slots.stderr, bodies.stderr ?? "", envSources);
+    await writeRedacted(slots.envelope, bodies.envelope ?? "", envSources);
+    // metadata is structured/short and cannot contain secrets, but we still
+    // run it through redact for defense-in-depth (env values that happened to
+    // collide with the consumed_at string would be unlikely but harmless).
+    await writeRedacted(slots.metadata, JSON.stringify(meta), envSources);
     return {
       exitStatus,
-      envelopeRef: envelope.path,
-      diagnosticsRef: diagnostics.path,
+      envelopeRef: slots.envelope.path,
+      diagnosticsRef: slots.stderr.path,
       // consumed_at = call completion time, per ARC-PORT-SIGNATURE.
-      consumedAt: new Date().toISOString(),
+      consumedAt,
     };
   };
 
   try {
     if (!existsSync(input.agentCwd)) {
-      return finish(
-        "adapter_unavailable",
-        "",
-        `agentCwd not found: ${input.agentCwd}`,
-      );
+      return finish("adapter_unavailable", {
+        stderr: `agentCwd not found: ${input.agentCwd}`,
+        reason: "agent_cwd_missing",
+      });
     }
 
     let stdin: string;
     try {
       stdin = await composeStdin(input.promptRef, input.sessionContextRef);
     } catch (e) {
-      return finish(
-        "transport_error",
-        "",
-        `compose stdin failed: ${(e as Error).message}`,
-      );
+      return finish("transport_error", {
+        stderr: `compose stdin failed: ${(e as Error).message}`,
+        reason: "compose_stdin_failed",
+      });
     }
 
     try {
       assertFourPartLayout(stdin);
     } catch (e) {
-      return finish(
-        "transport_error",
-        "",
-        `4-part layout violation: ${(e as Error).message}`,
-      );
+      return finish("transport_error", {
+        stderr: `4-part layout violation: ${(e as Error).message}`,
+        reason: "prompt_layout_violation",
+      });
     }
 
     const r = await adapter.run({
@@ -93,11 +129,36 @@ export async function runInvoke(
       }
     }
 
-    return finish(exitStatus, envelopeBody, r.stderr);
+    const reason =
+      exitStatus === "transport_error"
+        ? classifyTransportReason({ stderr: r.stderr, rawCode: r.rawCode })
+        : undefined;
+
+    return finish(exitStatus, {
+      stdout: r.stdout,
+      stderr: r.stderr,
+      envelope: envelopeBody,
+      rawCode: r.rawCode,
+      signal: r.signal,
+      timedOut: r.timedOut,
+      reason,
+      spawnEnv: r.spawnEnv,
+    });
   } catch (e) {
     const stack = (e as Error).stack ?? String(e);
-    return finish("transport_error", "", `unexpected error: ${stack}`);
+    return finish("transport_error", {
+      stderr: `unexpected error: ${stack}`,
+      reason: "executor_throw",
+    });
   }
+}
+
+async function writeRedacted(
+  slot: AttemptSlots["stdout"],
+  body: string,
+  envSources: NodeJS.ProcessEnv[],
+): Promise<void> {
+  await slot.write(redactSecrets(body, ...envSources));
 }
 
 function isParseableJson(s: string): boolean {

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -224,6 +224,85 @@ describe("runInvoke", () => {
     expect(captured.indexOf("(injected manifest body)")).toBeLessThan(
       captured.indexOf("# Instruction"),
     );
+  });
+
+  it("writes attempt-level stdout/stderr/envelope/metadata files on success", async () => {
+    const adapter = new StubAdapter(() => ({
+      rawCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: 'header\n```json\n{"x":1}\n```\nfooter',
+      stderr: "warn line",
+    }));
+    const r = await runInvoke(makeInput(), adapter);
+    expect(r.exitStatus).toBe("ok");
+
+    const base = r.envelopeRef.replace(/\.envelope$/, "");
+    const stdoutPath = `${base}.stdout`;
+    const stderrPath = `${base}.stderr`;
+    const metaPath = `${base}.metadata.json`;
+
+    expect(existsSync(stdoutPath)).toBe(true);
+    expect(existsSync(stderrPath)).toBe(true);
+    expect(existsSync(metaPath)).toBe(true);
+    expect(r.diagnosticsRef).toBe(stderrPath);
+    expect(readFileSync(stdoutPath, "utf8")).toContain("header");
+    expect(readFileSync(stderrPath, "utf8")).toBe("warn line");
+
+    const meta = JSON.parse(readFileSync(metaPath, "utf8"));
+    expect(meta.rawExitCode).toBe(0);
+    expect(meta.timedOut).toBe(false);
+    expect(meta.consumedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("preflight failure still emits all four attempt files", async () => {
+    const adapter = new StubAdapter(() => {
+      throw new Error("should not be called");
+    });
+    const r = await runInvoke(
+      makeInput({ agentCwd: join(workDir, "no-such-dir") }),
+      adapter,
+    );
+    expect(r.exitStatus).toBe("adapter_unavailable");
+    const base = r.envelopeRef.replace(/\.envelope$/, "");
+    expect(existsSync(`${base}.stdout`)).toBe(true);
+    expect(existsSync(`${base}.stderr`)).toBe(true);
+    expect(existsSync(`${base}.envelope`)).toBe(true);
+    expect(existsSync(`${base}.metadata.json`)).toBe(true);
+    const meta = JSON.parse(readFileSync(`${base}.metadata.json`, "utf8"));
+    expect(meta.reason).toBe("agent_cwd_missing");
+  });
+
+  it("captures transport_error reason='rate_limit' in metadata", async () => {
+    const adapter = new StubAdapter(() => ({
+      rawCode: 1,
+      signal: null,
+      timedOut: false,
+      stdout: "",
+      stderr: "anthropic API: 429 rate limit exceeded",
+    }));
+    const r = await runInvoke(makeInput(), adapter);
+    expect(r.exitStatus).toBe("transport_error");
+    const metaPath = r.envelopeRef.replace(/\.envelope$/, ".metadata.json");
+    const meta = JSON.parse(readFileSync(metaPath, "utf8"));
+    expect(meta.reason).toBe("rate_limit");
+  });
+
+  it("redacts secret-shaped tokens from stderr at sink boundary", async () => {
+    const leak =
+      "fail: Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123 and ghp_abcdefghijklmnopqrstuvwxyz12345";
+    const adapter = new StubAdapter(() => ({
+      rawCode: 1,
+      signal: null,
+      timedOut: false,
+      stdout: "",
+      stderr: leak,
+    }));
+    const r = await runInvoke(makeInput(), adapter);
+    const stderrBody = readFileSync(r.diagnosticsRef, "utf8");
+    expect(stderrBody).not.toContain("Bearer abcdefghij");
+    expect(stderrBody).not.toContain("ghp_abcdef");
+    expect(stderrBody).toContain("[REDACTED]");
   });
 
   it("returns transport_error if session_context_ref is set but prompt lacks # Context", async () => {

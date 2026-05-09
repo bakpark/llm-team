@@ -1,4 +1,4 @@
-import { spawnWithTimeout } from "./common/spawn.js";
+import { resolveSpawnEnv, spawnWithTimeout } from "./common/spawn.js";
 import type {
   LlmAdapterInput,
   LlmAdapterResult,
@@ -10,6 +10,10 @@ export interface ClaudeCodeAdapterCfg {
   model?: string;
   extraArgs?: string[];
   killGraceMs?: number;
+  /** Optional env allowlist (defaults to inheriting process.env). */
+  envAllowlist?: readonly string[];
+  /** Optional env additions/overrides applied after the allowlist filter. */
+  envOverride?: NodeJS.ProcessEnv;
 }
 
 export class ClaudeCodeAdapter implements LlmRunnerAdapter {
@@ -19,14 +23,20 @@ export class ClaudeCodeAdapter implements LlmRunnerAdapter {
 
   async run(input: LlmAdapterInput): Promise<LlmAdapterResult> {
     const { cmd, args } = this.buildArgv();
-    return spawnWithTimeout({
+    const env = resolveSpawnEnv({
+      allowlist: this.cfg.envAllowlist,
+      override: this.cfg.envOverride,
+    });
+    const r = await spawnWithTimeout({
       cmd,
       args,
       cwd: input.agentCwd,
+      env,
       stdin: input.stdin,
       timeoutSec: input.timeoutSec,
       killGraceMs: this.cfg.killGraceMs,
     });
+    return { ...r, spawnEnv: env };
   }
 
   buildArgv(): { cmd: string; args: string[] } {

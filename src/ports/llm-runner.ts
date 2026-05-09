@@ -79,3 +79,79 @@ export function classifyExit(args: ClassifyExitArgs): ExitStatus {
 
   return "transport_error";
 }
+
+/**
+ * Sub-classification for `transport_error` exits. The contract `ExitStatus`
+ * enum stays at five values; this string is captured into per-attempt
+ * metadata so retry policy can distinguish rate-limit / quota / auth-fail
+ * / network-disconnect from generic transport noise.
+ *
+ * Detection is deliberately conservative — a stderr substring must be
+ * present and the matched terms are common across both Claude Code and
+ * Codex CLI output. When nothing matches, `'other'` is returned.
+ */
+export type TransportReason =
+  | "rate_limit"
+  | "quota"
+  | "auth_fail"
+  | "network"
+  | "other";
+
+export interface ClassifyTransportReasonArgs {
+  /** Combined stderr from the attempt. */
+  stderr: string;
+  rawCode?: number | null;
+}
+
+export function classifyTransportReason(
+  args: ClassifyTransportReasonArgs,
+): TransportReason {
+  const stderr = (args.stderr ?? "").toLowerCase();
+  if (stderr.length === 0) return "other";
+
+  // Order matters — auth/quota are checked before generic rate-limit so the
+  // more specific class wins when both terms appear together.
+  if (
+    /\b(401|403)\b/.test(stderr) ||
+    stderr.includes("unauthorized") ||
+    stderr.includes("authentication failed") ||
+    stderr.includes("invalid api key") ||
+    stderr.includes("invalid_api_key")
+  ) {
+    return "auth_fail";
+  }
+
+  if (
+    stderr.includes("quota exceeded") ||
+    stderr.includes("insufficient_quota") ||
+    stderr.includes("billing") ||
+    stderr.includes("usage limit")
+  ) {
+    return "quota";
+  }
+
+  if (
+    /\b429\b/.test(stderr) ||
+    stderr.includes("rate limit") ||
+    stderr.includes("rate-limit") ||
+    stderr.includes("rate_limit") ||
+    stderr.includes("too many requests")
+  ) {
+    return "rate_limit";
+  }
+
+  if (
+    stderr.includes("econnreset") ||
+    stderr.includes("etimedout") ||
+    stderr.includes("enetunreach") ||
+    stderr.includes("eai_again") ||
+    stderr.includes("getaddrinfo") ||
+    stderr.includes("network is unreachable") ||
+    stderr.includes("connection refused") ||
+    stderr.includes("connection reset")
+  ) {
+    return "network";
+  }
+
+  return "other";
+}
