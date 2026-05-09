@@ -1,0 +1,43 @@
+{
+  "identity": {
+    "target_id": "e2e-sandbox",
+    "kind": "external",
+    "workdir_path": "/tmp/llm-team-e2e/sandbox/workdir",
+    "agent_cwd": "/tmp/llm-team-e2e/sandbox/agent_cwd",
+    "audit_hash_seed": "e2e-sandbox-v1",
+    "label_prefix": "e2e:"
+  },
+  "agent_profiles": {
+    "atlas": { "runner": "claude_code", "model": "claude-opus-4-7" },
+    "forge": { "runner": "claude_code", "model": "claude-opus-4-7" },
+    "sentinel": { "runner": "codex_cli", "profile": "gpt5.5" },
+    "scout": { "runner": "codex_cli", "profile": "qwen" }
+  },
+  "governance": {
+    "human_team": "e2e-sandbox-team",
+    "control_issue_number": 9001,
+    "contract_change_issue_number": 9002,
+    "human_team_provider": "fs-mirror"
+  },
+  "lease": {
+    "ttl_default_ms": 60000,
+    "ttl_by_lease_kind": {
+      "slot_lock": 30000,
+      "slice_lease": 120000,
+      "session_lease": 300000,
+      "turn_lease": 60000
+    }
+  },
+  "dual_track": {
+    "priority": "delivery_first"
+  },
+  "context_budget": {
+    "outer.Discovery": { "token_hard_cap": 256000 },
+    "outer.Specification": { "token_hard_cap": 256000 },
+    "outer.Planning": { "token_hard_cap": 256000 },
+    "outer.Validation": { "token_hard_cap": 256000 },
+    "middle.review": { "token_hard_cap": 192000 },
+    "middle.merge": { "token_hard_cap": 128000 },
+    "inner.tdd_build": { "token_hard_cap": 128000 }
+  }
+}
