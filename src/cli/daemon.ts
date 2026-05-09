@@ -36,12 +36,17 @@ import { FakeWorkspace } from "../adapters/workspace/fake.js";
 import { validateOrThrow } from "../application/config-validator.js";
 import { runOneMiddleReviewTurn } from "../application/dialogue-coordinator.js";
 import { FileLedger } from "../application/ledger.js";
+import { runOneOuterTurn } from "../application/outer-turn.js";
 import { LOG_DAEMON_PATH } from "../application/persistence-layout.js";
 import { runRecoverySweep } from "../application/recovery.js";
 import { runOneInnerTurn } from "../application/turn-worker.js";
 import { SystemClock } from "../ports/clock.js";
 
-type DaemonRole = "turn-worker" | "dialogue-coordinator" | "recovery";
+type DaemonRole =
+  | "turn-worker"
+  | "dialogue-coordinator"
+  | "outer-coordinator"
+  | "recovery";
 
 interface CliArgs {
   role: DaemonRole;
@@ -78,9 +83,14 @@ function parseArgs(argv: readonly string[]): CliArgs {
     switch (flag) {
       case "--role": {
         const v = a.shift();
-        if (v !== "turn-worker" && v !== "dialogue-coordinator" && v !== "recovery")
+        if (
+          v !== "turn-worker" &&
+          v !== "dialogue-coordinator" &&
+          v !== "outer-coordinator" &&
+          v !== "recovery"
+        )
           throw new Error(
-            `--role must be turn-worker | dialogue-coordinator | recovery (got ${v ?? "<missing>"})`,
+            `--role must be turn-worker | dialogue-coordinator | outer-coordinator | recovery (got ${v ?? "<missing>"})`,
           );
         out.role = v;
         break;
@@ -121,7 +131,9 @@ function parseArgs(argv: readonly string[]): CliArgs {
     }
   }
   if (out.role == null)
-    throw new Error("--role is required (turn-worker | dialogue-coordinator | recovery)");
+    throw new Error(
+      "--role is required (turn-worker | dialogue-coordinator | outer-coordinator | recovery)",
+    );
   return out as CliArgs;
 }
 
@@ -259,6 +271,25 @@ async function main(argv: readonly string[]): Promise<number> {
             reverifyTestCommands: testCommands,
             lease,
             leaseConfig: cfg.lease,
+          });
+          outcomeJson = JSON.stringify({ role: args.role, outcome });
+          break;
+        }
+        case "outer-coordinator": {
+          // Phase 5b.3 — outer Discovery / Specification / Planning /
+          // Validation pickup. No slice-anchored lease in 5b.3 (outer
+          // sessions are milestone-anchored; per-role lockdir prevents
+          // duplicate outer-coordinator daemons). Cross-process safety for
+          // multiple distinct milestones progresses through fairness in a
+          // future phase.
+          if (llmRunner == null) throw new Error("outer-coordinator needs llmRunner");
+          const outcome = await runOneOuterTurn({
+            store,
+            clock,
+            llmRunner,
+            ledger,
+            callerId: args.callerId,
+            targetId: cfg.identity.target_id,
           });
           outcomeJson = JSON.stringify({ role: args.role, outcome });
           break;

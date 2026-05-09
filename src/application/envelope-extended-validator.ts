@@ -74,6 +74,32 @@ const LOOP_PURPOSE_ROWS: MatrixRow[] = [
     allowed_output_kinds: ["milestone_package"],
     allowed_verdict_results: ["PASS", "FAIL", "STALE"],
   },
+  // Phase 5b.3: outer reviewer verdicts. Discovery / Specification reviewers
+  // emit spec_accept / spec_reject / request_changes; Planning reviewers emit
+  // plan_accept / request_changes. Validation has no reviewer row — its
+  // observers (scout) are out of scope until 5c, and the lead_only
+  // finalization rule does not require reviewer envelopes.
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "Discovery",
+    contribution_kind: "review_verdict",
+    allowed_output_kinds: ["verdict"],
+    allowed_verdict_results: ["spec_accept", "spec_reject", "request_changes"],
+  },
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "Specification",
+    contribution_kind: "review_verdict",
+    allowed_output_kinds: ["verdict"],
+    allowed_verdict_results: ["spec_accept", "spec_reject", "request_changes"],
+  },
+  {
+    parent_loop: "outer",
+    phase_or_purpose: "Planning",
+    contribution_kind: "review_verdict",
+    allowed_output_kinds: ["verdict"],
+    allowed_verdict_results: ["plan_accept", "request_changes"],
+  },
   {
     parent_loop: "middle",
     phase_or_purpose: "review",

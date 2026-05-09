@@ -78,6 +78,15 @@ export function composePrompt(input: ComposePromptInput): string {
 }
 
 function instructionBody(input: ComposePromptInput): string {
+  // RGC-HUMAN-CONTRIBUTION: human input never reaches the LLM runner — the
+  // human-signal-binding pipeline appends synthetic SessionTurns directly.
+  // Refuse to compose a prompt for a human participant so the runner cannot
+  // accidentally invoke an LLM with agent_profile_id=human.
+  if (input.agentProfileId === "human") {
+    throw new Error(
+      "composePrompt: agent_profile_id=human cannot have a prompt — human turns arrive via human-signal-binding",
+    );
+  }
   if (input.parentLoop === "inner" && input.phaseOrPurpose === "tdd_build") {
     return [
       "You are forge in the inner tdd_build loop.",
@@ -85,5 +94,89 @@ function instructionBody(input: ComposePromptInput): string {
       "Set output_kind=patch, contribution_kind=lead_draft, tdd_phase ∈ {red_green, refactor}.",
     ].join("\n");
   }
+  if (input.parentLoop === "outer") {
+    return outerInstructionBody(input);
+  }
   return `You are ${input.agentProfileId} in the ${input.parentLoop} loop (${input.phaseOrPurpose}).`;
+}
+
+function outerInstructionBody(input: ComposePromptInput): string {
+  const role = input.agentRoleInSession;
+  switch (input.phaseOrPurpose) {
+    case "Discovery":
+      if (role === "lead") {
+        return [
+          `You are ${input.agentProfileId} (lead) in the outer Discovery phase.`,
+          "Read the manifest's milestone body, accumulated decisions, and the",
+          "prior SessionTurn summary (if present in the manifest).",
+          "On your FIRST turn (no prior turns) emit a Spec CP draft as a",
+          "`spec_proposal` lead_draft (problem framing, user value, scope",
+          "boundary). Do NOT include AC-IDs yet — those arrive in Specification.",
+          "Set output_kind=spec_proposal, contribution_kind=lead_draft, verdict=null.",
+          "On a SUBSEQUENT turn after reviewer quorum (quorum_then_lead): emit",
+          "the FINAL verdict — output_kind=verdict, contribution_kind=review_verdict,",
+          "verdict.result ∈ {spec_accept, spec_reject, request_changes}. Address",
+          "every prior `request_changes` rationale in the rationale field.",
+        ].join("\n");
+      }
+      return [
+        `You are ${input.agentProfileId} (${role}) reviewing a Discovery Spec CP.`,
+        "Emit a verdict envelope. Acceptable verdicts: spec_accept, spec_reject,",
+        "request_changes. Provide a concrete rationale.",
+        "Set output_kind=verdict, contribution_kind=review_verdict.",
+      ].join("\n");
+    case "Specification":
+      if (role === "lead") {
+        return [
+          `You are ${input.agentProfileId} (lead) in the outer Specification phase.`,
+          "On your FIRST turn (no prior turns) promote the Discovery Spec CP",
+          "into scenarios + AC-IDs + acceptance test stubs. Each AC must have",
+          "a stable AC-ID and at least one acceptance test (path + name). Set",
+          "pending markers per SOC-OPERATIONS Specification.",
+          "Set output_kind=spec_proposal, contribution_kind=lead_draft, verdict=null.",
+          "On a SUBSEQUENT turn after reviewer quorum (quorum_then_lead, min",
+          "approvals = 2): emit the FINAL verdict — output_kind=verdict,",
+          "contribution_kind=review_verdict, verdict.result ∈ {spec_accept,",
+          "spec_reject, request_changes}. Address every prior `request_changes`",
+          "rationale in the rationale field.",
+        ].join("\n");
+      }
+      return [
+        `You are ${input.agentProfileId} (${role}) reviewing the Specification.`,
+        "Verdict: spec_accept / spec_reject / request_changes.",
+        "Set output_kind=verdict, contribution_kind=review_verdict.",
+      ].join("\n");
+    case "Planning":
+      if (role === "lead") {
+        return [
+          `You are ${input.agentProfileId} (lead) in the outer Planning phase.`,
+          "Decompose the approved spec into a slice DAG. Each slice declares",
+          "slice_id, slice_kind, value_statement, ac_ids[], acceptance_tests[],",
+          "declared_scope[], dependencies[] ({slice_id, edge_type}). DAG must",
+          "be acyclic; cycle detection runs in caller. Set",
+          "output_kind=slice_decomposition, contribution_kind=lead_draft.",
+        ].join("\n");
+      }
+      return [
+        `You are ${input.agentProfileId} (${role}) reviewing the slice DAG.`,
+        "Verdict: plan_accept / request_changes.",
+        "Set output_kind=verdict, contribution_kind=review_verdict.",
+      ].join("\n");
+    case "Validation":
+      if (role === "lead") {
+        return [
+          `You are ${input.agentProfileId} (lead) in the outer Validation phase.`,
+          "Aggregate slice validation evidence (verification runs, acceptance",
+          "test outcomes per AC-ID). Emit a milestone_package envelope with",
+          "verdict ∈ {PASS, FAIL, STALE}.",
+          "Set output_kind=milestone_package, contribution_kind=lead_draft.",
+        ].join("\n");
+      }
+      return [
+        `You are ${input.agentProfileId} (${role}) observing the Validation phase.`,
+        "Provide observations. No verdict required.",
+      ].join("\n");
+    default:
+      return `You are ${input.agentProfileId} in the outer loop (${input.phaseOrPurpose}).`;
+  }
 }
