@@ -116,6 +116,28 @@ export class GitHubIssueTracker implements IssueTrackerPort {
   async updateMilestoneState(
     input: UpdateMilestoneStateInput,
   ): Promise<ExternalRefHandle> {
+    // PR #71 P1-2 — `labels` is intentionally NOT applied here.
+    //
+    // GitHub's REST API does not attach labels to milestone resources
+    // directly (labels live on issues/PRs). In our convention the milestone
+    // surface only carries title/description; the slot/state label set
+    // travels on the milestone-tracker issue (see external-tracking-mapping
+    // §4). The fs-mirror adapter persists `labels` because its mirror layout
+    // is symmetric across object kinds; the github adapter must drop them
+    // here. Callers that need label visibility on github MUST update the
+    // milestone-tracker issue via `updateIssue` instead.
+    //
+    // We surface the divergence on stderr so it is observable in logs but
+    // do not throw — the contract on this method is "best-effort apply
+    // server-side fields supported by the provider".
+    if (input.labels.length > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[github] updateMilestoneState: labels ignored on github milestones ` +
+          `(milestone=${input.milestoneRef.id}, count=${input.labels.length}). ` +
+          `Apply via the milestone-tracker issue.`,
+      );
+    }
     const body: Record<string, unknown> = {};
     if (input.title != null) body.title = input.title;
     if (input.body != null) body.description = input.body;
@@ -178,30 +200,29 @@ export class GitHubIssueTracker implements IssueTrackerPort {
     // gh has no atomic label-replace; use --add-label after stripping all.
     // Simpler: drop the label set on the issue first via --remove-label "*"
     // is not supported. We emit two operations: 1) fetch current 2) diff.
+    let labelOpsAdded = false;
     if (input.labels) {
       const cur = await this.fetchIssue(input.issueRef);
       const curLabels = new Set(cur?.labels ?? []);
       const want = new Set(input.labels.map((l) => this.prefix(l)));
       for (const lbl of curLabels) {
-        if (!want.has(lbl)) args.push("--remove-label", lbl);
+        if (!want.has(lbl)) {
+          args.push("--remove-label", lbl);
+          labelOpsAdded = true;
+        }
       }
       for (const lbl of want) {
-        if (!curLabels.has(lbl)) args.push("--add-label", lbl);
+        if (!curLabels.has(lbl)) {
+          args.push("--add-label", lbl);
+          labelOpsAdded = true;
+        }
       }
     }
-    if (
-      args.length > 5 ||
-      input.title != null ||
-      input.body != null
-    ) {
-      // only run edit if there is something to do
-      if (
-        args.length > 5 ||
-        input.title != null ||
-        input.body != null
-      ) {
-        await this.opts.exec.run(args);
-      }
+    // Only invoke `gh issue edit` when there is at least one mutation
+    // (title / body / label diff). An empty edit call would be a no-op
+    // round-trip at best and could surface as a CLI error at worst.
+    if (input.title != null || input.body != null || labelOpsAdded) {
+      await this.opts.exec.run(args);
     }
     if (input.state === "closed") {
       await this.opts.exec.run([

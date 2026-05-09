@@ -114,10 +114,18 @@ export class FsMirrorGitHost implements GitHostPort {
       const raw = await this.store.readText(prPath(n));
       if (raw == null) throw new Error(`fs-mirror: pr ${n} missing`);
       const cur = JSON.parse(raw) as StoredPr;
-      const c = await readCounter(this.store);
-      const id = c.next_comment;
-      c.next_comment = id + 1;
-      await writeCounter(this.store, c);
+      // PR #71 P0-2: counter mutation must be guarded by COUNTER_PATH lock
+      // so concurrent comment posts on different PRs cannot race the same
+      // `next_comment` value. Nesting order prPath → COUNTER_PATH is the
+      // only direction used in this adapter (openPullRequest takes
+      // COUNTER_PATH alone), so no cycle is possible.
+      const id = await this.store.withFileLock(COUNTER_PATH, async () => {
+        const c = await readCounter(this.store);
+        const next = c.next_comment;
+        c.next_comment = next + 1;
+        await writeCounter(this.store, c);
+        return next;
+      });
       cur.comments.push({ id, body: input.body });
       cur.revision += 1;
       await this.store.writeAtomic(prPath(n), JSON.stringify(cur));

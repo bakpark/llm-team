@@ -173,6 +173,36 @@ describe("Phase 6b — FsMirror lifecycle", () => {
     const f = await gh.fetchPullRequest(pr);
     expect(f!.labels).toEqual(["sm-state/ready-for-review"]);
   });
+
+  it("concurrent postPullRequestComment across PRs issues unique comment IDs (PR #71 P0-2)", async () => {
+    const store = new MemoryStore();
+    const gh = new FsMirrorGitHost(store);
+    // Open multiple PRs so the per-PR lock does not serialize the comment
+    // counter on its own; the COUNTER_PATH lock added in P0-2 is what
+    // guarantees uniqueness.
+    const prs = await Promise.all(
+      [0, 1, 2, 3].map((i) =>
+        gh.openPullRequest({
+          title: `S${i}`,
+          body: "",
+          headBranch: `slice/${i}`,
+          baseBranch: "main",
+          draft: false,
+          labels: [],
+        }),
+      ),
+    );
+    const N = 8;
+    const calls: Promise<{ commentId: string }>[] = [];
+    for (let i = 0; i < N; i++) {
+      const pr = prs[i % prs.length]!;
+      calls.push(gh.postPullRequestComment({ prRef: pr, body: `c${i}` }));
+    }
+    const results = await Promise.all(calls);
+    const ids = results.map((r) => r.commentId);
+    // Invariant: every issued comment ID is unique.
+    expect(new Set(ids).size).toBe(N);
+  });
 });
 
 describe("Phase 6b — GitHub adapter argv contract", () => {

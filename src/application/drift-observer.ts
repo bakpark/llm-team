@@ -128,6 +128,14 @@ export async function runDriftObserverSweep(
 ): Promise<DriftObserverResult> {
   const conflicts: DriftObserverResult["conflicts"] = [];
 
+  // PR #71 P1-1 — `last_seen_external_revision == null` semantics:
+  // A ref with no recorded baseline revision is one that has never been
+  // synced inbound (freshly created ref). We intentionally do NOT raise
+  // `revision_mismatch` for such refs because there is nothing to compare
+  // against — the next outbound write or the first inbound observation
+  // will establish the baseline. `disappeared` is still raised because the
+  // absence of the surface is unambiguous.
+
   const milestones = await loadAllMilestones(deps.store);
   for (const ms of milestones) {
     for (const ref of ms.external_refs) {

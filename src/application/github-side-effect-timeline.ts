@@ -55,6 +55,16 @@ export interface ExecuteTimelineInput {
  * the count of completed steps. On failure, the lock is released and the
  * outcome carries the failed step's name so the caller can record a
  * `result_detail` string ("partial_fail:<step_name>") in its ledger row.
+ *
+ * PR #71 P1-3 — lock-held network I/O note:
+ *   `step.run()` may invoke `gh` CLI calls (network I/O) while the
+ *   `lockKey` lock is held. This is a deliberate trade: the lock guarantees
+ *   that the timeline's ledger row + external mutations land in a single
+ *   ordered sequence per object, even though it inflates lock-hold time
+ *   under network latency. Callers that mirror to a hot object should keep
+ *   the per-object timeline short; structural relief (e.g. splitting
+ *   network steps from internal-state writes) is tracked as a future
+ *   refactor and is not required for correctness.
  */
 export async function executeMirrorTimeline(
   input: ExecuteTimelineInput,
