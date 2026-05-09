@@ -2,7 +2,7 @@
 
 `llm-team` 의 문서 트리 진입점이다. 본 README 는 색인이며 권위 문서가 아니다. 권위 순서는 [`llm-team.md`](../llm-team.md) → `docs/contracts/*.md` (entry: [`contracts/README.md`](contracts/README.md)) → 그 외 구현 / 보조 문서 순이다 ([`contracts/README.md#CONTRACT-AUTHORITY`](contracts/README.md#CONTRACT-AUTHORITY)).
 
-문서를 처음 읽는 사람은 다음 4 bucket 중 자기 목적에 맞는 것만 읽으면 된다. **각 bucket 의 상태는 다르다 — Active 만 신규 코드·문서가 의존할 수 있다.**
+문서를 처음 읽는 사람은 다음 3 bucket 중 자기 목적에 맞는 것만 읽으면 된다. **각 bucket 의 상태는 다르다 — Active 만 신규 코드·문서가 의존할 수 있다.**
 
 ## Active normative — 규범 (신규 의존 허용)
 
@@ -33,10 +33,3 @@
 - [`superpowers/specs/`](superpowers/specs/) — proposal artifact (사람 작성).
 - [`superpowers/plans/`](superpowers/plans/) — implementation plan (라운드 실행 기록).
 
-## Historical record — 기록·보존
-
-지나간 라운드의 방향 / 스냅샷 / archive. 의존 정책은 항목마다 다르다.
-
-- [`history/legacy-phase-model/`](history/legacy-phase-model/) — amendment 이전 phase model archive. **신규 코드·문서 의존 금지** (lint rule 강제). historical reader / fixture / migration tooling 만 예외 ([`contracts/README.md#CONTRACT-AUTHORITY`](contracts/README.md#CONTRACT-AUTHORITY)).
-- [`history/direction-2026-05.md`](history/direction-2026-05.md) — docs 고도화 5-phase 로드맵 (Phase 0–3 머지 후 이동). 신규 architecture 파일 추가 동기 추적용 참조 — [`architecture/README.md`](architecture/README.md) 의 *진행 중인 방향* 절에서 인용.
-- [`history/e2e-pipeline-2026-05-03.md`](history/e2e-pipeline-2026-05-03.md) — 2026-05-03 시점 e2e pipeline 스냅샷.

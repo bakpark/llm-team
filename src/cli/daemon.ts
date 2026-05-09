@@ -25,7 +25,9 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { FakeAdapter } from "../adapters/llm-runner/fake.js";
+import { MultiProfileLlmRunner } from "../adapters/llm-runner/multi-profile.js";
 import { AdapterRunnerPort } from "../adapters/llm-runner/runtime-port.js";
+import { buildRunnerRegistry } from "../config/runner-registry.js";
 import { FsLease } from "../adapters/lease/fs.js";
 import { NdjsonLogger } from "../adapters/logger/ndjson.js";
 import { FsStore } from "../adapters/store/fs.js";
@@ -181,15 +183,24 @@ async function main(argv: readonly string[]): Promise<number> {
       auditHashSeed: cfg.identity.audit_hash_seed,
     });
 
+    // Phase 7a (G1-1): production wiring assembles a MultiProfileLlmRunner
+    // from cfg.agent_profiles via buildRunnerRegistry. The legacy
+    // --fake-llm-fixtures flag is preserved as a test-only override so
+    // existing fixture-driven integration tests keep working.
+    //
+    // PR #73 review (P1): the production registry path explicitly opts out
+    // of the test-only `fake` runner. Integration tests that exercise the
+    // production wiring with `runner: "fake"` set
+    // `LLM_TEAM_ALLOW_FAKE_RUNNER=1`; production deployments never set it,
+    // so a smuggled `runner: "fake"` in target.json fails fast.
+    const needsLlmRunner =
+      args.role !== "recovery" && args.role !== "dual-track-scheduler";
+    const allowFake = process.env.LLM_TEAM_ALLOW_FAKE_RUNNER === "1";
     const llmRunner = args.fakeLlmFixtures
       ? new AdapterRunnerPort(new FakeAdapter({ fixtureDir: args.fakeLlmFixtures }))
-      : args.role === "recovery" || args.role === "dual-track-scheduler"
-        ? null
-        : (() => {
-            throw new Error(
-              "non-recovery daemons require --fake-llm-fixtures (real adapters wired in later phases)",
-            );
-          })();
+      : needsLlmRunner
+        ? new MultiProfileLlmRunner(buildRunnerRegistry(cfg, { allowFake }))
+        : null;
 
     const workspace = args.fakeWorkspace
       ? new FakeWorkspace(resolve(workdir, "workspaces"))
