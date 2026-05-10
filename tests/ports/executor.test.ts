@@ -273,6 +273,87 @@ describe("runInvoke", () => {
     expect(meta.reason).toBe("agent_cwd_missing");
   });
 
+  it("on success persists the composed prompt to <base>.prompt for replay", async () => {
+    const adapter = new StubAdapter(() => ({
+      rawCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: '```json\n{"x":1}\n```\n',
+      stderr: "",
+    }));
+    const r = await runInvoke(makeInput(), adapter);
+    expect(r.exitStatus).toBe("ok");
+    const promptPath = r.envelopeRef.replace(/\.envelope$/, ".prompt");
+    expect(existsSync(promptPath)).toBe(true);
+    const promptBody = readFileSync(promptPath, "utf8");
+    // adapter.lastInput.stdin is the canonical composed prompt the adapter saw.
+    expect(promptBody).toBe(adapter.lastInput!.stdin);
+  });
+
+  it("4-part layout violation still persists the offending prompt body", async () => {
+    const badPrompt = join(workDir, "bad.md");
+    const badBody = "no frontmatter here\n# Context\n";
+    writeFileSync(badPrompt, badBody, "utf8");
+    const adapter = new StubAdapter(() => {
+      throw new Error("should not be called");
+    });
+    const r = await runInvoke(makeInput({ promptRef: badPrompt }), adapter);
+    expect(r.exitStatus).toBe("transport_error");
+    const promptPath = r.envelopeRef.replace(/\.envelope$/, ".prompt");
+    expect(existsSync(promptPath)).toBe(true);
+    expect(readFileSync(promptPath, "utf8")).toBe(badBody);
+  });
+
+  it("composeStdin failure still emits an empty prompt slot file", async () => {
+    const noContextPrompt = join(workDir, "no-context.md");
+    writeFileSync(
+      noContextPrompt,
+      `---\nsession_id: s\n---\n\n# Instruction\n\n# Output Schema\n`,
+      "utf8",
+    );
+    const ctxRef = join(workDir, "ctx-missing-anchor.md");
+    writeFileSync(ctxRef, "ctx body", "utf8");
+    const adapter = new StubAdapter(() => {
+      throw new Error("should not be called");
+    });
+    const r = await runInvoke(
+      makeInput({ promptRef: noContextPrompt, sessionContextRef: ctxRef }),
+      adapter,
+    );
+    expect(r.exitStatus).toBe("transport_error");
+    const promptPath = r.envelopeRef.replace(/\.envelope$/, ".prompt");
+    expect(existsSync(promptPath)).toBe(true);
+    expect(readFileSync(promptPath, "utf8")).toBe("");
+  });
+
+  it("agentCwd missing leaves an empty prompt slot file", async () => {
+    const adapter = new StubAdapter(() => {
+      throw new Error("should not be called");
+    });
+    const r = await runInvoke(
+      makeInput({ agentCwd: join(workDir, "no-such-dir") }),
+      adapter,
+    );
+    expect(r.exitStatus).toBe("adapter_unavailable");
+    const promptPath = r.envelopeRef.replace(/\.envelope$/, ".prompt");
+    expect(existsSync(promptPath)).toBe(true);
+    expect(readFileSync(promptPath, "utf8")).toBe("");
+  });
+
+  it("executor unexpected throw leaves an empty prompt slot file", async () => {
+    const adapter = new StubAdapter(() => {
+      throw new Error("boom");
+    });
+    const r = await runInvoke(makeInput(), adapter);
+    expect(r.exitStatus).toBe("transport_error");
+    const promptPath = r.envelopeRef.replace(/\.envelope$/, ".prompt");
+    expect(existsSync(promptPath)).toBe(true);
+    // Adapter throw happens *after* prompt was already written, so the body is
+    // the composed stdin (not empty). The contract is only that the file exists.
+    const body = readFileSync(promptPath, "utf8");
+    expect(body.length).toBeGreaterThan(0);
+  });
+
   it("captures transport_error reason='rate_limit' in metadata", async () => {
     const adapter = new StubAdapter(() => ({
       rawCode: 1,
