@@ -307,6 +307,24 @@ async function runEffect(
       };
     }
     case "reset_slice_for_rebuild": {
+      // PR #114 review (gpt5.5 [심각도:높음]): transition the slice to
+      // SLICE_BUILDING + clear current_session_id BEFORE closing the SM.
+      // Previous order (SM close → slice transition) left the orphan
+      // `SM_CLOSED + SLICE_REVIEWING + SESSION_OPEN` on a mid-dispatch
+      // crash, and `pickReadyMiddleReview` only re-picks SM_READY_FOR_REVIEW
+      // / SM_APPROVED so the dispatch could not be resumed. With this
+      // order, a crash between the slice and SM writes leaves
+      // `SLICE_BUILDING + stale SM_READY_FOR_REVIEW`; turn-worker /
+      // ready-object pick up SLICE_BUILDING and a new SliceMerge instance
+      // is authored on the next inner cycle (the stale SM is benign — it
+      // can no longer be picked because `pickReadyMiddleReview` requires
+      // slice.state === SLICE_REVIEWING). The terminal session write in
+      // the coordinator stays last, mirroring the CONVERGED branch.
+      await transitionSliceState(input.slice, "SLICE_BUILDING", deps, {
+        loop_kind: "middle",
+        session_id: input.sessionId,
+        clear_current_session: true,
+      });
       await closeSliceMergeRequestChanges(
         {
           sliceMerge: input.sliceMerge,
@@ -315,13 +333,6 @@ async function runEffect(
         },
         smOpDeps,
       );
-      // Slice → SLICE_BUILDING + clear current_session_id so the next pickup
-      // creates a new inner session + new SliceMerge instance.
-      await transitionSliceState(input.slice, "SLICE_BUILDING", deps, {
-        loop_kind: "middle",
-        session_id: input.sessionId,
-        clear_current_session: true,
-      });
       await emitTelemetryAfterTransition(input.slice.milestone_id, smOpDeps);
       return {
         effect: "reset_slice_for_rebuild",

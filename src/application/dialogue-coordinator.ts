@@ -1130,10 +1130,18 @@ async function finalizeNonConvergedReview(
   // Idempotent: if the session was already persisted as TIMEOUT/ABANDONED on a
   // prior crashed run, pickReadyMiddleReview won't return it (the SM is
   // already SM_CLOSED), so this branch only fires the first time.
+  // PR #114 review (gpt5.5 [심각도:중간]): record abandoned_reason on the
+  // session record itself, not just in the idempotency key. Operations /
+  // recovery / audit paths that read the session metadata previously lost
+  // the distinction between `no_progress`, `regression`, and
+  // `scope_violation` because `decision.abandoned_reason` was only encoded
+  // into the per_session_outcome ledger key below.
   const finalizedSession = DialogueSession.parse({
     ...session,
     state: sessionState,
     final_verdict: finalVerdict,
+    abandoned_reason:
+      decision.reason === "abandoned" ? decision.abandoned_reason : null,
     finalization_decision: null,
     updated_at: deps.clock.isoNow(),
   });
