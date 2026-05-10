@@ -209,6 +209,25 @@ export async function dispatchOuterOutcome(
     };
   }
 
+  // incident-7 P0 (PR #104 review): when the dispatched effect is
+  // `persist_slice_dag_and_promote` but `slicesToPersist` is empty/missing,
+  // refuse the dispatch as `no_match` rather than throwing. Throwing
+  // propagates through `finalizeConvergedSession` → `runOneOuterTurn` → the
+  // daemon top-level reject handler and exits the process. Returning
+  // `no_match` lets `finalizeConvergedSession` emit an error ledger row and
+  // surface a `dispatch_no_match` outcome — milestone stays in
+  // M_DELIVERY_PLANNING for the next outer-coordinator cycle to retry.
+  if (
+    entry.effects.some((e) => e.kind === "persist_slice_dag_and_promote") &&
+    (input.slicesToPersist == null || input.slicesToPersist.length === 0)
+  ) {
+    return {
+      kind: "no_match",
+      detail:
+        "persist_slice_dag_and_promote: refusing to advance milestone with empty slice DAG (incident-7)",
+    };
+  }
+
   // PR #66 P0-1: take the milestone lock once and run every effect inside
   // it. Slice writes, Decision Log entries, Spec CP, and the milestone
   // state transition all observe the same lock.
@@ -328,6 +347,16 @@ async function runOuterEffect(
     }
     case "persist_slice_dag_and_promote": {
       const slices = input.slicesToPersist ?? [];
+      // incident-7 P0 (PR #104 review): the empty-slices case is rejected
+      // upstream in `dispatchOuterOutcome` as `no_match` (returning a
+      // structured error rather than throwing, so the daemon does not
+      // crash). This branch is unreachable when slices is empty, but keep
+      // a defensive invariant check that returns rather than throws.
+      if (slices.length === 0) {
+        throw new Error(
+          "persist_slice_dag_and_promote: invariant violation — empty slice DAG should have been rejected upstream (incident-7)",
+        );
+      }
       const validation = validateSliceDag(slices);
       if (!validation.ok) {
         // Per SOC-SLICE-DEPENDENCIES Cycle Detection: lead contribution FAIL.
