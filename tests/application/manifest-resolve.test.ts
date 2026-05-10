@@ -176,3 +176,226 @@ describe("resolveManifestEntries", () => {
     expect(resolved[0]!.manifest_entry_index).toBe(0);
   });
 });
+
+/**
+ * incident-5 — `(session_turn, body)` resolver tests. Discovery atlas /
+ * sentinel were stuck in `request_changes ↔ need_context` because
+ * resolveManifestEntries silently dropped prior turn bodies. These tests
+ * lock the new behaviour: body is read from
+ * `sessions/<session_id>/turns/<n>.json`, projected to agent-relevant
+ * envelope fields, with the same revision_pin / required-missing /
+ * stale-pin failure modes as milestone body resolution.
+ */
+describe("resolveManifestEntries — session_turn body (incident-5)", () => {
+  const TURN_SESSION_ID = "01HZSE000000000000000000T1";
+  const PRIMARY_MILESTONE = "01HZMS00000000000000000T01";
+  const PRIMARY_REQUEST = "01HZFR00000000000000000T01";
+  const ENV_BASE_ISO = "2026-05-08T10:00:00.000Z";
+
+  function seedTurn(index: number, summary: string) {
+    const envelope = {
+      session_id: TURN_SESSION_ID,
+      turn_index: index,
+      parent_loop: "outer",
+      phase_or_purpose: "Discovery",
+      slice_id: null,
+      slice_kind: null,
+      tdd_phase: null,
+      agent_profile_id: index % 2 === 0 ? "atlas" : "sentinel",
+      agent_role_in_session: index % 2 === 0 ? "lead" : "reviewer",
+      contribution_kind: index % 2 === 0 ? "lead_draft" : "review_verdict",
+      parent_review_verdict_id: null,
+      output_kind: index % 2 === 0 ? "spec_proposal" : "verdict",
+      object_id: PRIMARY_MILESTONE,
+      manifest_id: "01HZMA00000000000000000T01",
+      input_revision_pins: ["deadbeef"],
+      summary,
+      artifacts: null,
+      verdict:
+        index % 2 === 1
+          ? {
+              result: "request_changes",
+              rationale: "needs scope sharpening",
+            }
+          : null,
+      next_action_request: null,
+      failure: null,
+      idempotency_key: `idemp:${TURN_SESSION_ID}:${index}`,
+      runtime_metadata: {},
+    };
+    const turn = {
+      session_id: TURN_SESSION_ID,
+      turn_index: index,
+      agent_profile_id: envelope.agent_profile_id,
+      input_manifest_id: "01HZMA00000000000000000T01",
+      input_turn_log_snapshot_ref: null,
+      output_envelope: envelope,
+      next_action_request: null,
+      caller_routing_decision: null,
+      workspace_commit: null,
+      verification_result_ref: null,
+      recorded_at: ENV_BASE_ISO,
+    };
+    return JSON.stringify(turn);
+  }
+
+  function pinFor(raw: string): string {
+    return `len=${raw.length}:${raw.slice(0, 32).replace(/\s+/g, "")}`;
+  }
+
+  async function seedPrimaryMilestone(store: MemoryStore) {
+    await store.writeAtomic(
+      layout.milestone(PRIMARY_MILESTONE),
+      JSON.stringify({
+        milestone_id: PRIMARY_MILESTONE,
+        target_id: "team-a",
+        title: "Discovery loop fix",
+        state: "M_DISCOVERY_DRAFT",
+        slot_kind: "discovery",
+        intake_source_kind: "feature_request",
+        intake_source_id: PRIMARY_REQUEST,
+        spec_revision_pin: null,
+        context_summary_id: null,
+        external_refs: [],
+        created_at: ENV_BASE_ISO,
+        updated_at: ENV_BASE_ISO,
+      }),
+    );
+    await store.writeAtomic(
+      layout.featureRequest(PRIMARY_REQUEST),
+      JSON.stringify({
+        request_id: PRIMARY_REQUEST,
+        title: "Discovery loop fix",
+        body: "raw scope text",
+        submitted_by: "user@example.com",
+        submitted_at: ENV_BASE_ISO,
+        state: "queued",
+        promoted_milestone_id: null,
+        processed_at: null,
+        rejection_reason: null,
+      }),
+    );
+  }
+
+  function manifestWithSessionTurn(extra: any) {
+    return ContextManifest.parse({
+      manifest_id: "01HZMA00000000000000000T01",
+      session_id: TURN_SESSION_ID,
+      turn_index: 4,
+      purpose: "design",
+      target: { object_kind: "milestone", object_id: PRIMARY_MILESTONE },
+      entries: [
+        {
+          object_kind: "milestone",
+          object_id: PRIMARY_MILESTONE,
+          fetch_scope: "body",
+          revision_pin: ENV_BASE_ISO,
+          required: true,
+          purpose: "primary",
+        },
+        extra,
+      ],
+      created_at: ENV_BASE_ISO,
+    });
+  }
+
+  it("resolves required session_turn body via turn_index field", async () => {
+    const store = new MemoryStore();
+    await seedPrimaryMilestone(store);
+    const turnRaw = seedTurn(1, "reviewer flagged scope drift");
+    await store.writeAtomic(layout.sessionTurn(TURN_SESSION_ID, 1), turnRaw);
+    const manifest = manifestWithSessionTurn({
+      object_kind: "session_turn",
+      object_id: TURN_SESSION_ID,
+      turn_index: 1,
+      fetch_scope: "body",
+      revision_pin: pinFor(turnRaw),
+      required: true,
+      purpose: "prior turn 1 (reviewer) (request_changes)",
+    });
+    const resolved = await resolveManifestEntries(store, manifest);
+    expect(resolved).toHaveLength(2);
+    const turnEntry = resolved.find((r) => r.manifest_entry_index === 1)!;
+    expect(turnEntry.body).toContain("reviewer flagged scope drift");
+    expect(turnEntry.body).toContain("request_changes");
+    expect(turnEntry.body).toContain("needs scope sharpening");
+    // ULID guard — session_id projection must equal seed.
+    expect(turnEntry.body).toContain(TURN_SESSION_ID);
+    // Projection — top-level keys present.
+    expect(turnEntry.body).toContain("\"summary\"");
+    expect(turnEntry.body).toContain("\"verdict\"");
+    expect(turnEntry.body).toContain("\"agent_role_in_session\"");
+  });
+
+  it("resolves session_turn body via legacy ${session_id}#${i} object_id", async () => {
+    const store = new MemoryStore();
+    await seedPrimaryMilestone(store);
+    const turnRaw = seedTurn(0, "lead initial draft");
+    await store.writeAtomic(layout.sessionTurn(TURN_SESSION_ID, 0), turnRaw);
+    const manifest = manifestWithSessionTurn({
+      object_kind: "session_turn",
+      object_id: `${TURN_SESSION_ID}#0`,
+      fetch_scope: "body",
+      revision_pin: pinFor(turnRaw),
+      required: true,
+      purpose: "prior turn 0 (lead)",
+    });
+    const resolved = await resolveManifestEntries(store, manifest);
+    expect(resolved).toHaveLength(2);
+    expect(resolved[1]!.body).toContain("lead initial draft");
+  });
+
+  it("throws MissingRequiredManifestEntryError when turn file is absent and required", async () => {
+    const store = new MemoryStore();
+    await seedPrimaryMilestone(store);
+    const manifest = manifestWithSessionTurn({
+      object_kind: "session_turn",
+      object_id: TURN_SESSION_ID,
+      turn_index: 5,
+      fetch_scope: "body",
+      revision_pin: "len=0:",
+      required: true,
+      purpose: "missing prior turn",
+    });
+    await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
+      /required manifest entry not found/,
+    );
+  });
+
+  it("throws StaleManifestEntryError when revision_pin disagrees with stored body", async () => {
+    const store = new MemoryStore();
+    await seedPrimaryMilestone(store);
+    const turnRaw = seedTurn(2, "reviewer second pass");
+    await store.writeAtomic(layout.sessionTurn(TURN_SESSION_ID, 2), turnRaw);
+    const manifest = manifestWithSessionTurn({
+      object_kind: "session_turn",
+      object_id: TURN_SESSION_ID,
+      turn_index: 2,
+      fetch_scope: "body",
+      revision_pin: "len=999:bogus",
+      required: true,
+      purpose: "stale prior turn",
+    });
+    await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
+      /revision_pin mismatch/,
+    );
+  });
+
+  it("silently skips non-required session_turn body when file is absent", async () => {
+    const store = new MemoryStore();
+    await seedPrimaryMilestone(store);
+    const manifest = manifestWithSessionTurn({
+      object_kind: "session_turn",
+      object_id: TURN_SESSION_ID,
+      turn_index: 7,
+      fetch_scope: "body",
+      revision_pin: "len=0:",
+      required: false,
+      purpose: "advisory prior turn",
+    });
+    const resolved = await resolveManifestEntries(store, manifest);
+    // Only the milestone entry survives.
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]!.manifest_entry_index).toBe(0);
+  });
+});

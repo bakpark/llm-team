@@ -347,7 +347,14 @@ export async function runOneOuterTurn(
       t.verdict?.result === "request_changes" ? " (request_changes)" : "";
     drafts.push({
       object_kind: "session_turn",
-      object_id: `${session.session_id}#${i}`,
+      // incident-5: object_id is the session id; the per-entry `turn_index`
+      // distinguishes which `sessions/<id>/turns/<n>.json` the resolver
+      // reads. Prior to incident-5 this was encoded as
+      // `${session_id}#${i}` and parsed by OuterPinResolver — replaced by
+      // the schema-level field so resolveManifestEntries can also locate
+      // the turn file.
+      object_id: session.session_id,
+      turn_index: i,
       fetch_scope: "body",
       required: false,
       purpose: `prior turn ${i} (${t.agent_role_in_session})${rcSuffix}`,
@@ -1010,18 +1017,22 @@ class OuterPinResolver implements RevisionPinResolver {
     }
     if (entry.object_kind === "session_turn") {
       // PR #69 P1-3: prior turn entries are pinned by the persisted body's
-      // hash-equivalent — we just use the turn body length + first 64
+      // hash-equivalent — we just use the turn body length + first 32
       // chars as a stable fingerprint (no native crypto needed for a
       // Phase-5 manifest pin). Turn bodies are append-only so this is
       // stable until/unless the turn is rewritten.
-      const idxStr = entry.object_id.includes("#")
-        ? entry.object_id.split("#")[1]!
-        : "0";
-      const idx = Number.parseInt(idxStr, 10);
+      // incident-5: prefer the schema-level `turn_index`; fall back to
+      // legacy `${session_id}#${i}` parsing for any in-flight manifests
+      // built before the field was introduced.
+      const idx =
+        entry.turn_index ??
+        (entry.object_id.includes("#")
+          ? Number.parseInt(entry.object_id.split("#")[1]!, 10)
+          : 0);
       const body = await this.store.readText(
         layout.sessionTurn(this.sessionId, idx),
       );
-      if (body == null) return `missing:${entry.object_id}`;
+      if (body == null) return `missing:${entry.object_id}#${idx}`;
       return `len=${body.length}:${body.slice(0, 32).replace(/\s+/g, "")}`;
     }
     if (entry.object_kind === "slice_telemetry") {
