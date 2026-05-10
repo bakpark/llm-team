@@ -26,6 +26,7 @@ import {
   type LeaseConfig,
 } from "../config/target-schema.js";
 import { callAgent, type AgentIoOutcome } from "./agent-io.js";
+import type { LeadInvoker, LeadInvokerOutcome } from "./lead-invoker.js";
 import {
   classifyAgentIoStageFailure,
   countLrInvokeTimeoutsFromLedger,
@@ -140,6 +141,20 @@ export type TurnWorkerOutcome =
       kind: "lease_unavailable";
       sliceId: string;
       detail: string;
+    }
+  | {
+      /**
+       * Phase 2 (cli-spicy-anchor.md): the worker was configured with
+       * `cfg.leadPath === "pr_first"` and a `deps.leadInvoker` was supplied,
+       * so the legacy envelope pipeline was bypassed in favour of
+       * `LeadInvoker.invoke`. The embedded outcome carries the PR-first
+       * succeeded / abandoned result. Default config keeps the legacy
+       * envelope path (zero regression).
+       */
+      kind: "lead_path_pr_first";
+      sliceId: string;
+      sessionId: string;
+      outcome: LeadInvokerOutcome;
     };
 
 export interface TurnWorkerCfg {
@@ -164,6 +179,14 @@ export interface TurnWorkerCfg {
    * consecutive `lr_invoke/lr_exit_status: ... exitStatus=timeout` failures.
    */
   failurePolicy?: FailurePolicy;
+  /**
+   * Phase 2 (cli-spicy-anchor.md): when set to `"pr_first"` AND
+   * `deps.leadInvoker` is provided, the turn worker delegates the lead
+   * invocation to the PR-first orchestrator instead of running the legacy
+   * envelope path. Default is `"envelope"` (legacy) so existing tests and
+   * production paths are unaffected.
+   */
+  leadPath?: "envelope" | "pr_first";
 }
 
 export interface TurnWorkerDeps {
@@ -192,7 +215,18 @@ export interface TurnWorkerDeps {
    * `mkdtempSync(tmpdir(), ...)` path (preserves test backward compat).
    */
   workdirRoot?: string;
+  /**
+   * Phase 2 PR-first lead orchestrator (cli-spicy-anchor.md §1, §8). Wired
+   * only when `cfg.leadPath === "pr_first"` — see TurnWorkerCfg. When unset,
+   * the legacy envelope path runs unchanged (zero regression).
+   */
+  leadInvoker?: LeadInvoker;
 }
+
+export type TurnWorkerLeadPathOutcome = {
+  kind: "lead_path_pr_first";
+  outcome: LeadInvokerOutcome;
+};
 
 export async function runOneInnerTurn(
   deps: TurnWorkerDeps,
@@ -277,6 +311,81 @@ async function runOneInnerTurnInner(
   turnIndex: number,
   deps: TurnWorkerDeps,
 ): Promise<TurnWorkerOutcome> {
+
+  // Phase 2 lead-path branch (cli-spicy-anchor.md §1, §8). Activates only
+  // when both `cfg.leadPath === "pr_first"` and `deps.leadInvoker` are
+  // supplied — default keeps the legacy envelope path (zero regression).
+  if (deps.cfg.leadPath === "pr_first" && deps.leadInvoker != null) {
+    const drafts: ManifestEntryDraft[] = [
+      {
+        object_kind: "slice",
+        object_id: slice.slice_id,
+        fetch_scope: "body",
+        required: true,
+        purpose: "primary input",
+      },
+      {
+        object_kind: "code_tree",
+        object_id: slice.slice_id,
+        fetch_scope: "tree",
+        required: false,
+        purpose: "self-fetch",
+      },
+    ];
+    const prep = await deps.workspace.prepareInnerWorkspace({
+      sliceId: slice.slice_id,
+      trunkBaseRevision: slice.trunk_base_revision,
+    });
+    const pinResolver = new SliceLocalPinResolver(slice, prep.headBefore);
+    const manifestBuilder = new ManifestBuilder(pinResolver, deps.clock);
+    const manifest = await manifestBuilder.build({
+      session_id: session.session_id,
+      turn_index: turnIndex,
+      purpose: "tdd_build",
+      target: { object_kind: "slice", object_id: slice.slice_id },
+      drafts,
+    });
+    await deps.store.writeAtomic(
+      layout.manifest(manifest.manifest_id),
+      JSON.stringify(manifest, null, 2),
+    );
+    const leadOutcome = await deps.leadInvoker.invoke({
+      agentProfileId: "forge",
+      agentRoleInSession: "lead",
+      parentLoop: "inner",
+      phaseOrPurpose: "tdd_build",
+      sessionId: session.session_id,
+      turnIndex,
+      sliceId: slice.slice_id,
+      trunkBaseRevision: slice.trunk_base_revision,
+      branch: `slice/${slice.slice_id}`,
+      parentKind: "slice",
+      parentId: slice.slice_id,
+      parentPhase: null,
+      existingSurface: null,
+      manifest,
+      manifestBuilder,
+      envelopeIdempotency: {
+        scope: "per_turn",
+        parts: {
+          session_id: session.session_id,
+          turn_index: turnIndex,
+          agent_profile_id: "forge",
+          manifest_id: manifest.manifest_id,
+          input_revision_pins: manifest.entries.map((e) => e.revision_pin),
+        },
+      },
+      runtimeMetadata: { workspace_pin_before: prep.headBefore },
+      prTitle: `slice ${slice.slice_id} build`,
+      latestVerificationRunId: null,
+    });
+    return {
+      kind: "lead_path_pr_first",
+      sliceId: slice.slice_id,
+      sessionId: session.session_id,
+      outcome: leadOutcome,
+    };
+  }
 
   // Step 3 — Workspace prep
   const prep = await deps.workspace.prepareInnerWorkspace({

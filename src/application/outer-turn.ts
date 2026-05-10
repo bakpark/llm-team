@@ -64,6 +64,7 @@ import {
   type ContextBudget,
 } from "../config/target-schema.js";
 import { callAgent } from "./agent-io.js";
+import type { LeadInvoker, LeadInvokerOutcome } from "./lead-invoker.js";
 import {
   classifyAgentIoStageFailure,
   countPromptComposeFailuresFromLedger,
@@ -142,6 +143,17 @@ export interface OuterTurnDeps {
    * Optional for backward compatibility with existing tests.
    */
   workdirRoot?: string;
+  /**
+   * Phase 2 (cli-spicy-anchor.md §1, §8): when set to `"pr_first"` AND
+   * `leadInvoker` is provided, the lead role's invocation routes through
+   * `LeadInvoker.invoke` instead of the legacy envelope path. Reviewers
+   * (sentinel/scout in non-Validation phases) keep the legacy path in
+   * Phase 2; their PR-first migration ships in PR-5. Default value
+   * (`"envelope"` / undefined) preserves zero-regression semantics for all
+   * existing tests and production wiring.
+   */
+  leadPath?: "envelope" | "pr_first";
+  leadInvoker?: LeadInvoker;
 }
 
 export type RunOneOuterTurnOutcome =
@@ -176,6 +188,20 @@ export type RunOneOuterTurnOutcome =
       milestoneId: string;
       phase: OuterPhase;
       detail: string;
+    }
+  | {
+      /**
+       * Phase 2 (cli-spicy-anchor.md): the outer turn was configured with
+       * `leadPath === "pr_first"` and `leadInvoker` was supplied, so the
+       * lead's invocation went through `LeadInvoker.invoke` instead of the
+       * legacy envelope/persistSessionTurn path. Default config keeps the
+       * legacy path (zero regression).
+       */
+      kind: "lead_path_pr_first";
+      sessionId: string;
+      milestoneId: string;
+      phase: OuterPhase;
+      outcome: LeadInvokerOutcome;
     };
 
 export async function runOneOuterTurn(
@@ -451,6 +477,60 @@ export async function runOneOuterTurn(
     layout.manifest(manifest.manifest_id),
     JSON.stringify(manifest, null, 2),
   );
+
+  // Phase 2 lead-path branch (cli-spicy-anchor.md §1, §8). Activates only
+  // for lead-role invocations when `deps.leadPath === "pr_first"` and a
+  // `leadInvoker` is wired. Reviewer-role invocations always run the
+  // legacy envelope path in Phase 2 — reviewer PR-first migration ships
+  // in PR-5. Default config keeps the legacy path for everyone.
+  if (
+    deps.leadPath === "pr_first" &&
+    deps.leadInvoker != null &&
+    agentRoleInSession === "lead"
+  ) {
+    const branch =
+      phase === "Planning"
+        ? `plan/${milestone.milestone_id}`
+        : phase === "Validation"
+          ? `validate/${milestone.milestone_id}`
+          : `spec/${milestone.milestone_id}/discovery`;
+    const leadOutcome = await deps.leadInvoker.invoke({
+      agentProfileId,
+      agentRoleInSession,
+      parentLoop: "outer",
+      phaseOrPurpose: phase,
+      sessionId: session.session_id,
+      turnIndex,
+      sliceId: milestone.milestone_id,
+      trunkBaseRevision: session.workspace_revision_pin,
+      branch,
+      parentKind: "milestone",
+      parentId: milestone.milestone_id,
+      parentPhase: phase,
+      existingSurface: null,
+      manifest,
+      manifestBuilder,
+      envelopeIdempotency: {
+        scope: "per_turn",
+        parts: {
+          session_id: session.session_id,
+          turn_index: turnIndex,
+          agent_profile_id: agentProfileId,
+          manifest_id: manifest.manifest_id,
+          input_revision_pins: manifest.entries.map((e) => e.revision_pin),
+        },
+      },
+      runtimeMetadata: { milestone_id: milestone.milestone_id, phase },
+      prTitle: `${phase} ${milestone.milestone_id}`,
+    });
+    return {
+      kind: "lead_path_pr_first",
+      sessionId: session.session_id,
+      milestoneId: milestone.milestone_id,
+      phase,
+      outcome: leadOutcome,
+    };
+  }
 
   const agentOut = await callAgent(
     {
