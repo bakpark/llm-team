@@ -83,6 +83,21 @@ export type RetryDecision =
   | { decision: "continue"; remaining: number }
   | { decision: "escalate"; reason: string };
 
+/**
+ * Shared whitelist of non-ok `ExitStatus` values that contribute to the
+ * `inner_lr_invoke_timeout` cap. Single source of truth used by both
+ * `classifyAgentIoStageFailure` (live outcome) and
+ * `countLrInvokeTimeoutsFromLedger` (replay after daemon restart) so the
+ * two paths stay in lockstep when a new ExitStatus is added (qwen review
+ * P0-1 — divergent strategies caused undercount risk on ledger replay).
+ *
+ * Authority: ports/llm-runner.ts §ExitStatus. Adding a new ExitStatus
+ * requires extending this pattern AND adding a regression test mapping it
+ * to `inner_lr_invoke_timeout`.
+ */
+const NON_OK_EXIT_STATUS_PATTERN =
+  /exitStatus=(timeout|transport_error|adapter_unavailable|malformed_output)/;
+
 export function evaluateRetry(
   classification: FailureClassification,
   currentCount: number,
@@ -146,14 +161,15 @@ export function classifyAgentIoStageFailure(outcome: {
   // self-host outer session could spawn 416 `transport_error` invocations in
   // 11 minutes without escalation. The detail string produced by
   // `agent-io.callAgent` always begins with `LlmRunner exitStatus=<status>`
-  // for non-ok exits (see agent-io.ts §lr_invoke return), so we match on
-  // that prefix and exclude only the `=ok` case (which never reaches this
-  // branch in practice but is excluded defensively).
+  // for non-ok exits (see agent-io.ts §lr_invoke return). qwen review P0-1:
+  // share the explicit whitelist with `countLrInvokeTimeoutsFromLedger` so
+  // the live classifier and the ledger replay path agree on which
+  // ExitStatus values count toward the cap (otherwise a new ExitStatus
+  // would silently undercount on daemon-restart replay).
   if (
     outcome.stage === "lr_invoke" &&
     typeof outcome.detail === "string" &&
-    outcome.detail.startsWith("LlmRunner exitStatus=") &&
-    !outcome.detail.startsWith("LlmRunner exitStatus=ok")
+    NON_OK_EXIT_STATUS_PATTERN.test(outcome.detail)
   ) {
     return "inner_lr_invoke_timeout";
   }
@@ -231,13 +247,10 @@ export async function countLrInvokeTimeoutsFromLedger(
     if (
       typeof row.result_detail === "string" &&
       row.result_detail.startsWith("lr_invoke/lr_exit_status") &&
-      // Match every non-ok ExitStatus. The `=ok` exclusion is defensive —
-      // a successful invocation never produces a result="invalid" row, but
-      // pinning the predicate to a positive ExitStatus prefix prevents an
-      // unrelated `lr_exit_status` extension from being counted by accident.
-      /exitStatus=(timeout|transport_error|adapter_unavailable|malformed_output)/.test(
-        row.result_detail,
-      )
+      // qwen review P0-1: share the explicit whitelist with
+      // `classifyAgentIoStageFailure` so a new ExitStatus added to the
+      // live classifier is also counted on ledger replay.
+      NON_OK_EXIT_STATUS_PATTERN.test(row.result_detail)
     ) {
       count += 1;
     }

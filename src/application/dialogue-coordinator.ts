@@ -814,6 +814,11 @@ async function reanimateAwaitingRevalidationReviewSession(
   session: DialogueSessionT,
   deps: Pick<CoordinatorDeps, "store" | "clock" | "ledger" | "callerId" | "targetId">,
 ): Promise<DialogueSessionT | null> {
+  // qwen review P1-3: collect the verified live pin values so the
+  // recover ledger row records the pin set the resolver actually
+  // confirmed (audit trail). Empty when the session has no prior turns
+  // — there is nothing to verify in that case.
+  const verifiedPins: string[] = [];
   if (session.current_turn_index > 0) {
     const lastIdx = session.current_turn_index - 1;
     const turnBody = await deps.store.readText(
@@ -848,6 +853,7 @@ async function reanimateAwaitingRevalidationReviewSession(
         purpose: entry.purpose,
       });
       if (livePin !== entry.revision_pin) return null;
+      verifiedPins.push(livePin);
     }
   }
   // Pins matched (or no turns yet) → flip back to SESSION_OPEN under lock.
@@ -892,7 +898,7 @@ async function reanimateAwaitingRevalidationReviewSession(
     final_verdict: null,
     caller_id: deps.callerId,
     manifest_id: null,
-    input_revision_pins: [],
+    input_revision_pins: verifiedPins,
     output_hash: null,
     verification_run_id: sliceMerge.verification_run_id,
     metric_run_id: null,

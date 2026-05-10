@@ -201,7 +201,11 @@ describe("incident-10 — inner_lr_invoke_timeout retry cap", () => {
     // only `exitStatus=timeout` did, allowing transport_error /
     // adapter_unavailable / malformed_output loops to spawn unbounded
     // invocations (self-host evidence E5: 416 transport_error spawns / 11min).
+    // qwen review P0-2: include `timeout` (the original incident-10 case)
+    // explicitly so the backward-compatible mapping is asserted alongside
+    // the generalized non-ok ExitStatus values.
     for (const status of [
+      "timeout",
       "transport_error",
       "adapter_unavailable",
       "malformed_output",

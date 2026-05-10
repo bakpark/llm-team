@@ -309,7 +309,10 @@ async function writePromptUnderWorkdir(
 ): Promise<string> {
   const path = join(workdirRoot, "prompts", sessionId, `${turnIndex}.md`);
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, body, "utf8");
+  // qwen review P1-2: pin the mode explicitly so the prompt body does not
+  // depend on the operator's umask. Mirrors `writeAtomic` (store/fs.ts)
+  // which also writes 0o644.
+  await writeFile(path, body, { encoding: "utf8", mode: 0o644 });
   return path;
 }
 
