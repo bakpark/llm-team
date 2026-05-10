@@ -242,6 +242,51 @@ describe("dispatchOuterOutcome — Planning", () => {
     ).rejects.toThrow(/invalid DAG/);
   });
 
+  it("incident-7: plan_accept with empty slicesToPersist refuses to advance milestone", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_DELIVERY_PLANNING");
+    await expect(
+      dispatchOuterOutcome(
+        {
+          parent_loop: "outer",
+          phase_or_purpose: "Planning",
+          session_state: "CONVERGED",
+          final_verdict: "plan_accept",
+          milestone: m,
+          sessionId: SESS_ID,
+          // slicesToPersist intentionally omitted (incident-7 production
+          // symptom: dispatcher receives empty/missing slice payload).
+        },
+        d,
+      ),
+    ).rejects.toThrow(/empty slice DAG/);
+
+    // Milestone state must NOT have advanced.
+    const reread = Milestone.parse(
+      JSON.parse((await d.store.readText(layout.milestone(M_ID)))!),
+    );
+    expect(reread.state).toBe("M_DELIVERY_PLANNING");
+  });
+
+  it("incident-7: plan_accept with explicit empty slices array also refuses to advance", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_DELIVERY_PLANNING");
+    await expect(
+      dispatchOuterOutcome(
+        {
+          parent_loop: "outer",
+          phase_or_purpose: "Planning",
+          session_state: "CONVERGED",
+          final_verdict: "plan_accept",
+          milestone: m,
+          sessionId: SESS_ID,
+          slicesToPersist: [],
+        },
+        d,
+      ),
+    ).rejects.toThrow(/empty slice DAG/);
+  });
+
   it("TIMEOUT → escalate", async () => {
     const d = deps();
     const m = await seedMilestone(d.store, "M_DELIVERY_PLANNING");

@@ -328,6 +328,18 @@ async function runOuterEffect(
     }
     case "persist_slice_dag_and_promote": {
       const slices = input.slicesToPersist ?? [];
+      // incident-7 P0 guard: refuse to silently advance the milestone to
+      // M_DELIVERY_BUILDING with an empty slice DAG. If the dispatch input
+      // arrives without `slicesToPersist`, the caller (outer-turn
+      // `buildDispatchInput`) failed to recover the lead's
+      // `output_kind=slice_decomposition` payload from the session. Throw
+      // so the failure is visible in the ledger and the milestone stays in
+      // M_DELIVERY_PLANNING for the next outer-coordinator cycle to retry.
+      if (slices.length === 0) {
+        throw new Error(
+          "persist_slice_dag_and_promote: refusing to advance milestone with empty slice DAG (incident-7)",
+        );
+      }
       const validation = validateSliceDag(slices);
       if (!validation.ok) {
         // Per SOC-SLICE-DEPENDENCIES Cycle Detection: lead contribution FAIL.

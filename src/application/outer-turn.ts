@@ -1518,7 +1518,26 @@ async function buildDispatchInput(
       return body == null ? base : { ...base, specProposalBody: body };
     }
     case "Planning": {
-      const slices = parseSlices(artifacts, milestone.milestone_id);
+      let slices = parseSlices(artifacts, milestone.milestone_id);
+      if (slices.length === 0) {
+        // incident-7: when convergence is triggered by the second reviewer's
+        // plan_accept (rather than a lead final), `leadEnvelope` resolves to
+        // the most recent lead turn — but in some sessions that envelope's
+        // artifacts.slices is absent (e.g. the lead's draft was at an earlier
+        // turn and a later contribution by the same lead is what
+        // `lastLeadEnvelope` returned). Fall back to scanning persisted
+        // turns for the most recent envelope with
+        // `output_kind=slice_decomposition` and read its artifacts.slices.
+        // Without this fallback the dispatcher receives `slicesToPersist=[]`
+        // and (per the defensive guard in caller-dispatch-outer.ts) refuses
+        // to silently advance the milestone with an empty DAG.
+        const fallback = await findSliceDecompositionSlices(
+          session.session_id,
+          milestone.milestone_id,
+          deps.store,
+        );
+        slices = fallback;
+      }
       return slices.length > 0 ? { ...base, slicesToPersist: slices } : base;
     }
     case "Validation": {
@@ -1620,6 +1639,48 @@ function parseStringArray(
   const v = rec[key];
   if (!Array.isArray(v)) return [];
   return v.filter((x): x is string => typeof x === "string" && x.length > 0);
+}
+
+/**
+ * incident-7 fallback: scan persisted session turns from highest index down
+ * for an envelope whose `output_kind === "slice_decomposition"` and return
+ * the parsed `artifacts.slices`. Used when the lead envelope reached via
+ * `lastLeadEnvelope` does not carry the slice payload (e.g. convergence
+ * triggered by a reviewer verdict, not a lead final).
+ */
+export async function findSliceDecompositionSlices(
+  sessionId: string,
+  milestoneId: string,
+  store: StorePort,
+): Promise<SliceT[]> {
+  // Walk backwards using the layout — turn files are zero-indexed and dense
+  // up to current_turn_index, but the absolute upper bound is unknown here.
+  // Probe a generous bound and stop once we hit a missing turn after the
+  // first hit (i.e. consecutive misses). Use a loop until readText returns
+  // null on a high index, then descend.
+  const indices: number[] = [];
+  for (let i = 0; i < 256; i++) {
+    const body = await store.readText(layout.sessionTurn(sessionId, i));
+    if (body == null) break;
+    indices.push(i);
+  }
+  for (let i = indices.length - 1; i >= 0; i--) {
+    const body = await store.readText(layout.sessionTurn(sessionId, indices[i]!));
+    if (body == null) continue;
+    let parsed: { output_envelope?: { output_kind?: string; artifacts?: unknown } };
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      continue;
+    }
+    const env = parsed.output_envelope;
+    if (env == null) continue;
+    if (env.output_kind !== "slice_decomposition") continue;
+    const artifacts = (env.artifacts ?? {}) as Record<string, unknown>;
+    const slices = parseSlices(artifacts, milestoneId);
+    if (slices.length > 0) return slices;
+  }
+  return [];
 }
 
 function parseSlices(
