@@ -97,4 +97,38 @@ export interface WorkspacePort {
    * slice is persisted.
    */
   verifyRef(ref: string): Promise<boolean>;
+
+  // ---------- Phase 1 additive surface (cli-spicy-anchor.md §7-2) ----------
+
+  /**
+   * Walk back at most `depth` commits on `branch` looking for a commit whose
+   * message contains a trailer line `<trailerKey>: <value>`. Returns the
+   * commit SHA if found, null otherwise. Used by `commit_op` outbox probe.
+   */
+  findCommitByTrailer(input: {
+    branch: string;
+    trailerKey: string;
+    value: string;
+    depth?: number;
+  }): Promise<string | null>;
+
+  /**
+   * Returns the SHA at `<remote>/<branch>` (best-effort). Used by `push_op`
+   * outbox probe to confirm a push that may have succeeded server-side
+   * before the daemon crashed.
+   */
+  getRemoteHeadSha(input: { remote: string; branch: string }): Promise<string | null>;
+
+  /**
+   * Reset the slice worktree to `sha` (`git reset --hard <sha>`). Used by
+   * lead-invoker to recover a dirty worktree before retrying parse/call.
+   * The supplied sha must already be reachable from the worktree.
+   */
+  resetHard(input: { sliceId: string; sha: string }): Promise<void>;
+
+  /**
+   * `git clean -fdx` inside the slice worktree. Pairs with `resetHard` for
+   * dirty-worktree retry recovery (cli-spicy-anchor.md §8 retry cap).
+   */
+  cleanForce(input: { sliceId: string }): Promise<void>;
 }

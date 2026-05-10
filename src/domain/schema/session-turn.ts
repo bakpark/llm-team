@@ -57,6 +57,13 @@ export const SessionTurn = z
     caller_routing_decision: CallerRoutingDecision.nullable().default(null),
     workspace_commit: z.string().min(1).nullable().default(null),
     verification_result_ref: UlidString.nullable().default(null),
+    /**
+     * Phase 1 (cli-spicy-anchor.md §5): additive pointers introduced for the
+     * PR-first surface. Both fields are optional; legacy turns leave them
+     * absent and existing readers ignore unknown fields harmlessly.
+     */
+    output_receipt_ref: z.string().min(1).optional(),
+    output_intent_ref: z.string().min(1).optional(),
     recorded_at: z.string().datetime(),
   })
   .strict();

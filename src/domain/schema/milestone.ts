@@ -32,6 +32,21 @@ export const Milestone = z
     spec_revision_pin: z.string().min(1).nullable(),
     context_summary_id: UlidString.nullable(),
     external_refs: z.array(ExternalRef).default(() => []),
+    /**
+     * Phase 1 (cli-spicy-anchor.md §2, §5): optional per-phase ReviewSurface
+     * pointers. Discovery/Specification share the same surface (same-PR
+     * continuation), so two of the four slots will frequently reference the
+     * same id. Caller paths only — Phase 2/3 wires the writers.
+     */
+    review_surface_ids: z
+      .object({
+        discovery: UlidString.optional(),
+        specification: UlidString.optional(),
+        planning: UlidString.optional(),
+        validation: UlidString.optional(),
+      })
+      .strict()
+      .optional(),
     created_at: z.string().datetime(),
     updated_at: z.string().datetime(),
   })

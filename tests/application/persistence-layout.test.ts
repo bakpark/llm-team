@@ -107,4 +107,24 @@ describe("persistence-layout", () => {
     expect(() => layout.humanSignal("a/b")).toThrow();
     expect(() => layout.humanSignal("")).toThrow();
   });
+
+  it("phase 1 PR-first paths (review_surfaces, intents, outbox)", () => {
+    const RS_ID = "01HZRS0000000000000000000A";
+    expect(layout.reviewSurface(RS_ID)).toBe(`review_surfaces/${RS_ID}.json`);
+    expect(layout.agentRunReceipt(SESS_ID, 0)).toBe(
+      `intents/${SESS_ID}-0.receipt.json`,
+    );
+    expect(layout.leadIntent(SESS_ID, 1)).toBe(
+      `intents/${SESS_ID}-1.lead.json`,
+    );
+    expect(layout.reviewerIntent(SESS_ID, 2)).toBe(
+      `intents/${SESS_ID}-2.review.json`,
+    );
+    expect(layout.outboxPayload("commit_op", "01HZK00000000000000000000A")).toBe(
+      `outbox/commit_op-01HZK00000000000000000000A.json`,
+    );
+    expect(() => layout.reviewSurface("not-a-ulid")).toThrow(/ULID/);
+    expect(() => layout.outboxPayload("BAD-Op", "k")).toThrow(/snake_case/);
+    expect(() => layout.outboxPayload("commit_op", "../bad")).toThrow();
+  });
 });

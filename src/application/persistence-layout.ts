@@ -124,4 +124,29 @@ export const layout = {
     if (rel.startsWith("archive/")) return rel;
     return `archive/${rel}`;
   },
+  // ---------- Phase 1 PR-first additions (cli-spicy-anchor.md §5, §7) ----------
+  reviewSurface(reviewSurfaceId: string): string {
+    return `review_surfaces/${requireUlid("review_surface_id", reviewSurfaceId)}.json`;
+  },
+  agentRunReceipt(sessionId: string, turnIndex: number): string {
+    return `intents/${requireUlid("session_id", sessionId)}-${requireTurnIndex(turnIndex)}.receipt.json`;
+  },
+  leadIntent(sessionId: string, turnIndex: number): string {
+    return `intents/${requireUlid("session_id", sessionId)}-${requireTurnIndex(turnIndex)}.lead.json`;
+  },
+  reviewerIntent(sessionId: string, turnIndex: number): string {
+    return `intents/${requireUlid("session_id", sessionId)}-${requireTurnIndex(turnIndex)}.review.json`;
+  },
+  /**
+   * Optional outbox payload mirror — the ledger is the authoritative
+   * record, so this directory is used only by adapters that want to
+   * persist large payloads keyed by (op_kind, idempotency_key).
+   */
+  outboxPayload(opKind: string, idempotencyKey: string): string {
+    if (!/^[a-z][a-z0-9_]*$/.test(opKind))
+      throw new Error("op_kind must be snake_case");
+    if (!/^[A-Za-z0-9._:\-]+$/.test(idempotencyKey))
+      throw new Error("idempotency_key must match [A-Za-z0-9._:-]+");
+    return `outbox/${opKind}-${idempotencyKey}.json`;
+  },
 } as const;
