@@ -12,10 +12,11 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { FsStore } from "../../src/adapters/store/fs.js";
 import {
   CONTROL_STATE_PATH,
+  __resetDaemonPreludeMemo,
   applyControlSignal,
   readControlState,
   runDaemonPrelude,
@@ -255,6 +256,10 @@ describe("applyControlSignal", () => {
 });
 
 describe("runDaemonPrelude", () => {
+  beforeEach(() => {
+    __resetDaemonPreludeMemo();
+  });
+
   it("RUNNING → proceed, no ledger row", async () => {
     const store = new FsStore({ workdir: workdir() });
     const clock = new FixedClock(Date.parse("2026-05-09T00:00:00.000Z"));
@@ -299,7 +304,7 @@ describe("runDaemonPrelude", () => {
     expect(rows[0]?.result_detail).toMatch(/sig-pause/);
   });
 
-  it("PAUSED noop is idempotent across daemon loops (same signal_id)", async () => {
+  it("incident-2 P0 #5: PAUSED loop self-throttles — only one noop row per (role, signal_id, state)", async () => {
     const store = new FsStore({ workdir: workdir() });
     const clock = new FixedClock(Date.parse("2026-05-09T00:00:00.000Z"));
     const ledger = makeLedger(store);
@@ -307,6 +312,34 @@ describe("runDaemonPrelude", () => {
       store,
       clock,
       controlSignal({ signal_id: "sig-pause", signal_type: "pause" }),
+    );
+    for (let i = 0; i < 5; i++) {
+      const out = await runDaemonPrelude({
+        store,
+        clock,
+        ledger,
+        callerId: "test-caller",
+        targetId: "test-target",
+        role: "turn-worker",
+      });
+      expect(out.action).toBe("paused");
+    }
+    const rows = await readLedgerRows(store);
+    // Per-process prelude memo prevents repeat appends for the same
+    // (signal_id, state) tuple. A new pause signal would still produce a
+    // fresh row.
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.result).toBe("noop");
+  });
+
+  it("incident-2 P0 #5: prelude memo re-emits when signal_id changes (resume → re-pause)", async () => {
+    const store = new FsStore({ workdir: workdir() });
+    const clock = new FixedClock(Date.parse("2026-05-09T00:00:00.000Z"));
+    const ledger = makeLedger(store);
+    await applyControlSignal(
+      store,
+      clock,
+      controlSignal({ signal_id: "sig-pause-1", signal_type: "pause" }),
     );
     await runDaemonPrelude({
       store,
@@ -316,6 +349,16 @@ describe("runDaemonPrelude", () => {
       targetId: "test-target",
       role: "turn-worker",
     });
+    await applyControlSignal(
+      store,
+      clock,
+      controlSignal({ signal_id: "sig-resume-1", signal_type: "resume" }),
+    );
+    await applyControlSignal(
+      store,
+      clock,
+      controlSignal({ signal_id: "sig-pause-2", signal_type: "pause" }),
+    );
     await runDaemonPrelude({
       store,
       clock,
@@ -325,14 +368,9 @@ describe("runDaemonPrelude", () => {
       role: "turn-worker",
     });
     const rows = await readLedgerRows(store);
-    // Both rows persist as `noop` — the ledger's dedup only folds
-    // applied/recovered/rolled_back/escalated. Operators see one row per
-    // loop they spent paused, but the shared idempotency_key keeps the
-    // audit trail traceable to a single signal.
-    expect(rows.length).toBe(2);
-    expect(rows[0]?.result).toBe("noop");
-    expect(rows[1]?.result).toBe("noop");
-    expect(rows[0]?.idempotency_key).toBe(rows[1]?.idempotency_key);
+    const noopRows = rows.filter((r) => r.result === "noop");
+    expect(noopRows.length).toBe(2);
+    expect(noopRows[0]?.idempotency_key).not.toBe(noopRows[1]?.idempotency_key);
   });
 
   it("a different role with the same paused signal emits its own noop row", async () => {

@@ -216,6 +216,21 @@ export type DaemonPreludeOutcome =
   | { action: "stopped"; state: "STOPPED" };
 
 /**
+ * Per-process memo of the last (signal_id, state) tuple a given role emitted
+ * a prelude noop for. Lets a paused daemon's tight loop self-throttle
+ * without round-tripping through the ledger every cycle (incident-2 P0 #5).
+ * A fresh pause signal — i.e. a different signal_id or a state change —
+ * still causes a single emission. Belt-and-suspenders with the ledger's
+ * own duplicate-skip; the row never even reaches appendTransition.
+ */
+const preludeEmitMemo = new Map<string, { signal_id: string; state: ControlState }>();
+
+/** Visible for tests: reset the per-process prelude memo. */
+export function __resetDaemonPreludeMemo(): void {
+  preludeEmitMemo.clear();
+}
+
+/**
  * Daemon pre-pickup gate. Reads the current control state and, when
  * non-RUNNING, emits a `pause_resume` ledger row capturing the noop pickup.
  * The drain itself runs *outside* this helper so callers can supply the
@@ -229,6 +244,21 @@ export async function runDaemonPrelude(
     return { action: "proceed", state: "RUNNING" };
   }
   const action = current.state === "PAUSED" ? "paused" : "stopped";
+  // Self-throttle: skip the appendTransition entirely when this role
+  // already emitted a noop row for the same (signal_id, state) tuple in
+  // this process. The ledger's duplicate path would also skip persistence,
+  // but avoiding the lock+replay round-trip here matters when a paused
+  // daemon polls aggressively.
+  const memo = preludeEmitMemo.get(deps.role);
+  if (
+    memo != null &&
+    memo.signal_id === current.signal_id &&
+    memo.state === current.state
+  ) {
+    return action === "paused"
+      ? { action: "paused", state: "PAUSED" }
+      : { action: "stopped", state: "STOPPED" };
+  }
   // RGC-SIGNALS: emit a noop row so operators see the gate firing. The
   // idempotency key folds together (role, signal_id, state) so a daemon
   // looping while paused does not flood the ledger with duplicates per
@@ -272,6 +302,10 @@ export async function runDaemonPrelude(
     result: "noop",
     result_detail: `paused:role=${deps.role}:signal_id=${current.signal_id}`,
     timestamp: deps.clock.isoNow(),
+  });
+  preludeEmitMemo.set(deps.role, {
+    signal_id: current.signal_id,
+    state: current.state,
   });
   return action === "paused"
     ? { action: "paused", state: "PAUSED" }

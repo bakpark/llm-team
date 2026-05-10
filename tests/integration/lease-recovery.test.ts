@@ -488,13 +488,13 @@ describe("Phase 4 lease + recovery integration", () => {
     });
     expect(second.expiredLeases.length).toBe(1);
     const afterRows = readLedgerRows(workdir).length;
-    // The duplicate recover rows must be absorbed by ledger dedup. They
-    // still get APPENDED but with result=duplicate.
+    // incident-2 P0: duplicate rows are now NOT persisted to disk. The
+    // ledger absorbs them entirely — file row count stays flat across the
+    // re-run sweep.
+    expect(afterRows).toBe(beforeRows);
     const duplicateRows = readLedgerRows(workdir).filter(
       (r) => r.result === "duplicate",
     );
-    expect(duplicateRows.length).toBeGreaterThanOrEqual(1);
-    void beforeRows;
-    void afterRows;
+    expect(duplicateRows.length).toBe(0);
   });
 });

@@ -146,7 +146,7 @@ describe("FileLedger", () => {
     expect(r2.row.audit_hash).not.toBe(r1.row.audit_hash);
   });
 
-  it("records a duplicate row per SOC-IDEMPOTENCY when key reappears", async () => {
+  it("incident-2 P0: duplicate idempotency_key is NOT persisted to disk", async () => {
     const store = new MemoryStore();
     const ledger = new FileLedger({ store });
     const r1 = await ledger.appendTransition(baseRow({}));
@@ -158,23 +158,64 @@ describe("FileLedger", () => {
     expect(r2.result).toBe("duplicate");
     expect(r2.row.result).toBe("duplicate");
     expect(r2.row.idempotency_key).toBe(r1.row.idempotency_key);
+    // Synthesized duplicate row's audit_hash_prev still points at the
+    // current head (r1) for caller diagnostics, but the row itself is
+    // never written.
     expect(r2.row.audit_hash_prev).toBe(r1.row.audit_hash);
     const body = (await store.readText(LEDGER_TRANSITIONS_PATH)) ?? "";
-    expect(body.split("\n").filter(Boolean).length).toBe(2);
+    expect(body.split("\n").filter(Boolean).length).toBe(1);
   });
 
-  it("subsequent applied rows chain off the duplicate row", async () => {
+  it("incident-2 P0: subsequent applied rows chain off the last APPLIED row, not the duplicate", async () => {
     const store = new MemoryStore();
     const ledger = new FileLedger({ store });
     const r1 = await ledger.appendTransition(baseRow({}));
     const r2 = await ledger.appendTransition(
       baseRow({ transition_id: TX_ID_2 }),
     );
+    expect(r2.result).toBe("duplicate");
     const r3 = await ledger.appendTransition(
       baseRow({ transition_id: TX_ID_3, idempotency_key: "k3" }),
     );
     expect(r3.result).toBe("applied");
-    expect(r3.row.audit_hash_prev).toBe(r2.row.audit_hash);
+    expect(r3.row.audit_hash_prev).toBe(r1.row.audit_hash);
+    // File has exactly r1 + r3 (duplicate r2 was not persisted).
+    const body = (await store.readText(LEDGER_TRANSITIONS_PATH)) ?? "";
+    expect(body.split("\n").filter(Boolean).length).toBe(2);
+  });
+
+  it("incident-2 P0: 1000 same-key duplicate appends grow the file exactly once (cache smoke)", async () => {
+    const store = new MemoryStore();
+    const ledger = new FileLedger({ store });
+    await ledger.appendTransition(baseRow({}));
+    for (let i = 0; i < 1000; i++) {
+      const out = await ledger.appendTransition(
+        baseRow({ transition_id: TX_ID_2 }),
+      );
+      expect(out.result).toBe("duplicate");
+    }
+    const body = (await store.readText(LEDGER_TRANSITIONS_PATH)) ?? "";
+    expect(body.split("\n").filter(Boolean).length).toBe(1);
+  });
+
+  it("incident-2 P0: external writer (sibling FileLedger) invalidates the cache on next append", async () => {
+    const store = new MemoryStore();
+    const a = new FileLedger({ store });
+    const b = new FileLedger({ store });
+    // Prime a's cache.
+    const ra = await a.appendTransition(baseRow({}));
+    // b writes through the same store while a still holds a stale cache.
+    const rb = await b.appendTransition(
+      baseRow({ transition_id: TX_ID_2, idempotency_key: "k2" }),
+    );
+    expect(rb.row.audit_hash_prev).toBe(ra.row.audit_hash);
+    // a's next append must observe b's row (file size diverged from
+    // a.lastReplayedSize → forced re-replay).
+    const ra2 = await a.appendTransition(
+      baseRow({ transition_id: TX_ID_3, idempotency_key: "k3" }),
+    );
+    expect(ra2.result).toBe("applied");
+    expect(ra2.row.audit_hash_prev).toBe(rb.row.audit_hash);
   });
 
   it("auditHashSeed alters the chain", async () => {
@@ -196,12 +237,12 @@ describe("FileLedger", () => {
     expect(await ledger2.lastAuditHash()).toBe(r1.row.audit_hash);
     const dup = await ledger2.appendTransition(baseRow({}));
     expect(dup.result).toBe("duplicate");
-    // Duplicate row chains forward — head advances.
-    expect(await ledger2.lastAuditHash()).toBe(dup.row.audit_hash);
+    // incident-2 P0: duplicate is not persisted, head does NOT advance.
+    expect(await ledger2.lastAuditHash()).toBe(r1.row.audit_hash);
     const r3 = await ledger2.appendTransition(
       baseRow({ transition_id: TX_ID_3, idempotency_key: "k3" }),
     );
-    expect(r3.row.audit_hash_prev).toBe(dup.row.audit_hash);
+    expect(r3.row.audit_hash_prev).toBe(r1.row.audit_hash);
   });
 
   it("multi-instance writers see the latest head via withFileLock (no fork)", async () => {

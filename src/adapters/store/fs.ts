@@ -19,7 +19,7 @@ export interface FsStoreOptions {
   workdir: string;
   /** Whether to fsync the parent directory after rename. Default true. */
   fsyncDir?: boolean;
-  /** Max time to wait for cross-process lock acquisition. Default 5000ms. */
+  /** Max time to wait for cross-process lock acquisition. Default 30000ms. */
   lockTimeoutMs?: number;
   /** Lockdir age beyond which the lock is treated as stale. Default 60_000ms. */
   staleLockMs?: number;
@@ -46,7 +46,7 @@ export class FsStore implements StorePort {
   constructor(opts: FsStoreOptions) {
     this.workdir = resolve(opts.workdir);
     this.fsyncDir = opts.fsyncDir ?? true;
-    this.lockTimeoutMs = opts.lockTimeoutMs ?? 5_000;
+    this.lockTimeoutMs = opts.lockTimeoutMs ?? 30_000;
     this.staleLockMs = opts.staleLockMs ?? 60_000;
     this.raceWindowMs = opts.raceWindowMs ?? 1_000;
   }

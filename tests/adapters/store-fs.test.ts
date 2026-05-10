@@ -113,6 +113,16 @@ describe("FsStore", () => {
     expect(counter).toBe(20);
   });
 
+  it("incident-2 P0: lockTimeoutMs default is 30000ms", async () => {
+    const s = new FsStore({ workdir });
+    // Read the private field via index access. The constructor stores the
+    // resolved option so any future reorganization that changes the default
+    // away from 30s will break this sanity check.
+    expect((s as unknown as { lockTimeoutMs: number }).lockTimeoutMs).toBe(
+      30_000,
+    );
+  });
+
   it("orphaned lock is reclaimed within raceWindowMs (P2-6)", async () => {
     // Custom store with short raceWindowMs so the test runs quickly. The
     // production default is 1000ms; we use 50ms here to exercise the same
