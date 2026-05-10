@@ -35,6 +35,7 @@ import {
 } from "../domain/schema/slice.js";
 import type { ClockPort } from "../ports/clock.js";
 import type { StorePort } from "../ports/store.js";
+import type { WorkspacePort } from "../ports/workspace.js";
 import { idempotencyKey } from "./idempotency.js";
 import {
   recordDecision,
@@ -51,6 +52,14 @@ export interface OuterDispatchDeps {
   ledger: LedgerAppender;
   callerId: string;
   targetId: string;
+  /**
+   * incident-8: workspace adapter used by Specification convergence (pin
+   * milestone.spec_revision_pin to the real trunk HEAD on M_SPEC_APPROVED)
+   * and by `persist_slice_dag_and_promote` (verify each slice's
+   * trunk_base_revision before persistence). Optional for backward
+   * compatibility — when absent, the dispatch logic skips both safeguards.
+   */
+  workspace?: WorkspacePort;
 }
 
 export interface OuterDispatchInput {
@@ -295,11 +304,26 @@ async function runOuterEffect(
     }
     case "promote_milestone_to_spec_approved": {
       await persistSpecProposal(input, deps);
-      await transitionMilestoneInLock(liveMilestone, "M_SPEC_APPROVED", deps, {
-        phase: "Specification",
-        sessionId: input.sessionId,
-        finalVerdict: input.final_verdict,
-      });
+      // incident-8: capture the workspace HEAD at convergence so subsequent
+      // outer sessions (Planning) and the slice DAG that lead drafts can pin
+      // to a real ref. Without this, Planning's session_open path resolved
+      // milestone.spec_revision_pin=null → trunk HEAD anyway, but the slice
+      // DAG persisted by lead carried whatever string lead happened to emit
+      // (typically the leaked placeholder from before the pin was real).
+      const specPin =
+        liveMilestone.spec_revision_pin ??
+        (deps.workspace != null ? await deps.workspace.getTrunkHead() : null);
+      await transitionMilestoneInLock(
+        liveMilestone,
+        "M_SPEC_APPROVED",
+        deps,
+        {
+          phase: "Specification",
+          sessionId: input.sessionId,
+          finalVerdict: input.final_verdict,
+        },
+        specPin != null ? { spec_revision_pin: specPin } : undefined,
+      );
       return {
         effect: "promote_milestone_to_spec_approved",
         milestone_state: "M_SPEC_APPROVED",
@@ -356,6 +380,39 @@ async function runOuterEffect(
         throw new Error(
           "persist_slice_dag_and_promote: invariant violation — empty slice DAG should have been rejected upstream (incident-7)",
         );
+      }
+      // incident-8: verify each slice's trunk_base_revision before any
+      // write. The placeholder string "outer-trunk-base" leaked from the
+      // session_open fallback (now fixed) and crashed turn-worker on
+      // `git worktree add ... outer-trunk-base`. Reject the DAG and return
+      // `noop_planning_request_changes` so the milestone stays in
+      // M_DELIVERY_PLANNING for the next Planning re-engagement (consistent
+      // with incident-7 P0 #2 — refuse to advance on invalid input rather
+      // than crash the daemon).
+      if (deps.workspace != null) {
+        const invalid: string[] = [];
+        for (const s of slices) {
+          const ok = await deps.workspace.verifyRef(s.trunk_base_revision);
+          if (!ok) invalid.push(`${s.slice_id}=${s.trunk_base_revision}`);
+        }
+        if (invalid.length > 0) {
+          await emitMilestoneLedgerRow(
+            liveMilestone.state,
+            liveMilestone,
+            liveMilestone.state,
+            deps,
+            {
+              phase: "Planning",
+              sessionId: input.sessionId,
+              finalVerdict: input.final_verdict,
+              result: "noop",
+            },
+          );
+          return {
+            effect: "noop_planning_request_changes",
+            milestone_state: "M_DELIVERY_PLANNING",
+          };
+        }
       }
       const validation = validateSliceDag(slices);
       if (!validation.ok) {
@@ -609,11 +666,21 @@ async function transitionMilestoneInLock(
     finalVerdict: string | null;
     result?: "applied" | "noop" | "escalated";
   },
-  patch?: { context_summary_id?: string },
+  patch?: { context_summary_id?: string; spec_revision_pin?: string },
 ): Promise<MilestoneT> {
   const path = layout.milestone(liveMilestone.milestone_id);
   const fromState = liveMilestone.state;
-  if (liveMilestone.state === toState && patch?.context_summary_id == null) {
+  // incident-8: spec_revision_pin upgrades (null → real SHA) must trigger a
+  // writeAtomic even when state is unchanged on idempotent replay. Same
+  // rationale as the existing context_summary_id branch.
+  const pinChanged =
+    patch?.spec_revision_pin != null &&
+    patch.spec_revision_pin !== liveMilestone.spec_revision_pin;
+  if (
+    liveMilestone.state === toState &&
+    patch?.context_summary_id == null &&
+    !pinChanged
+  ) {
     // Idempotent re-run. Skip writeAtomic (no content change) but still
     // emit the ledger row so the audit trail is complete.
     await emitMilestoneLedgerRow(fromState, liveMilestone, toState, deps, ctx);
@@ -624,6 +691,8 @@ async function transitionMilestoneInLock(
     state: toState,
     context_summary_id:
       patch?.context_summary_id ?? liveMilestone.context_summary_id ?? null,
+    spec_revision_pin:
+      patch?.spec_revision_pin ?? liveMilestone.spec_revision_pin ?? null,
     updated_at: deps.clock.isoNow(),
   });
   await deps.store.writeAtomic(path, JSON.stringify(updated, null, 2));

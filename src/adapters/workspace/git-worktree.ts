@@ -132,6 +132,26 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     return { result: "clean", commit: head };
   }
 
+  async getTrunkHead(): Promise<string> {
+    // incident-8: resolve the repo-root HEAD so outer-loop callers can pin
+    // sessions / slices to a real git ref instead of a placeholder string.
+    return (await git(this.cfg.repoRoot, ["rev-parse", "HEAD"])).stdout.trim();
+  }
+
+  async verifyRef(ref: string): Promise<boolean> {
+    // incident-8: `rev-parse --verify <ref>^{commit}` returns exit 0 only if
+    // <ref> resolves to a real commit object. Any non-zero exit (including
+    // the "fatal: invalid reference" case that crashed turn-worker) is
+    // surfaced as `false` so the caller can refuse to persist the slice.
+    if (typeof ref !== "string" || ref.length === 0) return false;
+    try {
+      await git(this.cfg.repoRoot, ["rev-parse", "--verify", `${ref}^{commit}`]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private worktreePath(sliceId: string): string {
     return resolve(this.cfg.workspacesDir, sliceId);
   }

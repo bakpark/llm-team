@@ -1,8 +1,12 @@
 /**
  * Phase 5b.1: caller-dispatch-outer effect tests.
  */
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MemoryStore } from "../../src/adapters/store/memory.js";
+import { FakeWorkspace } from "../../src/adapters/workspace/fake.js";
 import { dispatchOuterOutcome } from "../../src/application/caller-dispatch-outer.js";
 import { FileLedger } from "../../src/application/ledger.js";
 import { layout } from "../../src/application/persistence-layout.js";
@@ -166,6 +170,33 @@ describe("dispatchOuterOutcome — Specification", () => {
     );
     expect(reread.state).toBe("M_SPEC_APPROVED");
   });
+
+  it("incident-8: spec_accept captures workspace HEAD onto milestone.spec_revision_pin", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_SPECIFICATION_DRAFT");
+    expect(m.spec_revision_pin).toBeNull();
+    const workspaceDir = mkdtempSync(join(tmpdir(), "dispatch-outer-"));
+    const fixtureHead = "a".repeat(40);
+    const workspace = new FakeWorkspace(workspaceDir, { trunkHead: fixtureHead });
+    const r = await dispatchOuterOutcome(
+      {
+        parent_loop: "outer",
+        phase_or_purpose: "Specification",
+        session_state: "CONVERGED",
+        final_verdict: "spec_accept",
+        milestone: m,
+        sessionId: SESS_ID,
+        specProposalBody: "scenarios",
+      },
+      { ...d, workspace },
+    );
+    expect(r.kind).toBe("applied");
+    const reread = Milestone.parse(
+      JSON.parse((await d.store.readText(layout.milestone(M_ID)))!),
+    );
+    expect(reread.state).toBe("M_SPEC_APPROVED");
+    expect(reread.spec_revision_pin).toBe(fixtureHead);
+  });
 });
 
 describe("dispatchOuterOutcome — Planning", () => {
@@ -272,6 +303,71 @@ describe("dispatchOuterOutcome — Planning", () => {
       JSON.parse((await d.store.readText(layout.milestone(M_ID)))!),
     );
     expect(reread.state).toBe("M_DELIVERY_PLANNING");
+  });
+
+  it("incident-8: plan_accept with bogus slice trunk_base_revision returns noop_planning_request_changes (does NOT advance milestone)", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_DELIVERY_PLANNING");
+    // makeSlice() emits trunk_base_revision="trunk-base"; allowlist nothing
+    // so verifyRef() returns false for every slice → reject.
+    const workspaceDir = mkdtempSync(join(tmpdir(), "dispatch-outer-"));
+    const workspace = new FakeWorkspace(workspaceDir, {
+      knownRefs: new Set<string>(), // explicit empty: every ref invalid
+    });
+    const slices = [makeSlice(A), makeSlice(B, [{ slice_id: A, edge_type: "blocks" }])];
+    const r = await dispatchOuterOutcome(
+      {
+        parent_loop: "outer",
+        phase_or_purpose: "Planning",
+        session_state: "CONVERGED",
+        final_verdict: "plan_accept",
+        milestone: m,
+        sessionId: SESS_ID,
+        slicesToPersist: slices,
+      },
+      { ...d, workspace },
+    );
+    expect(r.kind).toBe("applied");
+    if (r.kind !== "applied") return;
+    expect(r.details[0]).toMatchObject({
+      effect: "noop_planning_request_changes",
+      milestone_state: "M_DELIVERY_PLANNING",
+    });
+    // No slice was persisted.
+    const sliceA = await d.store.readText(layout.slice(A));
+    expect(sliceA).toBeNull();
+    // Milestone stays in PLANNING.
+    const reread = Milestone.parse(
+      JSON.parse((await d.store.readText(layout.milestone(M_ID)))!),
+    );
+    expect(reread.state).toBe("M_DELIVERY_PLANNING");
+  });
+
+  it("incident-8: plan_accept with valid trunk_base_revision passes verifyRef and advances", async () => {
+    const d = deps();
+    const m = await seedMilestone(d.store, "M_DELIVERY_PLANNING");
+    const workspaceDir = mkdtempSync(join(tmpdir(), "dispatch-outer-"));
+    const workspace = new FakeWorkspace(workspaceDir, {
+      knownRefs: new Set(["trunk-base"]),
+    });
+    const slices = [makeSlice(A)];
+    const r = await dispatchOuterOutcome(
+      {
+        parent_loop: "outer",
+        phase_or_purpose: "Planning",
+        session_state: "CONVERGED",
+        final_verdict: "plan_accept",
+        milestone: m,
+        sessionId: SESS_ID,
+        slicesToPersist: slices,
+      },
+      { ...d, workspace },
+    );
+    expect(r.kind).toBe("applied");
+    const reread = Milestone.parse(
+      JSON.parse((await d.store.readText(layout.milestone(M_ID)))!),
+    );
+    expect(reread.state).toBe("M_DELIVERY_BUILDING");
   });
 
   it("incident-7: plan_accept with explicit empty slices array also returns no_match", async () => {

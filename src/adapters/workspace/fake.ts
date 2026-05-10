@@ -28,17 +28,37 @@ export interface FakeWorkspaceOptions {
    * with `result: "conflict"`. Tests use this to drive the SM_STALE branch.
    */
   rebaseConflictSlices?: ReadonlySet<string>;
+  /**
+   * incident-8: deterministic SHA returned by `getTrunkHead()`. Defaults to
+   * a 40-char fixture hash so tests can assert pin propagation without
+   * shelling out to git.
+   */
+  trunkHead?: string;
+  /**
+   * incident-8: refs that `verifyRef()` should accept. By default the fake
+   * accepts the configured `trunkHead` (or its default) plus any value
+   * supplied to `prepareInnerWorkspace` so existing test fixtures keep
+   * working without explicit allowlisting.
+   */
+  knownRefs?: ReadonlySet<string>;
 }
+
+const DEFAULT_FAKE_TRUNK_HEAD = "0".repeat(40);
 
 export class FakeWorkspace implements WorkspacePort {
   private readonly state = new Map<string, { head: string; commits: number }>();
   private readonly rebaseConflictSlices: ReadonlySet<string>;
+  private readonly trunkHead: string;
+  private readonly knownRefs: Set<string>;
 
   constructor(
     private readonly rootDir: string,
     options: FakeWorkspaceOptions = {},
   ) {
     this.rebaseConflictSlices = options.rebaseConflictSlices ?? new Set();
+    this.trunkHead = options.trunkHead ?? DEFAULT_FAKE_TRUNK_HEAD;
+    this.knownRefs = new Set(options.knownRefs ?? []);
+    this.knownRefs.add(this.trunkHead);
   }
 
   async prepareInnerWorkspace(input: {
@@ -54,6 +74,10 @@ export class FakeWorkspace implements WorkspacePort {
         commits: 0,
       });
     }
+    // incident-8: any ref the test seeded as the slice base is treated as a
+    // known ref so subsequent verifyRef() checks succeed without explicit
+    // configuration.
+    this.knownRefs.add(input.trunkBaseRevision);
     return {
       agentCwd: dir,
       headBefore: this.state.get(input.sliceId)!.head,
@@ -104,6 +128,15 @@ export class FakeWorkspace implements WorkspacePort {
     const dir = resolve(this.rootDir, `${input.sliceId}-readonly`);
     mkdirSync(dir, { recursive: true });
     return { agentCwd: dir, headBefore: input.revision };
+  }
+
+  async getTrunkHead(): Promise<string> {
+    return this.trunkHead;
+  }
+
+  async verifyRef(ref: string): Promise<boolean> {
+    if (typeof ref !== "string" || ref.length === 0) return false;
+    return this.knownRefs.has(ref);
   }
 
   async rebaseOntoTrunk(input: {

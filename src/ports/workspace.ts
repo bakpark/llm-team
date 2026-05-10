@@ -79,4 +79,22 @@ export interface WorkspacePort {
     sliceId: string;
     trunkRevision: string;
   }): Promise<RebaseOutcome>;
+
+  /**
+   * incident-8: returns the current trunk HEAD revision (the SHA the inner
+   * agent will branch from when `prepareInnerWorkspace` is invoked next).
+   * Used by outer-loop callers to capture a real revision pin instead of
+   * propagating placeholder strings into Slice.trunk_base_revision /
+   * DialogueSession.workspace_revision_pin.
+   */
+  getTrunkHead(): Promise<string>;
+
+  /**
+   * incident-8: verify that the supplied string resolves to a real git
+   * commit object. Returns true when the ref exists, false otherwise.
+   * Used to gate `persist_slice_dag_and_promote` — slice DAG envelopes
+   * carrying a placeholder `trunk_base_revision` are rejected before any
+   * slice is persisted.
+   */
+  verifyRef(ref: string): Promise<boolean>;
 }

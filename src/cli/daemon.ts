@@ -445,6 +445,7 @@ async function main(argv: readonly string[]): Promise<number> {
             ledger,
             callerId: args.callerId,
             targetId: cfg.identity.target_id,
+            workspace,
           });
           outcomeJson = JSON.stringify({ role: args.role, outcome });
           break;

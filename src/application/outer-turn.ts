@@ -58,6 +58,7 @@ import type { CallerRoutingDecision } from "../domain/schema/session-turn.js";
 import type { ClockPort } from "../ports/clock.js";
 import type { LlmRunnerPort } from "../ports/llm-runner.js";
 import type { StorePort } from "../ports/store.js";
+import type { WorkspacePort } from "../ports/workspace.js";
 import { callAgent } from "./agent-io.js";
 import {
   classifyAgentIoStageFailure,
@@ -114,6 +115,15 @@ export interface OuterTurnDeps {
    * shot CLI invocations work without explicit configuration.
    */
   agentCwd?: string;
+  /**
+   * incident-8: workspace adapter used to resolve the real trunk HEAD when
+   * milestone.spec_revision_pin is null (session_open path) and to verify
+   * slice trunk_base_revision values before persistence
+   * (`persist_slice_dag_and_promote`). Optional for backward compatibility
+   * with existing test deps that do not exercise these code paths; when
+   * absent the legacy fallback is used (placeholder pin / no verification).
+   */
+  workspace?: WorkspacePort;
 }
 
 export type RunOneOuterTurnOutcome =
@@ -184,12 +194,20 @@ export async function runOneOuterTurn(
   if (ready.existingSession != null) {
     session = ready.existingSession;
   } else {
+    // incident-8: when the milestone has not yet pinned a spec revision,
+    // resolve the workspace's real trunk HEAD instead of substituting the
+    // placeholder string "outer-trunk-base". The placeholder leaked through
+    // session.workspace_revision_pin → atlas envelopes → slice DAG and
+    // crashed turn-worker on `git worktree add ... outer-trunk-base`.
+    const workspaceRevisionPin = await resolveOuterWorkspaceRevisionPin(
+      milestone.spec_revision_pin,
+      deps.workspace,
+    );
     session = await openOuterSession(
       {
         milestone,
         phase,
-        workspaceRevisionPin:
-          milestone.spec_revision_pin ?? "outer-trunk-base",
+        workspaceRevisionPin,
       },
       {
         store: deps.store,
@@ -722,6 +740,7 @@ async function finalizeConvergedSession(
     ledger: deps.ledger,
     callerId: deps.callerId,
     targetId: deps.targetId,
+    workspace: deps.workspace,
   });
 
   // P0-6 fix (PR #69 review): treat `illegal_transition` the same as
@@ -882,6 +901,7 @@ async function finalizeNonConvergedSession(
     ledger: deps.ledger,
     callerId: deps.callerId,
     targetId: deps.targetId,
+    workspace: deps.workspace,
   });
 
   if (dispatch.kind === "no_match" || dispatch.kind === "illegal_transition") {
@@ -1460,6 +1480,27 @@ async function loadOuterTurnSummaries(
     }
   }
   return { summaries, evidence };
+}
+
+/**
+ * incident-8 helper. Resolve the workspace revision pin recorded on a new
+ * outer DialogueSession. Order:
+ *   1. milestone.spec_revision_pin (already-pinned spec carry-over).
+ *   2. workspace.getTrunkHead() — real repo HEAD.
+ *   3. Throw — refuse to substitute the legacy "outer-trunk-base"
+ *      placeholder. Callers without a workspace adapter can supply one in
+ *      OuterTurnDeps; tests that don't exercise this path retain the legacy
+ *      behaviour by seeding milestone.spec_revision_pin in their fixtures.
+ */
+async function resolveOuterWorkspaceRevisionPin(
+  specPin: string | null,
+  workspace: WorkspacePort | undefined,
+): Promise<string> {
+  if (specPin != null && specPin.length > 0) return specPin;
+  if (workspace != null) return await workspace.getTrunkHead();
+  throw new Error(
+    "outer-turn: cannot resolve workspace_revision_pin — milestone.spec_revision_pin is null and no WorkspacePort was supplied (incident-8)",
+  );
 }
 
 function lastLeadVerdict(turns: readonly TurnSummary[]): string | null {
