@@ -405,7 +405,9 @@ async function resolveSliceMergeBody(
   }
   // Project review-relevant fields. Caller / lease metadata
   // (lease_token, merged_by_caller_id, audit_chain_predecessor_id,
-  // external_refs, timestamps) does not help reviewers decide.
+  // external_refs, created_at, updated_at) does not help reviewers
+  // decide. `merged_at` IS retained — reviewers benefit from knowing
+  // whether/when the merge has already taken effect.
   const projection: Record<string, unknown> = {
     slice_merge_id: sliceMerge.slice_merge_id,
     slice_id: sliceMerge.slice_id,

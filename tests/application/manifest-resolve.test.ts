@@ -922,6 +922,62 @@ describe("resolveManifestEntries — slice_merge body (incident-11)", () => {
     expect(resolved).toHaveLength(1);
     expect(resolved[0]!.manifest_entry_index).toBe(0);
   });
+
+  // PR #112 review P1-2: parity with `(slice, body)` corrupt-JSON branch.
+  it("throws MissingRequiredManifestEntryError when slice_merge JSON is corrupt and required", async () => {
+    const store = new MemoryStore();
+    await seedSmMilestone(store);
+    await store.writeAtomic(layout.sliceMerge(SM_ID), "{not-json");
+    const manifest = manifestWithSliceMerge({
+      object_kind: "slice_merge",
+      object_id: SM_ID,
+      fetch_scope: "body",
+      revision_pin: SM_PRE_MERGE_REV,
+      required: true,
+      purpose: "review subject",
+    });
+    await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
+      /required manifest entry not found/,
+    );
+  });
+
+  it("throws MissingRequiredManifestEntryError when slice_merge fails Zod parse and required", async () => {
+    const store = new MemoryStore();
+    await seedSmMilestone(store);
+    // Valid JSON but missing required SliceMerge fields → Zod throws.
+    await store.writeAtomic(
+      layout.sliceMerge(SM_ID),
+      JSON.stringify({ slice_merge_id: SM_ID }),
+    );
+    const manifest = manifestWithSliceMerge({
+      object_kind: "slice_merge",
+      object_id: SM_ID,
+      fetch_scope: "body",
+      revision_pin: SM_PRE_MERGE_REV,
+      required: true,
+      purpose: "review subject",
+    });
+    await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
+      /required manifest entry not found/,
+    );
+  });
+
+  it("returns null for non-required slice_merge body when JSON is corrupt", async () => {
+    const store = new MemoryStore();
+    await seedSmMilestone(store);
+    await store.writeAtomic(layout.sliceMerge(SM_ID), "{not-json");
+    const manifest = manifestWithSliceMerge({
+      object_kind: "slice_merge",
+      object_id: SM_ID,
+      fetch_scope: "body",
+      revision_pin: SM_PRE_MERGE_REV,
+      required: false,
+      purpose: "advisory",
+    });
+    const resolved = await resolveManifestEntries(store, manifest);
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]!.manifest_entry_index).toBe(0);
+  });
 });
 
 describe("resolveManifestEntries — verification_run body (incident-11)", () => {
@@ -1089,6 +1145,61 @@ describe("resolveManifestEntries — verification_run body (incident-11)", () =>
   it("silently skips non-required verification_run body when file is absent", async () => {
     const store = new MemoryStore();
     await seedVrMilestone(store);
+    const manifest = manifestWithRun({
+      object_kind: "verification_run",
+      object_id: VR_ID,
+      fetch_scope: "body",
+      revision_pin: VR_ID,
+      required: false,
+      purpose: "advisory evidence",
+    });
+    const resolved = await resolveManifestEntries(store, manifest);
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]!.manifest_entry_index).toBe(0);
+  });
+
+  // PR #112 review P1-2: parity with `(slice, body)` corrupt-JSON branch.
+  it("throws MissingRequiredManifestEntryError when verification_run JSON is corrupt and required", async () => {
+    const store = new MemoryStore();
+    await seedVrMilestone(store);
+    await store.writeAtomic(layout.verification(VR_ID), "{not-json");
+    const manifest = manifestWithRun({
+      object_kind: "verification_run",
+      object_id: VR_ID,
+      fetch_scope: "body",
+      revision_pin: VR_ID,
+      required: true,
+      purpose: "evidence",
+    });
+    await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
+      /required manifest entry not found/,
+    );
+  });
+
+  it("throws MissingRequiredManifestEntryError when verification_run fails Zod parse and required", async () => {
+    const store = new MemoryStore();
+    await seedVrMilestone(store);
+    await store.writeAtomic(
+      layout.verification(VR_ID),
+      JSON.stringify({ verification_run_id: VR_ID }),
+    );
+    const manifest = manifestWithRun({
+      object_kind: "verification_run",
+      object_id: VR_ID,
+      fetch_scope: "body",
+      revision_pin: VR_ID,
+      required: true,
+      purpose: "evidence",
+    });
+    await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
+      /required manifest entry not found/,
+    );
+  });
+
+  it("returns null for non-required verification_run body when JSON is corrupt", async () => {
+    const store = new MemoryStore();
+    await seedVrMilestone(store);
+    await store.writeAtomic(layout.verification(VR_ID), "{not-json");
     const manifest = manifestWithRun({
       object_kind: "verification_run",
       object_id: VR_ID,
