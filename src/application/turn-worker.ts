@@ -19,10 +19,16 @@ import type {
   VerificationPort,
 } from "../ports/verification.js";
 import type { WorkspacePort } from "../ports/workspace.js";
-import type { LeaseConfig } from "../config/target-schema.js";
+import {
+  resolveAgentTimeoutSec,
+  type ContextBudget,
+  type FailurePolicy,
+  type LeaseConfig,
+} from "../config/target-schema.js";
 import { callAgent, type AgentIoOutcome } from "./agent-io.js";
 import {
   classifyAgentIoStageFailure,
+  countLrInvokeTimeoutsFromLedger,
   countPromptComposeFailuresFromLedger,
   evaluateRetry,
 } from "./failure-policy.js";
@@ -110,6 +116,20 @@ export type TurnWorkerOutcome =
       detail: string;
     }
   | {
+      /**
+       * incident-10: the inner session has hit the
+       * `inner_lr_invoke_timeout` retry cap (default 5 prior consecutive
+       * `lr_invoke/lr_exit_status: ... exitStatus=timeout` failures). The
+       * worker has flipped the DialogueSession to ABANDONED and appended
+       * the session_finalize ledger row, so the daemon stops picking this
+       * session.
+       */
+      kind: "inner_lr_invoke_escalated";
+      sessionId: string;
+      sliceId: string;
+      detail: string;
+    }
+  | {
       kind: "stale_pins";
       sessionId: string;
       sliceId: string;
@@ -129,6 +149,21 @@ export interface TurnWorkerCfg {
   environmentFingerprint: string;
   workspacePinSourceLabel?: string;
   agentTimeoutSec?: number;
+  /**
+   * incident-10: TCC-CONTEXT-BUDGET map. When provided, the `timeout_sec`
+   * override for `inner.tdd_build` is resolved via `resolveAgentTimeoutSec`
+   * before each `callAgent`. Falls back to `agentTimeoutSec ?? 120` (kept
+   * for backward compatibility with existing tests that do not wire the
+   * budget map).
+   */
+  contextBudget?: ContextBudget;
+  /**
+   * incident-10: TCC-FAILURE-POLICY map. When provided,
+   * `inner_lr_timeout_cap` overrides `DEFAULT_RETRY_CONFIG
+   * .innerLrInvokeTimeoutLimit` for the inner abandon decision after
+   * consecutive `lr_invoke/lr_exit_status: ... exitStatus=timeout` failures.
+   */
+  failurePolicy?: FailurePolicy;
 }
 
 export interface TurnWorkerDeps {
@@ -294,7 +329,12 @@ async function runOneInnerTurnInner(
       manifest,
       workspaceRevisionPin: prep.headBefore,
       agentCwd: prep.agentCwd,
-      timeoutSec: deps.cfg.agentTimeoutSec ?? 120,
+      timeoutSec: resolveAgentTimeoutSec(
+        deps.cfg.contextBudget,
+        "inner",
+        "tdd_build",
+        deps.cfg.agentTimeoutSec,
+      ),
       idempotency: {
         scope: "per_turn",
         parts: {
@@ -306,6 +346,11 @@ async function runOneInnerTurnInner(
         },
       },
       runtimeMetadata: { workspace_pin_before: prep.headBefore },
+      // PR #110 review P1-b (gpt5.5): forward operator
+      // `context_budget` so per-phase `token_hard_cap` reaches
+      // `composePromptWithBudget`. Previously this only fed the
+      // timeout resolver, leaving prompt-budget overrides silent.
+      contextBudget: deps.cfg.contextBudget,
     },
     // incident-9: wire StorePort so `callAgent` resolves the
     // `(slice, body)` manifest entry into the prompt's `# Inputs`
@@ -333,23 +378,62 @@ async function runOneInnerTurnInner(
     // `outer-turn.ts` for the rationale. When prior `prompt_compose`
     // failures for this session reach the cap, mark the session ABANDONED
     // so the inner ready-object selector stops re-picking it.
+    //
+    // incident-10: the same shape applies to runner-level timeouts at the
+    // `lr_invoke` stage — no envelope is produced, so no agent-side streak
+    // (no_progress / regression / scope_violation) advances either. The
+    // operator-tunable `inner_lr_timeout_cap` (default 5) bounds the retry
+    // loop; on cap-hit, the session is ABANDONED via the same finalize
+    // ledger path (with a distinct idempotency tag).
     const classification = classifyAgentIoStageFailure(agentOut);
-    if (classification != null) {
+    if (classification === "prompt_compose_truncation") {
       const totalFailures = await countPromptComposeFailuresFromLedger(
         deps.store,
         session.session_id,
       );
       const decision = evaluateRetry(classification, totalFailures - 1);
       if (decision.decision === "escalate") {
-        await abandonInnerSessionForPromptCompose(
+        await abandonInnerSession(
           deps,
           slice,
           session,
           turnIndex,
           decision.reason,
+          "prompt_compose_truncation",
         );
         return {
           kind: "prompt_compose_escalated",
+          sessionId: session.session_id,
+          sliceId: slice.slice_id,
+          detail: decision.reason,
+        };
+      }
+    } else if (classification === "inner_lr_invoke_timeout") {
+      const totalFailures = await countLrInvokeTimeoutsFromLedger(
+        deps.store,
+        session.session_id,
+      );
+      // Only pass the override field when set — passing
+      // `{ innerLrInvokeTimeoutLimit: undefined }` would clobber the
+      // DEFAULT_RETRY_CONFIG entry in the spread below evaluateRetry.
+      const cap = deps.cfg.failurePolicy?.inner_lr_timeout_cap;
+      const decision =
+        cap != null
+          ? evaluateRetry(classification, totalFailures - 1, {
+              innerLrInvokeTimeoutLimit: cap,
+            })
+          : evaluateRetry(classification, totalFailures - 1);
+      if (decision.decision === "escalate") {
+        await abandonInnerSession(
+          deps,
+          slice,
+          session,
+          turnIndex,
+          decision.reason,
+          "inner_lr_invoke_timeout",
+        );
+        return {
+          kind: "inner_lr_invoke_escalated",
           sessionId: session.session_id,
           sliceId: slice.slice_id,
           detail: decision.reason,
@@ -706,22 +790,34 @@ async function emitInvalidTurn(
 
 /**
  * PR #95 review P0-1 (incident-3): flip a SESSION_OPEN inner session to
- * ABANDONED after the `prompt_compose_truncation` retry cap is hit, and
- * record a session_finalize ledger row so the daemon's pickReadyInnerTurn
- * selector (which guards on `state === "SESSION_OPEN"`) stops re-picking
- * it. The session stays attached to its slice; the slice itself is left
- * in its current state — operator/recovery sweep handles the slice-side
- * cleanup, identical to the existing TIMEOUT path. `abandoned_reason` is
- * `no_progress` because `AbandonedReason` does not have a dedicated
- * `prompt_compose_truncation` value and the semantics align (prompt
- * cannot be composed → no progress is achievable).
+ * ABANDONED after a retry cap is hit, and record a session_finalize ledger
+ * row so the daemon's pickReadyInnerTurn selector (which guards on
+ * `state === "SESSION_OPEN"`) stops re-picking it. `abandoned_reason` is
+ * `no_progress` because `AbandonedReason` does not have a dedicated value
+ * for either incident-3 (`prompt_compose_truncation`) or incident-10
+ * (`inner_lr_invoke_timeout`) — the semantics align (prompt cannot be
+ * composed / runner keeps timing out → no progress is achievable).
+ *
+ * PR #110 review P0 (gpt5.5): the slice MUST also be restored to
+ * SLICE_READY with `current_session_id: null` in the same flow. Otherwise
+ * the slice is left in SLICE_BUILDING pointing at an ABANDONED session,
+ * and the next `pickReadyInnerTurn` re-selects that SLICE_BUILDING slice
+ * (line 76 of ready-object), reads the session metadata at line 100, sees
+ * `state !== "SESSION_OPEN"`, and throws `SessionNotOpenError` — wedging
+ * the slice permanently. Wrapping the slice write in `withFileLock` is
+ * symmetric to `recovery.reanimateSliceIfNeeded` so a concurrent recovery
+ * sweep cannot interleave.
+ *
+ * `tag` differentiates the idempotency key + finalization_decision label so
+ * separate cap-hits do not collide.
  */
-async function abandonInnerSessionForPromptCompose(
+async function abandonInnerSession(
   deps: TurnWorkerDeps,
   slice: SliceT,
   session: DialogueSessionT,
   turnIndex: number,
   reason: string,
+  tag: "prompt_compose_truncation" | "inner_lr_invoke_timeout",
 ): Promise<void> {
   const finalized = DialogueSession.parse({
     ...session,
@@ -735,6 +831,27 @@ async function abandonInnerSessionForPromptCompose(
     layout.sessionMetadata(finalized.session_id),
     JSON.stringify(finalized, null, 2),
   );
+
+  // PR #110 review P0: restore slice → SLICE_READY + clear
+  // current_session_id so `pickReadyInnerTurn` does not re-select a
+  // SLICE_BUILDING slice that points at an ABANDONED session and throw
+  // `SessionNotOpenError`. File-lock symmetry with the success path
+  // (`SLICE_REVIEWING`) and `recovery.reanimateSliceIfNeeded`.
+  const slicePath = layout.slice(slice.slice_id);
+  const previousSliceState = slice.state;
+  await deps.store.withFileLock(slicePath, async () => {
+    const restoredSlice = Slice.parse({
+      ...slice,
+      state: "SLICE_READY",
+      current_session_id: null,
+      updated_at: deps.clock.isoNow(),
+    });
+    await deps.store.writeAtomic(
+      slicePath,
+      JSON.stringify(restoredSlice, null, 2),
+    );
+  });
+
   await deps.ledger.appendTransition({
     transition_id: newMonotonicId(deps.clock.now()),
     target_id: deps.cfg.targetId,
@@ -765,8 +882,52 @@ async function abandonInnerSessionForPromptCompose(
       parts: {
         session_id: finalized.session_id,
         final_verdict: "ABANDONED",
-        finalization_decision: "abandoned:prompt_compose_truncation",
+        finalization_decision: `abandoned:${tag}`,
         workspace_revision_pin_at_convergence: finalized.workspace_revision_pin,
+      },
+    }),
+    lease_token: null,
+    lease_kind: null,
+    result: "applied",
+    result_detail: reason,
+    timestamp: deps.clock.isoNow(),
+  });
+
+  // PR #110 review P0: ledger row for the slice rollback so the audit
+  // trail records the SLICE_BUILDING → SLICE_READY transition that
+  // accompanies the abandonment.
+  await deps.ledger.appendTransition({
+    transition_id: newMonotonicId(deps.clock.now()),
+    target_id: deps.cfg.targetId,
+    object_id: slice.slice_id,
+    object_kind: "slice",
+    from_state: previousSliceState,
+    to_state: "SLICE_READY",
+    loop_kind: "inner",
+    phase: null,
+    slice_id: slice.slice_id,
+    slice_kind: slice.slice_kind,
+    dod_revision: slice.dod_revision_pin,
+    session_id: finalized.session_id,
+    turn_index: null,
+    slot_kind: "delivery",
+    agent_profile_id: "forge",
+    contribution_kind: null,
+    action_kind: "session_progress",
+    final_verdict: null,
+    caller_id: deps.cfg.callerId,
+    manifest_id: null,
+    input_revision_pins: [],
+    output_hash: null,
+    verification_run_id: null,
+    metric_run_id: null,
+    idempotency_key: idempotencyKey({
+      scope: "external_observation",
+      parts: {
+        kind: "abandon_slice_rollback",
+        slice_id: slice.slice_id,
+        session_id: finalized.session_id,
+        tag,
       },
     }),
     lease_token: null,

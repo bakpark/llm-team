@@ -287,6 +287,19 @@ export const ContextBudgetEntry = z
   .object({
     token_hard_cap: z.number().int().positive(),
     soft_warn_pct: z.number().min(0).max(1).optional(),
+    /**
+     * incident-10: per-(parent_loop, phase_or_purpose) wall-clock timeout for
+     * the LlmRunner invocation, in seconds. When omitted, callers fall back
+     * to `TIMEOUT_SEC_DEFAULTS[loop.step]` (see `resolveAgentTimeoutSec`),
+     * then to the caller-supplied ultimate fallback (120s).
+     *
+     * Inner `tdd_build` defaults to 600s because an authoring forge may
+     * legitimately run multi-minute red→green→refactor cycles inside a
+     * single 1-shot — the previous 120s ceiling caused incident-10 (the
+     * forge wrote a 138-line test file but the runner timed out before
+     * envelope emit, looping the daemon on `lr_invoke/lr_exit_status`).
+     */
+    timeout_sec: z.number().int().positive().optional(),
   })
   .strict();
 export type ContextBudgetEntry = z.infer<typeof ContextBudgetEntry>;
@@ -332,6 +345,76 @@ export function resolveContextBudget(
   return CONTEXT_BUDGET_DEFAULTS[parsed.data];
 }
 
+/**
+ * incident-10: architecture defaults for per-phase LlmRunner wall-clock
+ * timeouts (seconds). Outer phases run read-only analysis, middle review
+ * runs evaluator agents, and inner `tdd_build` may legitimately cycle
+ * red→green→refactor for several minutes inside a single 1-shot.
+ */
+export const TIMEOUT_SEC_DEFAULTS: Readonly<Record<LoopStep, number>> =
+  Object.freeze({
+    "outer.Discovery": 120,
+    "outer.Specification": 120,
+    "outer.Planning": 120,
+    "outer.Validation": 120,
+    "middle.review": 180,
+    "middle.merge": 180,
+    "inner.tdd_build": 600,
+  });
+
+/**
+ * Resolves the LlmRunner timeout (seconds) for a `(parent_loop,
+ * phase_or_purpose)` pair. Lookup order:
+ *   1. Per-phase operator override at `cfg[loop.step].timeout_sec`
+ *   2. Caller-supplied legacy `agentTimeoutSec` override (only when
+ *      explicitly set — `undefined` skips this step). PR #110 review P1
+ *      (qwen): keeping legacy operator overrides ahead of architecture
+ *      defaults prevents `agentTimeoutSec: 30` from being silently
+ *      shadowed by `TIMEOUT_SEC_DEFAULTS[loop.step]`.
+ *   3. `TIMEOUT_SEC_DEFAULTS[loop.step]` (if `(loop, step)` is a known LoopStep)
+ *   4. `120` as final last-resort fallback (mirrors the previous default).
+ *
+ * Unlike `resolveContextBudget`, this never returns null — an unknown
+ * (loop, step) falls through to step 2/4. Callers are typically already
+ * inside a `LoopStep`-typed branch, so this is defensive.
+ */
+export function resolveAgentTimeoutSec(
+  cfg: ContextBudget | undefined,
+  parentLoop: string,
+  phaseOrPurpose: string,
+  fallbackSec: number | undefined,
+): number {
+  const key = `${parentLoop}.${phaseOrPurpose}`;
+  const parsed = LoopStep.safeParse(key);
+  if (!parsed.success) return fallbackSec ?? 120;
+  const override = cfg?.[parsed.data]?.timeout_sec;
+  if (override != null && override > 0) return override;
+  if (fallbackSec != null && fallbackSec > 0) return fallbackSec;
+  const def = TIMEOUT_SEC_DEFAULTS[parsed.data];
+  return def ?? 120;
+}
+
+/**
+ * incident-10: operator-tunable retry caps for the inner `lr_invoke` failure
+ * lane. Mirrors the existing `prompt_compose_truncation` limit shape but
+ * lives in target.json (so operators can dial the cap without touching code).
+ *
+ * Only the inner timeout cap is exposed today — this block is a place to grow
+ * additional retry caps as further incidents surface. All fields are optional
+ * with sensible defaults provided by `failure-policy.ts DEFAULT_RETRY_CONFIG`.
+ */
+export const FailurePolicy = z
+  .object({
+    /**
+     * Maximum consecutive `lr_invoke/lr_exit_status` (timeout) failures for an
+     * inner session before it is ABANDONED. Default 5 — see
+     * `failure-policy.ts DEFAULT_RETRY_CONFIG.innerLrInvokeTimeoutLimit`.
+     */
+    inner_lr_timeout_cap: z.number().int().positive().optional(),
+  })
+  .strict();
+export type FailurePolicy = z.infer<typeof FailurePolicy>;
+
 export const TargetConfig = z
   .object({
     identity: Identity,
@@ -349,6 +432,7 @@ export const TargetConfig = z
     dual_track: DualTrack.optional(),
     invariant_enforcement: InvariantEnforcement.optional(),
     context_budget: ContextBudget.optional(),
+    failure_policy: FailurePolicy.optional(),
   })
   .strict();
 
