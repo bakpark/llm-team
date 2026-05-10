@@ -31,6 +31,25 @@ import { estimateTokensFromHeader } from "./manifest-builder.js";
  * phase 5 prompt builders will expand them with knowledge artefacts.
  */
 
+/**
+ * Forbidden top-level container keys at the AGC-OUTPUT envelope root. Shared
+ * between `renderOutputSchema` (prompt directive) and the regression test so
+ * both reference the same source of truth.
+ */
+export const OUTPUT_SCHEMA_FORBIDDEN_KEYS = [
+  "header",
+  "target",
+  "agc_output_version",
+  "next_action_hint",
+  "input_status",
+  "spec_proposal",
+  "task_plan",
+  "slice_decomposition",
+  "patch",
+  "milestone_package",
+  "proposal_artifact",
+] as const;
+
 export interface ComposePromptInput {
   agentProfileId: AgentProfileId;
   agentRoleInSession: AgentRoleInSession;
@@ -113,19 +132,28 @@ function renderOutputSchema(input: ComposePromptInput): string {
     "- `input_revision_pins` (array of strings — at minimum `[workspace_revision_pin]`)",
     "- `summary` (non-empty string — human-readable narrative of what you produced)",
     "",
-    "Optional top-level fields (use null/omit when not applicable):",
-    "- `slice_id`, `slice_kind`, `tdd_phase`, `parent_review_verdict_id`",
+    "Conditionally required top-level fields — set to null only when the",
+    "loop/output_kind permits it (post-enrichment validator enforces these):",
+    "- `slice_id` (ULID): REQUIRED when `parent_loop` ∈ {middle, inner};",
+    "  may be null only for `parent_loop=outer`.",
+    "- `slice_kind` (\"feature\" | \"internal\"): REQUIRED when `parent_loop` ∈",
+    "  {middle, inner}; may be null only for `parent_loop=outer`.",
+    "- `tdd_phase` (\"red_green\" | \"refactor\"): REQUIRED when",
+    "  `parent_loop=inner`; null otherwise.",
+    "- `verdict` ({ result, rationale }): REQUIRED when `output_kind=verdict`",
+    "  or `output_kind=milestone_package`; null otherwise.",
+    "- `failure` ({ type, rationale }): REQUIRED when `output_kind=failure`;",
+    "  null otherwise. The loop-conditional fields above still apply.",
+    "",
+    "Optional top-level fields (use null when not applicable — never omit a key):",
+    "- `parent_review_verdict_id` (ULID | null)",
     "- `artifacts` (record<string, unknown> | null — encode structured details such as",
     "  problem framing, scenarios, scope_boundary, etc. INSIDE this bag, not at root)",
-    "- `verdict` ({ result, rationale } | null) — required when emitting a verdict",
     "- `next_action_request` ({ addressed_to, intent, evidence_request[], proposal_artifact_ref? } | null)",
-    "- `failure` ({ type, rationale } | null) — only when output_kind=\"failure\"",
     "",
-    "Forbidden keys at the root: `header`, `target`, `agc_output_version`,",
-    "`next_action_hint`, `input_status`, and any artifact-specific container",
-    "(`spec_proposal`, `task_plan`, `slice_decomposition`, `patch`,",
-    "`milestone_package`, `proposal_artifact`). Encode artifact details inside",
-    "the `artifacts` record and the human narrative inside `summary`.",
+    `Forbidden keys at the root: ${OUTPUT_SCHEMA_FORBIDDEN_KEYS.map((k) => "`" + k + "`").join(", ")}.`,
+    "Encode artifact details inside the `artifacts` record and the human",
+    "narrative inside `summary`.",
     "",
     "When you need a follow-up turn from another agent, populate",
     "`next_action_request` as `{ addressed_to: <agent_profile_id|\"caller\">,",
@@ -153,28 +181,26 @@ function renderOutputSchema(input: ComposePromptInput): string {
  */
 function buildExampleEnvelope(input: ComposePromptInput): Record<string, unknown> {
   const PLACEHOLDER_OBJECT_ID = "01HZX0000000000000000000EX";
+  const PLACEHOLDER_SLICE_ID = "01HZS00000000000000000000A";
   const role = input.agentRoleInSession;
-  const isOuterDiscoveryLead =
-    input.parentLoop === "outer" &&
-    input.phaseOrPurpose === "Discovery" &&
-    role === "lead";
-  const isOuterReviewerVerdict =
-    input.parentLoop === "outer" &&
-    (input.phaseOrPurpose === "Discovery" ||
-      input.phaseOrPurpose === "Specification" ||
-      input.phaseOrPurpose === "Planning") &&
-    role !== "lead" &&
-    role !== "observer";
-  const isInnerForgeBuild =
-    input.parentLoop === "inner" && input.phaseOrPurpose === "tdd_build";
+  const loop = input.parentLoop;
+  const phase = input.phaseOrPurpose;
+
+  // For middle/inner loops, slice_id + slice_kind are required by the
+  // post-enrichment validator. Pre-fill placeholders so the example shape
+  // survives `parseAgentAuthored -> enrichEnvelope -> validateEnvelope`.
+  const sliceConditional =
+    loop === "middle" || loop === "inner"
+      ? { slice_id: PLACEHOLDER_SLICE_ID, slice_kind: "internal" }
+      : { slice_id: null, slice_kind: null };
 
   const base: Record<string, unknown> = {
     session_id: input.sessionId,
     turn_index: input.turnIndex,
-    parent_loop: input.parentLoop,
-    phase_or_purpose: input.phaseOrPurpose,
-    slice_id: null,
-    slice_kind: null,
+    parent_loop: loop,
+    phase_or_purpose: phase,
+    slice_id: sliceConditional.slice_id,
+    slice_kind: sliceConditional.slice_kind,
     tdd_phase: null,
     agent_profile_id: input.agentProfileId === "human" ? "atlas" : input.agentProfileId,
     agent_role_in_session: role,
@@ -191,35 +217,103 @@ function buildExampleEnvelope(input: ComposePromptInput): Record<string, unknown
     failure: null,
   };
 
-  if (isOuterDiscoveryLead) {
-    base.output_kind = "spec_proposal";
-    base.contribution_kind = "lead_draft";
-    base.artifacts = {
-      problem_framing: "<what user-facing problem this milestone solves>",
-      user_value: "<who benefits and how>",
-      scope_boundary: {
-        in_scope: ["<bullet>"],
-        out_of_scope: ["<bullet>"],
-      },
-    };
-    base.summary =
-      "Spec CP draft: <1–3 sentences summarising problem, user value, and scope>";
-    return base;
-  }
-
-  if (isOuterReviewerVerdict) {
+  // outer reviewer verdicts (Discovery / Specification / Planning).
+  if (
+    loop === "outer" &&
+    role !== "lead" &&
+    role !== "observer" &&
+    (phase === "Discovery" || phase === "Specification" || phase === "Planning")
+  ) {
     base.output_kind = "verdict";
     base.contribution_kind = "review_verdict";
     base.verdict = {
-      result: "request_changes",
+      result: phase === "Planning" ? "request_changes" : "request_changes",
       rationale: "<concrete reason — cite the spec section or AC-ID>",
     };
     base.summary =
-      "Reviewer verdict on the proposed Spec/Plan: request_changes / spec_accept / spec_reject.";
+      "Reviewer verdict on the proposed Spec/Plan: request_changes / accept / reject.";
     return base;
   }
 
-  if (isInnerForgeBuild) {
+  if (loop === "outer" && role === "lead") {
+    if (phase === "Discovery" || phase === "Specification") {
+      base.output_kind = "spec_proposal";
+      base.contribution_kind = "lead_draft";
+      base.artifacts = {
+        problem_framing: "<what user-facing problem this milestone solves>",
+        user_value: "<who benefits and how>",
+        scope_boundary: {
+          in_scope: ["<bullet>"],
+          out_of_scope: ["<bullet>"],
+        },
+      };
+      base.summary =
+        "Spec CP draft: <1–3 sentences summarising problem, user value, and scope>";
+      return base;
+    }
+    if (phase === "Planning") {
+      base.output_kind = "slice_decomposition";
+      base.contribution_kind = "lead_draft";
+      base.artifacts = {
+        slices: [
+          {
+            slice_id: PLACEHOLDER_SLICE_ID,
+            slice_kind: "internal",
+            value_statement: "<what user/internal value this slice delivers>",
+            ac_ids: ["<AC-ID>"],
+            acceptance_tests: [{ path: "<path>", name: "<name>" }],
+            declared_scope: ["<path>"],
+            dependencies: [],
+          },
+        ],
+      };
+      base.summary =
+        "Slice DAG: <count> slices decomposing the approved spec; acyclic.";
+      return base;
+    }
+    if (phase === "Validation") {
+      base.output_kind = "milestone_package";
+      base.contribution_kind = "lead_draft";
+      base.verdict = {
+        result: "PASS",
+        rationale: "<aggregate evidence summary across slices and AC-IDs>",
+      };
+      base.artifacts = {
+        per_slice_evidence: [
+          { slice_id: PLACEHOLDER_SLICE_ID, status: "<verification outcome>" },
+        ],
+      };
+      base.summary =
+        "Validation milestone_package: PASS / FAIL / STALE based on AC coverage.";
+      return base;
+    }
+  }
+
+  if (loop === "middle" && phase === "review") {
+    base.output_kind = "verdict";
+    base.contribution_kind = "review_verdict";
+    base.verdict = {
+      result: "approve",
+      rationale: "<concrete reason — cite the slice AC-ID or test outcome>",
+    };
+    base.summary =
+      "Middle review verdict: approve / request_changes for the slice patch.";
+    return base;
+  }
+
+  if (loop === "middle" && phase === "merge") {
+    // middle.merge has no AGC-CONTRIBUTION-OUTPUTS row for agents — observers
+    // only, and Caller-side merge envelopes go through `session_outcome`.
+    // Provide a generic lead_draft skeleton with placeholder slice fields so
+    // the example shape still parses.
+    base.output_kind = "spec_proposal";
+    base.contribution_kind = "lead_draft";
+    base.summary =
+      "Middle merge observer note: <what merge state was observed>";
+    return base;
+  }
+
+  if (loop === "inner" && phase === "tdd_build") {
     base.output_kind = "patch";
     base.contribution_kind = "lead_draft";
     base.tdd_phase = "red_green";
@@ -371,11 +465,15 @@ const FETCH_SCOPE_DROP_PRIORITY: Record<FetchScope, number> = {
 const ENTRY_FRAMING_TOKENS = 8;
 
 /**
- * Fixed prompt scaffolding (frontmatter + section headers + output schema
- * boilerplate). Empirically the assembled body without entries hovers near
- * 240 chars → ~60 tokens; we round up generously.
+ * Fixed prompt scaffolding (frontmatter + section headers + role-specific
+ * instruction body + Output Schema directives + minimal-valid example
+ * envelope). After the AGC-OUTPUT envelope contract was inlined the
+ * empirical scaffold across all (parent_loop, phase_or_purpose, role)
+ * combinations measured 920–1150 tokens (chars/4) on an empty manifest;
+ * 1200 is the conservative round-up so `composePromptWithBudget` no longer
+ * undercounts and risks bypassing `token_hard_cap`.
  */
-const PROMPT_SCAFFOLD_TOKENS = 96;
+const PROMPT_SCAFFOLD_TOKENS = 1200;
 
 export interface ComposePromptWithBudgetInput extends ComposePromptInput {
   /** Operator override map — when omitted the architecture default applies. */

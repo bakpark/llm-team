@@ -329,8 +329,11 @@ describe("Phase 8a — composePromptWithBudget enforcement", () => {
   });
 
   it("drops low-priority (tree → body+turn_log → body+comments → body) entries first when over cap", () => {
+    // Cap must clear PROMPT_SCAFFOLD_TOKENS (1200) + required body entry +
+    // framing so the post-drop state actually fits — the assertion under
+    // test is the drop ORDERING, not the absolute headroom.
     const tinyCap: ContextBudget = ContextBudget.parse({
-      "inner.tdd_build": { token_hard_cap: 500 },
+      "inner.tdd_build": { token_hard_cap: 1_500 },
     });
     const input = baseInput({
       contextBudget: tinyCap,
@@ -375,7 +378,7 @@ describe("Phase 8a — composePromptWithBudget enforcement", () => {
       expect(droppedScopes[0]).toBe("tree");
       // The required body entry MUST NOT be dropped.
       expect(r.droppedEntries.find((e) => e.required)).toBeUndefined();
-      expect(r.tokenEstimate).toBeLessThanOrEqual(500);
+      expect(r.tokenEstimate).toBeLessThanOrEqual(1_500);
     }
   });
 
