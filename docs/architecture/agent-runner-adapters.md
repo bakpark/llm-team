@@ -13,7 +13,7 @@ adapters/
 
 새 어댑터 (예: `qwen36`, `gpt55`, `github_human_signal`) 는 `adapters/llm_runner/<id>.sh` 로 추가한다. 어댑터 식별자는 [`docs/contracts/target-config-contract.md#TCC-AGENT-PROFILES`](../contracts/target-config-contract.md#TCC-AGENT-PROFILES) 의 `agent_profiles.<id>.runner` 값과 일치해야 한다.
 
-`human` AgentProfile 의 runner 는 사람 신호 입력 어댑터 (예: `github_human_signal`) 로, GitHub Issue comment command (REST `/issues/{n}/comments`, node_id prefix `IC_`) 입력을 contribution envelope 으로 변환한다 ([`사람·GitHub 경계 spec`](../superpowers/specs/2026-05-06-human-github-boundary-contract-design.md) §4.1).
+`human` AgentProfile 의 runner 는 사람 신호 입력 어댑터 (예: `github_human_signal`) 로, GitHub Issue comment command (REST `/issues/{n}/comments`, node_id prefix `IC_`) 입력을 contribution envelope 으로 변환한다 §4.1.
 
 ## 2. 진입 함수와 포트 시그니처 매핑
 
@@ -83,7 +83,7 @@ provider-native 응답 → AGC-OUTPUT envelope 의 normalize 매트릭스는 [`A
 
 `adapters/llm_runner/fake.sh` 는 fixture 응답을 그대로 envelope 으로 출력한다. 이 어댑터는 [`#ARC-ADAPTER-SUBSTITUTION`](../contracts/agent-runner-port-contract.md#ARC-ADAPTER-SUBSTITUTION) 의 *결과 분포 비교 가능* invariant 를 만족하지 않을 수 있으며 (같은 manifest 에 대해 항상 같은 응답을 반환), 그 사실 자체를 *contract 위반이 아니라 테스트 목적의 의도된 좁은 분포* 로 본다. 운영 환경에서는 사용하지 않는다.
 
-Stage 3a (Fake Runner MVP) 는 fake 어댑터의 envelope schema 가 real 어댑터의 *superset* 임을 보장한다 — real 어댑터는 fake 통과 envelope 을 그대로 산출 가능해야 한다 (`docs/superpowers/specs/2026-05-05-loop-based-workflow-design.md` §14).
+Stage 3a (Fake Runner MVP) 는 fake 어댑터의 envelope schema 가 real 어댑터의 *superset* 임을 보장한다 — real 어댑터는 fake 통과 envelope 을 그대로 산출 가능해야 한다 .
 
 ## 6. agent-profile 매핑 흐름
 

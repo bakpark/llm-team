@@ -1,45 +1,66 @@
-# Onboarding Gate
+# Onboarding / Preflight
 
-`run` / `run-once` / `daemon start` 진입점은 target 의 onboarding 체크리스트 (`github-pipeline/v1` preset) 를 hard gate 로 평가한다. block severity 항목이 하나라도 FAIL 이면 exit 2 로 차단한다.
+현재 코드에는 standalone `llm-team onboarding ...` CLI 가 없다. 운영 진입
+전 검증은 target schema validation, healthcheck, workdir/auth 점검을 조합해
+수행한다. `TCC-ONBOARDING` contract 항목은 남아 있지만 runtime
+`TargetConfig` schema 에는 아직 onboarding block 이 wired 되어 있지 않다.
 
-## Inspect / Ack
+## Target Config
+
+1. production target JSON 을 작성한다. 필드별 권장값은
+   [`production-target.md`](production-target.md) 를 따른다.
+2. schema validation 은 `src/application/config-validator.ts` 의
+   `validateOrThrow` 가 기준이다. CLI 진입점도 target load 시 이 validation 을
+   먼저 수행한다.
+3. 운영 전 최소 확인:
 
 ```bash
-llm-team onboarding status <target>           # PASS/FAIL/WARN/SKIP TSV
-llm-team onboarding status <target> --json    # JSON 형식
-llm-team onboarding ack <target> <key> --note "..."
-llm-team onboarding wizard <target>           # TTY 대화형
-llm-team onboarding list-schemas
+npm run typecheck
+npm run healthcheck:stage1 -- --target <target.json>
+npm run healthcheck:stage2 -- --target <target.json>
 ```
 
-ack 가능한 키 목록은 `llm-team onboarding list-schemas` 출력의 6 번째 칼럼.
+live LLM smoke 가 필요한 경우에만 비용 cap 을 설정하고 Stage 3 를 실행한다.
 
-## 게이트 우회
-
-세 가지 우회 수단이 있고 각각 의도가 다르다.
-
-| 수단 | 의도 |
-|---|---|
-| `--dry-run` | 실제 실행 없이 흐름만 확인. 게이트 자체를 건너뜀. |
-| `--allow-incomplete-onboarding` | 운영 권한자가 1 회 강제로 진행. warn 메시지 출력. |
-| `LLM_TEAM_SKIP_ONBOARDING_GATE=1` | 자동화/CI 환경에서 환경변수 우회. warn 메시지 출력. |
-
-## 기존 target migration
-
-본 게이트 도입 이전에 만든 target.yaml 은 `onboarding:` 섹션이 없다. 게이트는 기본값 (`schema=github-pipeline/v1`, `acks={}`) 을 가정해 평가하므로, `run` / `daemon start` 가 갑자기 차단될 수 있다. 기존 target 은 다음 순서로 보강한다.
-
-1. `llm-team onboarding status <target>` 로 현재 FAIL 항목 확인.
-2. 자동 검증 가능한 항목은 환경/파일 시스템 측에서 직접 해결 (예: workdir scaffold 누락이면 `llm-team target init <target>`).
-3. 정책 결정 항목은 `llm-team onboarding ack <target> <key> --note "..."` 로 ack.
-4. 임시 우회가 필요한 자동화 흐름이 있다면 `LLM_TEAM_SKIP_ONBOARDING_GATE=1` 또는 `--allow-incomplete-onboarding` 사용.
+```bash
+LLM_TEAM_LIVE_COST_CAP_USD=0.10 \
+LLM_TEAM_LIVE_DAILY_COST_CAP_USD=1.00 \
+LLM_TEAM_LIVE_HEALTHCHECK=1 \
+npm run healthcheck:stage3 -- --target <target.json> --out <run-dir>
+```
 
 ## 운영 환경 요구
 
-- **`timeout` 바이너리 (GNU coreutils)** 가 PATH 에 있어야 한다. macOS 는 기본 미포함이므로 `brew install coreutils` 후 `timeout` (또는 `gtimeout`) 이 보이는지 확인. 부재 시 `LR_TIMEOUT_SEC>0` cycle 은 어댑터가 exit 66 (`adapter_unavailable`) 으로 fail-fast.
-- **`LLM_TEAM_LR_TIMEOUT_SEC`** 기본값은 600 (10 분). hang 방지용. 디버깅 시 `0` 으로 비활성화 가능.
-- **Cycle bundle (RW 4 역할 진단 자료)** 은 `workdir/<target>/cycles/<Role>-<obj_id>-<hash12>/` 에 영속된다 — `prompt.txt`, `envelope.json`, `lr_meta.json`, `summary.json`, `diff/{pre.head,pre.dirty.diff,after-lr.dirty.diff,applied.diff,post.head,post.dirty.diff}`, 실패 시 `diagnostics.txt` + `attempts/<idx>/`. 디렉토리 권한 0700, 파일 권한 0600. `LLM_TEAM_CYCLE_BUNDLE_DISABLED=1` 로 비활성화 가능. `workdir/` 는 이미 `.gitignore`.
+- Node.js 는 `package.json#engines.node` 기준을 만족해야 한다.
+- `claude`, `codex`, `gh`, `git`, `node` 가 PATH 에 있어야 한다. `jq` 는
+  optional 이다.
+- `timeout` 또는 `gtimeout` 바이너리가 PATH 에 있어야 한다. macOS 는 기본
+  미포함이므로 필요 시 GNU coreutils 를 설치한다.
+- daemon user 와 CLI auth user 를 일치시킨다. 자세한 인증 분기는
+  [`production-runbook.md`](production-runbook.md) 를 따른다.
+- production workdir 는 운영 user 소유 0700 디렉토리로 만든다.
+
+```bash
+install -d -m 0700 "<identity.workdir_path>"
+```
+
+## Runtime Artifacts
+
+- daemon log: `<workdir>/log/daemon.ndjson`
+- daemon role lock: `<workdir>/log/daemon-<role>.pid.lock`
+- runner diagnostics: `${LLM_TEAM_RUNNER_DIAG_DIR}` 또는
+  `${TMPDIR}/llm-team/runner`
+- healthcheck cost ledger:
+  `LLM_TEAM_HEALTHCHECK_COST_LEDGER`, target workdir, 또는
+  `~/.llm-team/healthcheck-cost-ledger.ndjson`
+
+`src/persistence/cycle-bundle-minimal.ts` 는 minimal cycle bundle writer 를
+제공하지만 현재 production CLI path 에는 자동 통합되어 있지 않다. 일반
+운영 디버깅은 runner diagnostics 를 기준으로 한다.
 
 ## See Also
 
-- [`docs/contracts/target-config-contract.md`](../contracts/target-config-contract.md) — `TCC-ONBOARDING` 정의 (스키마, severity, ack 의미).
-- [`docs/operations/cli.md`](cli.md) — 일반 CLI 사용법.
+- [`cli.md`](cli.md) — 현재 TypeScript CLI entrypoint.
+- [`healthcheck.md`](healthcheck.md) — healthcheck stages.
+- [`production-target.md`](production-target.md) — target.json 작성 가이드.
+- [`production-runbook.md`](production-runbook.md) — daemon / 인증 / workdir 운영.

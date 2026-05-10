@@ -81,7 +81,7 @@ worktree → push 사이에 [`#RGC-LEASE-KINDS`](../contracts/reliability-and-ga
 
 ## Repo Bootstrap (1회 실행)
 
-repo 첫 운영 시점에 다음 외부 surface 를 1회 생성한다 — 이후에는 재사용. 본 절은 [`사람·GitHub 경계 spec`](../superpowers/specs/2026-05-06-human-github-boundary-contract-design.md) §4.2 의 Control / Contract Change surface 도입에 대응한다.
+repo 첫 운영 시점에 다음 외부 surface 를 1회 생성한다 — 이후에는 재사용. (사람·GitHub 경계 spec §4.2) 의 Control / Contract Change surface 도입에 대응한다.
 
 | 단계 | 호출 | 외부 효과 |
 |---|---|---|

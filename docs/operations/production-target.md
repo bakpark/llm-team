@@ -45,6 +45,6 @@ production target.json 작성 가이드. 본 문서는 `src/config/target-schema
 ## 검증 절차
 
 1. `validateOrThrow(JSON.parse(...))` 가 throw 없이 반환.
-2. `pre-e2e-checklist.md §G` 체크리스트 통과.
-3. healthcheck Stage 1~2 (`.human/draft/healthcheck-spec.md#M-6`) PASS.
-4. `migration-inventory.md` 의 모든 항목 `applied` 또는 `not_applicable`.
+2. `npm run typecheck` 통과.
+3. healthcheck Stage 1~2 PASS.
+4. live smoke 가 필요하면 비용 cap 설정 후 Stage 3 를 opt-in 으로 실행.

@@ -196,25 +196,57 @@ describe("incident-10 — inner_lr_invoke_timeout retry cap", () => {
     ).toBe("inner_lr_invoke_timeout");
   });
 
-  it("classifyAgentIoStageFailure ignores non-timeout lr_invoke failures", () => {
+  it("classifyAgentIoStageFailure maps every non-ok ExitStatus to inner_lr_invoke_timeout (phase-0-stabilization B)", () => {
+    // All non-ok ExitStatus values now contribute to the cap. Previously
+    // only `exitStatus=timeout` did, allowing transport_error /
+    // adapter_unavailable / malformed_output loops to spawn unbounded
+    // invocations (self-host evidence E5: 416 transport_error spawns / 11min).
+    // qwen review P0-2: include `timeout` (the original incident-10 case)
+    // explicitly so the backward-compatible mapping is asserted alongside
+    // the generalized non-ok ExitStatus values.
+    for (const status of [
+      "timeout",
+      "transport_error",
+      "adapter_unavailable",
+      "malformed_output",
+    ]) {
+      expect(
+        classifyAgentIoStageFailure({
+          ok: false,
+          stage: "lr_invoke",
+          detail: `LlmRunner exitStatus=${status}; envelopeRef=/tmp/x`,
+        }),
+      ).toBe("inner_lr_invoke_timeout");
+    }
+    // Synthetic `=ok` should not be classified — a successful run never
+    // surfaces as ok=false in practice, but the predicate is conservative.
     expect(
       classifyAgentIoStageFailure({
         ok: false,
         stage: "lr_invoke",
-        detail: "LlmRunner exitStatus=spawn_error; envelopeRef=",
+        detail: "LlmRunner exitStatus=ok; envelopeRef=/tmp/x",
       }),
     ).toBeNull();
-    // Bare lr_invoke without detail is also not a timeout signal.
+    // A non-`LlmRunner exitStatus=` detail shape is unmatched (defensive
+    // — protects against an unrelated `lr_invoke` extension surfacing here).
+    expect(
+      classifyAgentIoStageFailure({
+        ok: false,
+        stage: "lr_invoke",
+        detail: "spawn ENOENT",
+      }),
+    ).toBeNull();
+    // Bare lr_invoke without detail does not contribute to the streak.
     expect(
       classifyAgentIoStageFailure({ ok: false, stage: "lr_invoke" }),
     ).toBeNull();
   });
 
-  it("countLrInvokeTimeoutsFromLedger counts only lr_invoke timeout rows for the session", async () => {
+  it("countLrInvokeTimeoutsFromLedger counts every non-ok ExitStatus row for the session (phase-0-stabilization B)", async () => {
     const sessionId = "01HZS00000000000000000000C";
     const otherSession = "01HZS00000000000000000000D";
     const rows = [
-      // matching
+      // matching: every non-ok ExitStatus contributes
       {
         session_id: sessionId,
         result: "invalid",
@@ -225,21 +257,33 @@ describe("incident-10 — inner_lr_invoke_timeout retry cap", () => {
         session_id: sessionId,
         result: "invalid",
         result_detail:
-          "lr_invoke/lr_exit_status: LlmRunner exitStatus=timeout; envelopeRef=/tmp/b",
+          "lr_invoke/lr_exit_status: LlmRunner exitStatus=transport_error; envelopeRef=/tmp/b",
+      },
+      {
+        session_id: sessionId,
+        result: "invalid",
+        result_detail:
+          "lr_invoke/lr_exit_status: LlmRunner exitStatus=adapter_unavailable; envelopeRef=/tmp/c",
+      },
+      {
+        session_id: sessionId,
+        result: "invalid",
+        result_detail:
+          "lr_invoke/lr_exit_status: LlmRunner exitStatus=malformed_output; envelopeRef=/tmp/d",
       },
       // non-matching: not invalid
       {
         session_id: sessionId,
         result: "applied",
         result_detail:
-          "lr_invoke/lr_exit_status: LlmRunner exitStatus=timeout; envelopeRef=/tmp/c",
+          "lr_invoke/lr_exit_status: LlmRunner exitStatus=timeout; envelopeRef=/tmp/e",
       },
-      // non-matching: lr_invoke but not timeout
+      // non-matching: unrelated lr_invoke extension shape
       {
         session_id: sessionId,
         result: "invalid",
         result_detail:
-          "lr_invoke/lr_exit_status: LlmRunner exitStatus=spawn_error; envelopeRef=",
+          "lr_invoke/lr_exit_status: LlmRunner exitStatus=unknown_future; envelopeRef=",
       },
       // non-matching: prompt_compose
       {
@@ -252,7 +296,7 @@ describe("incident-10 — inner_lr_invoke_timeout retry cap", () => {
         session_id: otherSession,
         result: "invalid",
         result_detail:
-          "lr_invoke/lr_exit_status: LlmRunner exitStatus=timeout; envelopeRef=/tmp/d",
+          "lr_invoke/lr_exit_status: LlmRunner exitStatus=transport_error; envelopeRef=/tmp/f",
       },
     ];
     const ndjson = rows.map((r) => JSON.stringify(r)).join("\n");
@@ -264,7 +308,7 @@ describe("incident-10 — inner_lr_invoke_timeout retry cap", () => {
     };
     expect(
       await countLrInvokeTimeoutsFromLedger(fakeStore, sessionId),
-    ).toBe(2);
+    ).toBe(4);
     expect(
       await countLrInvokeTimeoutsFromLedger(fakeStore, otherSession),
     ).toBe(1);
@@ -280,6 +324,46 @@ describe("incident-10 — inner_lr_invoke_timeout retry cap", () => {
         sessionId,
       ),
     ).toBe(0);
+  });
+
+  it("regression (phase-0-stabilization B): 6 consecutive transport_error invocations exhaust the cap=5", () => {
+    // Self-host evidence E5: a single outer session spawned 416
+    // transport_error invocations in 11 minutes because the previous
+    // classifier matched only `exitStatus=timeout`. The generalized
+    // classifier caps every non-ok ExitStatus, so a transport_error storm
+    // ABANDONs the session at the same default cap as a timeout storm.
+    let counter = 0;
+    const decisions: ReturnType<typeof evaluateRetry>[] = [];
+    for (let i = 0; i < 6; i++) {
+      const cls = classifyAgentIoStageFailure({
+        ok: false,
+        stage: "lr_invoke",
+        detail:
+          "LlmRunner exitStatus=transport_error; envelopeRef=/tmp/x.envelope",
+      });
+      expect(cls).toBe("inner_lr_invoke_timeout");
+      decisions.push(evaluateRetry(cls!, counter));
+      counter += 1;
+    }
+    expect(decisions[5]).toEqual({
+      decision: "escalate",
+      reason: "inner_lr_invoke_timeout count=5 >= limit=5",
+    });
+  });
+
+  it("regression (phase-0-stabilization B): malformed_output and adapter_unavailable share the same cap", () => {
+    for (const status of ["malformed_output", "adapter_unavailable"]) {
+      const cls = classifyAgentIoStageFailure({
+        ok: false,
+        stage: "lr_invoke",
+        detail: `LlmRunner exitStatus=${status}; envelopeRef=/tmp/x`,
+      });
+      expect(cls).toBe("inner_lr_invoke_timeout");
+      expect(evaluateRetry(cls!, 5)).toEqual({
+        decision: "escalate",
+        reason: "inner_lr_invoke_timeout count=5 >= limit=5",
+      });
+    }
   });
 
   it("integration: 6 consecutive lr_invoke timeouts exhaust the default cap=5", () => {

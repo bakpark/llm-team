@@ -88,7 +88,7 @@ legacy `agent_runner.by_role` 키는 폐기되었다.
 <a id="TCC-GOVERNANCE"></a>
 ## TCC-GOVERNANCE: Governance Surface & Human Authority
 
-`target.governance.*` 는 사람·GitHub 경계의 단일 권위 설정이다. 본 절은 [`docs/superpowers/specs/2026-05-06-human-github-boundary-contract-design.md`](../../docs/superpowers/specs/2026-05-06-human-github-boundary-contract-design.md) 의 결정을 contract 로 반영한다.
+`target.governance.*` 는 사람·GitHub 경계의 단일 권위 설정이다.
 
 | 키 | 필수 | default | 의미 |
 |---|---|---|---|
@@ -374,7 +374,7 @@ target operator 가 명시하지 않으면 metric 자동 scan 비활성화. inte
 <a id="TCC-ENFORCEMENT"></a>
 ## TCC-ENFORCEMENT: Invariant Enforcement Levels
 
-본 절은 invariant 위반의 enforcement 등급을 정의한다 — Stage 2~4 의 점진적 hard-fail transition 을 지원하기 위함이다 (`docs/superpowers/specs/2026-05-05-loop-based-workflow-design.md` §12-1).
+본 절은 invariant 위반의 enforcement 등급을 정의한다 — Stage 2~4 의 점진적 hard-fail transition 을 지원하기 위함이다 .
 
 ### 키 스키마
 

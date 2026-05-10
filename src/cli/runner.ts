@@ -185,6 +185,9 @@ async function main(argv: readonly string[]): Promise<number> {
         targetId: cfg.identity.target_id,
         environmentFingerprint: `node${process.version}`,
         reverifyTestCommands: testCommands,
+        // phase-0-stabilization C: persist composed prompts under
+        // `<workdir>/prompts/<session>/<turn>.md` instead of OS-tmp.
+        workdirRoot: workdir,
       });
       process.stdout.write(`${JSON.stringify(outcome)}\n`);
       // P0-2 fix (PR #62 review): dispatch_no_match exits non-zero so CI
@@ -207,6 +210,9 @@ async function main(argv: readonly string[]): Promise<number> {
         testCommands,
         environmentFingerprint: `node${process.version}`,
       },
+      // phase-0-stabilization C: persist composed prompts under
+      // `<workdir>/prompts/<session>/<turn>.md` instead of OS-tmp.
+      workdirRoot: workdir,
     });
     process.stdout.write(`${JSON.stringify(outcome)}\n`);
     return outcome.kind === "noop" ||
