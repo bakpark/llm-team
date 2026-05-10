@@ -46,7 +46,11 @@ import { assertCanAcquire } from "./lease-acquisition-order.js";
 import { withLeaseHeartbeat } from "./lease-heartbeat.js";
 import { resolveLeaseTtl } from "./lease-ttl-resolver.js";
 import type { LeasePort } from "../ports/lease.js";
-import type { LeaseConfig } from "../config/target-schema.js";
+import {
+  resolveAgentTimeoutSec,
+  type ContextBudget,
+  type LeaseConfig,
+} from "../config/target-schema.js";
 import { idempotencyKey } from "./idempotency.js";
 import type { LedgerAppender } from "./ledger.js";
 import {
@@ -82,6 +86,12 @@ export interface CoordinatorDeps {
   reverifyTestCommands: (workspaceCwd: string) => CommandSpec[];
   environmentFingerprint: string;
   agentTimeoutSec?: number;
+  /**
+   * incident-10: TCC-CONTEXT-BUDGET map. When provided, `middle.review`
+   * `timeout_sec` overrides resolve via `resolveAgentTimeoutSec`. Falls
+   * back to `agentTimeoutSec ?? 120` for legacy callers.
+   */
+  contextBudget?: ContextBudget;
   maxReviewTurns?: number;
   /**
    * PR #63 review fix: phase-4 wire-up. When provided, the coordinator
@@ -304,7 +314,12 @@ async function runMiddleReviewTurnInner(
       manifest,
       workspaceRevisionPin: prep.headBefore,
       agentCwd: prep.agentCwd,
-      timeoutSec: deps.agentTimeoutSec ?? 120,
+      timeoutSec: resolveAgentTimeoutSec(
+        deps.contextBudget,
+        "middle",
+        "review",
+        deps.agentTimeoutSec ?? 120,
+      ),
       idempotency: {
         scope: "per_turn",
         parts: {

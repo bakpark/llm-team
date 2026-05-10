@@ -404,6 +404,9 @@ async function main(argv: readonly string[]): Promise<number> {
               targetId: cfg.identity.target_id,
               testCommands,
               environmentFingerprint: `node${process.version}`,
+              // incident-10: per-phase timeout overrides + lr_invoke retry cap.
+              contextBudget: cfg.context_budget,
+              failurePolicy: cfg.failure_policy,
             },
             lease,
             leaseConfig: cfg.lease,
@@ -424,6 +427,8 @@ async function main(argv: readonly string[]): Promise<number> {
             targetId: cfg.identity.target_id,
             environmentFingerprint: `node${process.version}`,
             reverifyTestCommands: testCommands,
+            // incident-10: per-phase middle.review timeout override.
+            contextBudget: cfg.context_budget,
             lease,
             leaseConfig: cfg.lease,
           });
@@ -446,6 +451,8 @@ async function main(argv: readonly string[]): Promise<number> {
             callerId: args.callerId,
             targetId: cfg.identity.target_id,
             workspace,
+            // incident-10: per-phase outer.* timeout overrides.
+            contextBudget: cfg.context_budget,
           });
           outcomeJson = JSON.stringify({ role: args.role, outcome });
           break;

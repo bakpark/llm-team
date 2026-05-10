@@ -59,6 +59,10 @@ import type { ClockPort } from "../ports/clock.js";
 import type { LlmRunnerPort } from "../ports/llm-runner.js";
 import type { StorePort } from "../ports/store.js";
 import type { WorkspacePort } from "../ports/workspace.js";
+import {
+  resolveAgentTimeoutSec,
+  type ContextBudget,
+} from "../config/target-schema.js";
 import { callAgent } from "./agent-io.js";
 import {
   classifyAgentIoStageFailure,
@@ -107,6 +111,13 @@ export interface OuterTurnDeps {
   callerId: string;
   targetId: string;
   agentTimeoutSec?: number;
+  /**
+   * incident-10: TCC-CONTEXT-BUDGET map. When provided, per-phase
+   * `timeout_sec` overrides resolve through `resolveAgentTimeoutSec` for
+   * each outer phase invocation. Falls back to `agentTimeoutSec ?? 120` for
+   * unknown (loop, step) pairs (defensive — outer phases are LoopStep-typed).
+   */
+  contextBudget?: ContextBudget;
   maxOuterTurns?: number;
   /**
    * Working directory passed to the LLM runner as `agentCwd`. Outer agents
@@ -445,7 +456,12 @@ export async function runOneOuterTurn(
       manifest,
       workspaceRevisionPin: session.workspace_revision_pin,
       agentCwd: deps.agentCwd ?? process.cwd(),
-      timeoutSec: deps.agentTimeoutSec ?? 120,
+      timeoutSec: resolveAgentTimeoutSec(
+        deps.contextBudget,
+        "outer",
+        phase,
+        deps.agentTimeoutSec ?? 120,
+      ),
       idempotency: {
         scope: "per_turn",
         parts: {

@@ -35,6 +35,15 @@ export interface RetryConfig {
    * tighter than agent-side streaks. Default 3.
    */
   promptComposeTruncationLimit?: number;
+  /**
+   * incident-10: maximum consecutive `lr_invoke/lr_exit_status` failures
+   * whose detail string indicates a runner-level timeout
+   * (`exitStatus=timeout`) before an inner session is ABANDONED. Distinct
+   * from agent-side `no_progress` because no envelope is ever produced —
+   * the streak counter has no agent signal to advance, and the daemon
+   * would otherwise re-pick the session indefinitely. Default 5.
+   */
+  innerLrInvokeTimeoutLimit?: number;
 }
 
 export const DEFAULT_RETRY_CONFIG: Required<RetryConfig> = {
@@ -44,6 +53,7 @@ export const DEFAULT_RETRY_CONFIG: Required<RetryConfig> = {
   middleReviewAttemptsLimit: 3,
   sliceMergeRevalidationLimit: 1,
   promptComposeTruncationLimit: 3,
+  innerLrInvokeTimeoutLimit: 5,
 };
 
 export type FailureClassification =
@@ -52,7 +62,8 @@ export type FailureClassification =
   | "scope_violation"
   | "middle_review_attempt"
   | "slice_merge_revalidation"
-  | "prompt_compose_truncation";
+  | "prompt_compose_truncation"
+  | "inner_lr_invoke_timeout";
 
 export type RetryDecision =
   | { decision: "continue"; remaining: number }
@@ -90,6 +101,8 @@ function limitFor(
       return cfg.sliceMergeRevalidationLimit;
     case "prompt_compose_truncation":
       return cfg.promptComposeTruncationLimit;
+    case "inner_lr_invoke_timeout":
+      return cfg.innerLrInvokeTimeoutLimit;
   }
 }
 
@@ -109,9 +122,22 @@ function limitFor(
 export function classifyAgentIoStageFailure(outcome: {
   ok: boolean;
   stage?: string;
+  detail?: string;
 }): FailureClassification | null {
   if (outcome.ok) return null;
   if (outcome.stage === "prompt_compose") return "prompt_compose_truncation";
+  // incident-10: only the runner-level timeout flavor of `lr_invoke` failures
+  // contributes to the inner abandon counter. Other `lr_invoke` failures
+  // (e.g. spawn errors, non-zero exit) are surfaced as invalid envelopes
+  // but do not advance this streak — they are typically environmental and
+  // operator-recoverable, distinct from the "model is hanging" signal.
+  if (
+    outcome.stage === "lr_invoke" &&
+    typeof outcome.detail === "string" &&
+    outcome.detail.includes("exitStatus=timeout")
+  ) {
+    return "inner_lr_invoke_timeout";
+  }
   return null;
 }
 
@@ -146,6 +172,46 @@ export async function countPromptComposeFailuresFromLedger(
     if (
       typeof row.result_detail === "string" &&
       row.result_detail.startsWith("prompt_compose/")
+    ) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+/**
+ * incident-10: count prior `lr_invoke/lr_exit_status` invalid ledger rows
+ * for a given session whose detail string indicates a runner-level timeout
+ * (`exitStatus=timeout`). Mirrors `countPromptComposeFailuresFromLedger` —
+ * the ledger is the only durable record that survives daemon restarts, and
+ * timeouts produce no envelope so no agent-side streak counter advances.
+ *
+ * Format produced by `turn-worker.emitInvalidTurn`:
+ *   `result_detail = "lr_invoke/lr_exit_status: LlmRunner exitStatus=timeout; envelopeRef=..."`
+ *
+ * Callers use the returned count as `currentCount` for `evaluateRetry`.
+ */
+export async function countLrInvokeTimeoutsFromLedger(
+  store: { readText(relPath: string): Promise<string | null> },
+  sessionId: string,
+): Promise<number> {
+  const body = await store.readText("ledger/transitions.ndjson");
+  if (body == null || body.length === 0) return 0;
+  let count = 0;
+  for (const line of body.split("\n")) {
+    if (line.length === 0) continue;
+    let row: { session_id?: unknown; result?: unknown; result_detail?: unknown };
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (row.session_id !== sessionId) continue;
+    if (row.result !== "invalid") continue;
+    if (
+      typeof row.result_detail === "string" &&
+      row.result_detail.startsWith("lr_invoke/lr_exit_status") &&
+      row.result_detail.includes("exitStatus=timeout")
     ) {
       count += 1;
     }
