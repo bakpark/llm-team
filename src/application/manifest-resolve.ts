@@ -5,6 +5,8 @@ import { Milestone } from "../domain/schema/milestone.js";
 import { FeatureRequest } from "../domain/schema/feature-request.js";
 import { SessionTurn } from "../domain/schema/session-turn.js";
 import { Slice } from "../domain/schema/slice.js";
+import { SliceMerge } from "../domain/schema/slice-merge.js";
+import { VerificationRun } from "../domain/schema/verification.js";
 import { layout } from "./persistence-layout.js";
 
 /**
@@ -124,16 +126,21 @@ async function resolveEntry(
   if (entry.object_kind === "slice" && entry.fetch_scope === "body") {
     return resolveSliceBody(store, entry);
   }
+  if (entry.object_kind === "slice_merge" && entry.fetch_scope === "body") {
+    return resolveSliceMergeBody(store, entry);
+  }
+  if (entry.object_kind === "verification_run" && entry.fetch_scope === "body") {
+    return resolveVerificationRunBody(store, entry);
+  }
   // Other (kind, scope) pairs remain out of scope. For `required=true`
   // entries the resolver throws so the caller can surface an AGC-INVALID
   // outcome (no silent empty prompt). For non-required entries the caller
   // catches and skips (entry omitted from `# Inputs`). Future work can
-  // extend this switch with slice_merge / dialogue_session /
-  // verification_run resolution.
+  // extend this switch with dialogue_session resolution.
   if (entry.required) {
     throw new UnsupportedManifestEntryError(
       entry,
-      "resolver supports (milestone, body), (session_turn, body), (slice, body) only",
+      "resolver supports (milestone, body), (session_turn, body), (slice, body), (slice_merge, body), (verification_run, body) only",
     );
   }
   return null;
@@ -347,6 +354,127 @@ async function resolveSliceBody(
     state: slice.state,
     dod_revision_pin: slice.dod_revision_pin,
     trunk_base_revision: slice.trunk_base_revision,
+  };
+  return JSON.stringify(projection, null, 2);
+}
+
+/**
+ * incident-11 — resolve `(slice_merge, body)` so the middle review sentinel
+ * (and scout) can read the SliceMerge record (the review subject) inline
+ * under `# Inputs` instead of seeing `[BODY NOT INLINED]` and emitting
+ * `failure: need_context`.
+ *
+ * Layout: `slice_merges/<slice_merge_id>.json`.
+ *
+ * Revision pin: equality with `sliceMerge.pre_merge_workspace_revision`,
+ * falling back to `sliceMerge.slice_merge_id` when the pre-merge revision is
+ * null. This mirrors `MiddleReviewPinResolver` in `dialogue-coordinator.ts`,
+ * which is the authoring side of these manifest entries — both sides must
+ * agree or the resolver rejects fresh entries as stale.
+ */
+async function resolveSliceMergeBody(
+  store: StorePort,
+  entry: ManifestEntry,
+): Promise<string | null> {
+  const path = layout.sliceMerge(entry.object_id);
+  const raw = await store.readText(path);
+  if (raw == null) {
+    if (entry.required) {
+      throw new MissingRequiredManifestEntryError(entry, path);
+    }
+    return null;
+  }
+  let sliceMerge: ReturnType<typeof SliceMerge.parse>;
+  try {
+    sliceMerge = SliceMerge.parse(JSON.parse(raw));
+  } catch {
+    if (entry.required) {
+      throw new MissingRequiredManifestEntryError(entry, path);
+    }
+    return null;
+  }
+  // Revision pin matches MiddleReviewPinResolver:
+  //   sliceMerge.pre_merge_workspace_revision ?? sliceMerge.slice_merge_id
+  const expectedPin =
+    sliceMerge.pre_merge_workspace_revision ?? sliceMerge.slice_merge_id;
+  if (expectedPin !== entry.revision_pin) {
+    if (entry.required) {
+      throw new StaleManifestEntryError(entry, expectedPin);
+    }
+    return null;
+  }
+  // Project review-relevant fields. Caller / lease metadata
+  // (lease_token, merged_by_caller_id, audit_chain_predecessor_id,
+  // external_refs, timestamps) does not help reviewers decide.
+  const projection: Record<string, unknown> = {
+    slice_merge_id: sliceMerge.slice_merge_id,
+    slice_id: sliceMerge.slice_id,
+    target_id: sliceMerge.target_id,
+    state: sliceMerge.state,
+    pre_merge_workspace_revision: sliceMerge.pre_merge_workspace_revision,
+    merge_revision: sliceMerge.merge_revision,
+    inner_session_id: sliceMerge.inner_session_id,
+    review_session_id: sliceMerge.review_session_id,
+    verification_run_id: sliceMerge.verification_run_id,
+    merged_at: sliceMerge.merged_at,
+  };
+  return JSON.stringify(projection, null, 2);
+}
+
+/**
+ * incident-11 — resolve `(verification_run, body)` so the middle review
+ * sentinel can read the deterministic-evidence record inline under
+ * `# Inputs` instead of seeing `[BODY NOT INLINED]`.
+ *
+ * Layout: `verifications/<verification_run_id>.json` (see
+ * `persistence-layout.ts` — function name is `layout.verification`).
+ *
+ * Revision pin: equality with `entry.object_id` (i.e. the
+ * verification_run_id itself). Mirrors `MiddleReviewPinResolver` in
+ * `dialogue-coordinator.ts` which sets the manifest pin to
+ * `entry.object_id` for verification_run entries — VerificationRun records
+ * are immutable evidence so the ID is the freshness marker.
+ */
+async function resolveVerificationRunBody(
+  store: StorePort,
+  entry: ManifestEntry,
+): Promise<string | null> {
+  const path = layout.verification(entry.object_id);
+  const raw = await store.readText(path);
+  if (raw == null) {
+    if (entry.required) {
+      throw new MissingRequiredManifestEntryError(entry, path);
+    }
+    return null;
+  }
+  let run: ReturnType<typeof VerificationRun.parse>;
+  try {
+    run = VerificationRun.parse(JSON.parse(raw));
+  } catch {
+    if (entry.required) {
+      throw new MissingRequiredManifestEntryError(entry, path);
+    }
+    return null;
+  }
+  // Pin equality with the verification_run_id itself (immutable evidence).
+  if (run.verification_run_id !== entry.revision_pin) {
+    if (entry.required) {
+      throw new StaleManifestEntryError(entry, run.verification_run_id);
+    }
+    return null;
+  }
+  // Project review-relevant fields. The schema has no stdout/stderr —
+  // log_ref points off-record when present. Include result + failed_tests
+  // so the reviewer can see exactly which AC-bound tests failed.
+  const projection: Record<string, unknown> = {
+    verification_run_id: run.verification_run_id,
+    target_id: run.target_id,
+    target_revision: run.target_revision,
+    commands_or_checks: run.commands_or_checks,
+    result: run.result,
+    failed_tests: run.failed_tests,
+    covers_ac_ids: run.covers_ac_ids,
+    log_ref: run.log_ref,
   };
   return JSON.stringify(projection, null, 2);
 }
