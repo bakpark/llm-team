@@ -307,7 +307,13 @@ async function runOneInnerTurnInner(
       },
       runtimeMetadata: { workspace_pin_before: prep.headBefore },
     },
-    { llmRunner: deps.llmRunner, manifestBuilder },
+    // incident-9: wire StorePort so `callAgent` resolves the
+    // `(slice, body)` manifest entry into the prompt's `# Inputs`
+    // section. Without this, the inner TDD `forge` agent saw the
+    // `BODY NOT INLINED` sentinel and (correctly) refused to author
+    // patches, returning `failure: need_context` indefinitely. The
+    // resolver gained `(slice, body)` support in this same change.
+    { llmRunner: deps.llmRunner, manifestBuilder, store: deps.store },
   );
   if (!agentOut.ok) {
     // P0 fix (PR #61 review): record an invalid ledger row so the audit
