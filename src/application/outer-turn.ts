@@ -1535,6 +1535,7 @@ async function buildDispatchInput(
           session.session_id,
           milestone.milestone_id,
           deps.store,
+          session.current_turn_index,
         );
         slices = fallback;
       }
@@ -1643,31 +1644,48 @@ function parseStringArray(
 
 /**
  * incident-7 fallback: scan persisted session turns from highest index down
- * for an envelope whose `output_kind === "slice_decomposition"` and return
+ * for the most recent envelope whose `output_kind === "slice_decomposition"`
+ * is emitted by the session lead for this Planning milestone, and return
  * the parsed `artifacts.slices`. Used when the lead envelope reached via
  * `lastLeadEnvelope` does not carry the slice payload (e.g. convergence
  * triggered by a reviewer verdict, not a lead final).
+ *
+ * PR #104 P0-2 fix: once the most recent matching envelope is located, the
+ * parse result is returned directly — even if empty. We must NOT continue
+ * scanning to an older envelope, otherwise a stale DAG could be resurrected
+ * and promoted to M_DELIVERY_BUILDING when the latest lead draft is
+ * empty/malformed.
+ *
+ * PR #104 P1-1 fix: candidates must satisfy the lead-Planning envelope
+ * contract, not just `output_kind === "slice_decomposition"`. Specifically:
+ *   - `agent_role_in_session === "lead"`
+ *   - `phase_or_purpose === "Planning"`
+ *   - `parent_loop === "outer"`
+ *   - `object_id === milestoneId`
+ *
+ * PR #104 P1-2 fix: use the session's `current_turn_index` as a precise
+ * upper bound, single-pass reverse scan — removes the 256 magic number and
+ * the previous two-pass (probe + read) structure.
  */
 export async function findSliceDecompositionSlices(
   sessionId: string,
   milestoneId: string,
   store: StorePort,
+  currentTurnIndex: number,
 ): Promise<SliceT[]> {
-  // Walk backwards using the layout — turn files are zero-indexed and dense
-  // up to current_turn_index, but the absolute upper bound is unknown here.
-  // Probe a generous bound and stop once we hit a missing turn after the
-  // first hit (i.e. consecutive misses). Use a loop until readText returns
-  // null on a high index, then descend.
-  const indices: number[] = [];
-  for (let i = 0; i < 256; i++) {
+  for (let i = currentTurnIndex; i >= 0; i--) {
     const body = await store.readText(layout.sessionTurn(sessionId, i));
-    if (body == null) break;
-    indices.push(i);
-  }
-  for (let i = indices.length - 1; i >= 0; i--) {
-    const body = await store.readText(layout.sessionTurn(sessionId, indices[i]!));
     if (body == null) continue;
-    let parsed: { output_envelope?: { output_kind?: string; artifacts?: unknown } };
+    let parsed: {
+      output_envelope?: {
+        output_kind?: string;
+        artifacts?: unknown;
+        agent_role_in_session?: string;
+        phase_or_purpose?: string;
+        parent_loop?: string;
+        object_id?: string;
+      };
+    };
     try {
       parsed = JSON.parse(body);
     } catch {
@@ -1676,9 +1694,14 @@ export async function findSliceDecompositionSlices(
     const env = parsed.output_envelope;
     if (env == null) continue;
     if (env.output_kind !== "slice_decomposition") continue;
+    if (env.agent_role_in_session !== "lead") continue;
+    if (env.phase_or_purpose !== "Planning") continue;
+    if (env.parent_loop !== "outer") continue;
+    if (env.object_id !== milestoneId) continue;
+    // First (highest-turn) match wins. Return parse result directly — even
+    // if empty — so a stale earlier DAG cannot be resurrected.
     const artifacts = (env.artifacts ?? {}) as Record<string, unknown>;
-    const slices = parseSlices(artifacts, milestoneId);
-    if (slices.length > 0) return slices;
+    return parseSlices(artifacts, milestoneId);
   }
   return [];
 }

@@ -132,6 +132,7 @@ describe("findSliceDecompositionSlices (incident-7 fallback)", () => {
       SESSION_ID,
       MILESTONE_ID,
       store,
+      2,
     );
     expect(slices.length).toBe(2);
     expect(slices.map((s) => s.slice_id)).toEqual(
@@ -190,6 +191,7 @@ describe("findSliceDecompositionSlices (incident-7 fallback)", () => {
       SESSION_ID,
       MILESTONE_ID,
       store,
+      1,
     );
     expect(slices.length).toBe(2);
   });
@@ -218,6 +220,7 @@ describe("findSliceDecompositionSlices (incident-7 fallback)", () => {
       SESSION_ID,
       MILESTONE_ID,
       store,
+      0,
     );
     expect(slices).toEqual([]);
   });
@@ -246,7 +249,157 @@ describe("findSliceDecompositionSlices (incident-7 fallback)", () => {
       SESSION_ID,
       MILESTONE_ID,
       store,
+      0,
     );
+    expect(slices).toEqual([]);
+  });
+
+  it("PR #104 P0-2: does NOT resurrect an older valid DAG when the latest matching lead envelope is empty", async () => {
+    // Regression for the stale-DAG-resurrection bug: if turn 1 (the latest
+    // lead slice_decomposition) has empty artifacts.slices, the fallback
+    // must return [] — not roll back to turn 0's valid DAG. Otherwise an
+    // outdated slice DAG could be promoted to M_DELIVERY_BUILDING.
+    const store = new MemoryStore();
+    // Turn 0: lead emits a valid slice_decomposition.
+    await persistTurn(store, 0, {
+      session_id: SESSION_ID,
+      turn_index: 0,
+      parent_loop: "outer",
+      phase_or_purpose: "Planning",
+      agent_profile_id: "atlas",
+      agent_role_in_session: "lead",
+      manifest_id: "manifest-0",
+      contribution_kind: "lead_draft",
+      output_kind: "slice_decomposition",
+      object_id: MILESTONE_ID,
+      summary: "first draft",
+      artifacts: {
+        slices: [
+          planningSliceFixture(SLICE_A),
+          planningSliceFixture(SLICE_B, [SLICE_A]),
+        ],
+      },
+      verdict: null,
+      next_action_request: null,
+      failure: null,
+    });
+    // Turn 1: same lead emits a slice_decomposition with EMPTY slices array.
+    await persistTurn(store, 1, {
+      session_id: SESSION_ID,
+      turn_index: 1,
+      parent_loop: "outer",
+      phase_or_purpose: "Planning",
+      agent_profile_id: "atlas",
+      agent_role_in_session: "lead",
+      manifest_id: "manifest-1",
+      contribution_kind: "lead_draft",
+      output_kind: "slice_decomposition",
+      object_id: MILESTONE_ID,
+      summary: "empty redraft",
+      artifacts: { slices: [] },
+      verdict: null,
+      next_action_request: null,
+      failure: null,
+    });
+    // Turn 2 + 3: reviewer plan_accept, triggering convergence.
+    await persistTurn(store, 2, {
+      session_id: SESSION_ID,
+      turn_index: 2,
+      parent_loop: "outer",
+      phase_or_purpose: "Planning",
+      agent_profile_id: "forge",
+      agent_role_in_session: "reviewer",
+      manifest_id: "manifest-2",
+      contribution_kind: "review_verdict",
+      output_kind: "verdict",
+      object_id: MILESTONE_ID,
+      summary: "reviewer verdict=plan_accept",
+      artifacts: null,
+      verdict: { result: "plan_accept", rationale: null },
+      next_action_request: null,
+      failure: null,
+    });
+    await persistTurn(store, 3, {
+      session_id: SESSION_ID,
+      turn_index: 3,
+      parent_loop: "outer",
+      phase_or_purpose: "Planning",
+      agent_profile_id: "sentinel",
+      agent_role_in_session: "reviewer",
+      manifest_id: "manifest-3",
+      contribution_kind: "review_verdict",
+      output_kind: "verdict",
+      object_id: MILESTONE_ID,
+      summary: "reviewer verdict=plan_accept",
+      artifacts: null,
+      verdict: { result: "plan_accept", rationale: null },
+      next_action_request: null,
+      failure: null,
+    });
+
+    const slices = await findSliceDecompositionSlices(
+      SESSION_ID,
+      MILESTONE_ID,
+      store,
+      3,
+    );
+    // Latest matching lead envelope is turn 1 with empty slices — return []
+    // and do NOT resurrect turn 0.
+    expect(slices).toEqual([]);
+  });
+
+  it("PR #104 P1-1: ignores envelopes that do not satisfy the lead-Planning-milestone contract", async () => {
+    // Even if `output_kind === "slice_decomposition"` appears on a non-lead
+    // / non-Planning / wrong-object_id envelope, it must NOT be selected.
+    const store = new MemoryStore();
+    const FOREIGN_MILESTONE = "01HZM00000000000000000999A";
+    // Turn 0: lead-authored slice_decomposition for a different milestone.
+    await persistTurn(store, 0, {
+      session_id: SESSION_ID,
+      turn_index: 0,
+      parent_loop: "outer",
+      phase_or_purpose: "Planning",
+      agent_profile_id: "atlas",
+      agent_role_in_session: "lead",
+      manifest_id: "manifest-0",
+      contribution_kind: "lead_draft",
+      output_kind: "slice_decomposition",
+      object_id: FOREIGN_MILESTONE,
+      summary: "different milestone",
+      artifacts: { slices: [planningSliceFixture(SLICE_A)] },
+      verdict: null,
+      next_action_request: null,
+      failure: null,
+    });
+    // Turn 1: reviewer-authored slice_decomposition for the right milestone
+    // (not allowed under the contract, but envelope validator does not
+    // enforce role × output_kind correlation).
+    await persistTurn(store, 1, {
+      session_id: SESSION_ID,
+      turn_index: 1,
+      parent_loop: "outer",
+      phase_or_purpose: "Planning",
+      agent_profile_id: "forge",
+      agent_role_in_session: "reviewer",
+      manifest_id: "manifest-1",
+      contribution_kind: "review_verdict",
+      output_kind: "slice_decomposition",
+      object_id: MILESTONE_ID,
+      summary: "wrong-role slice_decomposition",
+      artifacts: { slices: [planningSliceFixture(SLICE_B)] },
+      verdict: null,
+      next_action_request: null,
+      failure: null,
+    });
+
+    const slices = await findSliceDecompositionSlices(
+      SESSION_ID,
+      MILESTONE_ID,
+      store,
+      1,
+    );
+    // Neither candidate satisfies (lead × Planning × outer × MILESTONE_ID),
+    // so the helper returns [].
     expect(slices).toEqual([]);
   });
 });

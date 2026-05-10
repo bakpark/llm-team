@@ -242,24 +242,30 @@ describe("dispatchOuterOutcome — Planning", () => {
     ).rejects.toThrow(/invalid DAG/);
   });
 
-  it("incident-7: plan_accept with empty slicesToPersist refuses to advance milestone", async () => {
+  it("incident-7: plan_accept with empty slicesToPersist returns no_match (does not throw)", async () => {
+    // PR #104 P0-1 fix: empty slicesToPersist must return a structured
+    // `no_match` result rather than throwing. Throwing propagates up to the
+    // daemon top-level handler and exits the process — milestone state then
+    // cannot recover on the next outer-coordinator cycle.
     const d = deps();
     const m = await seedMilestone(d.store, "M_DELIVERY_PLANNING");
-    await expect(
-      dispatchOuterOutcome(
-        {
-          parent_loop: "outer",
-          phase_or_purpose: "Planning",
-          session_state: "CONVERGED",
-          final_verdict: "plan_accept",
-          milestone: m,
-          sessionId: SESS_ID,
-          // slicesToPersist intentionally omitted (incident-7 production
-          // symptom: dispatcher receives empty/missing slice payload).
-        },
-        d,
-      ),
-    ).rejects.toThrow(/empty slice DAG/);
+    const r = await dispatchOuterOutcome(
+      {
+        parent_loop: "outer",
+        phase_or_purpose: "Planning",
+        session_state: "CONVERGED",
+        final_verdict: "plan_accept",
+        milestone: m,
+        sessionId: SESS_ID,
+        // slicesToPersist intentionally omitted (incident-7 production
+        // symptom: dispatcher receives empty/missing slice payload).
+      },
+      d,
+    );
+    expect(r.kind).toBe("no_match");
+    if (r.kind === "no_match") {
+      expect(r.detail).toMatch(/empty slice DAG/);
+    }
 
     // Milestone state must NOT have advanced.
     const reread = Milestone.parse(
@@ -268,23 +274,30 @@ describe("dispatchOuterOutcome — Planning", () => {
     expect(reread.state).toBe("M_DELIVERY_PLANNING");
   });
 
-  it("incident-7: plan_accept with explicit empty slices array also refuses to advance", async () => {
+  it("incident-7: plan_accept with explicit empty slices array also returns no_match", async () => {
     const d = deps();
     const m = await seedMilestone(d.store, "M_DELIVERY_PLANNING");
-    await expect(
-      dispatchOuterOutcome(
-        {
-          parent_loop: "outer",
-          phase_or_purpose: "Planning",
-          session_state: "CONVERGED",
-          final_verdict: "plan_accept",
-          milestone: m,
-          sessionId: SESS_ID,
-          slicesToPersist: [],
-        },
-        d,
-      ),
-    ).rejects.toThrow(/empty slice DAG/);
+    const r = await dispatchOuterOutcome(
+      {
+        parent_loop: "outer",
+        phase_or_purpose: "Planning",
+        session_state: "CONVERGED",
+        final_verdict: "plan_accept",
+        milestone: m,
+        sessionId: SESS_ID,
+        slicesToPersist: [],
+      },
+      d,
+    );
+    expect(r.kind).toBe("no_match");
+    if (r.kind === "no_match") {
+      expect(r.detail).toMatch(/empty slice DAG/);
+    }
+    // Milestone state must NOT have advanced.
+    const reread = Milestone.parse(
+      JSON.parse((await d.store.readText(layout.milestone(M_ID)))!),
+    );
+    expect(reread.state).toBe("M_DELIVERY_PLANNING");
   });
 
   it("TIMEOUT → escalate", async () => {
