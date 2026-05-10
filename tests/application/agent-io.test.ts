@@ -436,4 +436,148 @@ describe("callAgent — manifest body inline (incident-1b Bug B)", () => {
       expect(out.reason).toBe("prompt_layout_violation");
     }
   });
+
+  /**
+   * incident-5 — Discovery atlas/sentinel were stuck looping because
+   * manifest entries for prior `(session_turn, body)` were silently
+   * dropped (resolver only knew `(milestone, body)`). End-to-end check:
+   * with the resolver extended, a session_turn body is rendered inline
+   * under `## Inputs` so the next turn can read the prior reviewer's
+   * `request_changes` rationale.
+   */
+  it("inlines session_turn body under `## Inputs` when prior turn entry is present", async () => {
+    const { MemoryStore } = await import("../../src/adapters/store/memory.js");
+    const { layout } = await import(
+      "../../src/application/persistence-layout.js"
+    );
+    const { composePrompt } = await import(
+      "../../src/application/prompt-compose.js"
+    );
+    const { resolveManifestEntries } = await import(
+      "../../src/application/manifest-resolve.js"
+    );
+    const store = new MemoryStore();
+    // Seed milestone + feature_request so the milestone entry resolves too.
+    await store.writeAtomic(
+      layout.milestone(MILESTONE_ID),
+      JSON.stringify({
+        milestone_id: MILESTONE_ID,
+        target_id: "team-a",
+        title: "Add ledger summary CLI",
+        state: "M_DISCOVERY_DRAFT",
+        slot_kind: "discovery",
+        intake_source_kind: "feature_request",
+        intake_source_id: REQUEST_ID,
+        spec_revision_pin: null,
+        context_summary_id: null,
+        external_refs: [],
+        created_at: ISO2,
+        updated_at: ISO2,
+      }),
+    );
+    await store.writeAtomic(
+      layout.featureRequest(REQUEST_ID),
+      JSON.stringify({
+        request_id: REQUEST_ID,
+        title: "Add ledger summary CLI",
+        body: "operators-want-a-ledger-summary-tool-FEATUREBODY",
+        submitted_by: "user@example.com",
+        submitted_at: ISO2,
+        state: "queued",
+        promoted_milestone_id: null,
+        processed_at: null,
+        rejection_reason: null,
+      }),
+    );
+    // Seed a prior reviewer turn with a request_changes verdict.
+    const priorTurn = {
+      session_id: SESSION_ID,
+      turn_index: 1,
+      agent_profile_id: "sentinel",
+      input_manifest_id: MANIFEST_ID,
+      input_turn_log_snapshot_ref: null,
+      output_envelope: {
+        session_id: SESSION_ID,
+        turn_index: 1,
+        parent_loop: "outer",
+        phase_or_purpose: "Discovery",
+        slice_id: null,
+        slice_kind: null,
+        tdd_phase: null,
+        agent_profile_id: "sentinel",
+        agent_role_in_session: "reviewer",
+        contribution_kind: "review_verdict",
+        parent_review_verdict_id: null,
+        output_kind: "verdict",
+        object_id: MILESTONE_ID,
+        manifest_id: MANIFEST_ID,
+        input_revision_pins: ["deadbeef"],
+        summary: "REVIEWER_OBJECTION_SHOULD_BE_VISIBLE",
+        artifacts: null,
+        verdict: {
+          result: "request_changes",
+          rationale: "scope must enumerate CLI flags",
+        },
+        next_action_request: null,
+        failure: null,
+        idempotency_key: "idemp:prior-turn:1",
+        runtime_metadata: {},
+      },
+      next_action_request: null,
+      caller_routing_decision: null,
+      workspace_commit: null,
+      verification_result_ref: null,
+      recorded_at: ISO2,
+    };
+    const turnRaw = JSON.stringify(priorTurn);
+    await store.writeAtomic(layout.sessionTurn(SESSION_ID, 1), turnRaw);
+    // PR #96 P0-1: full-body sha256 hex (replaces previous `len=N:<first 32>` form).
+    const { createHash } = await import("node:crypto");
+    const turnPin = createHash("sha256").update(turnRaw).digest("hex");
+
+    const manifest = ContextManifest.parse({
+      manifest_id: MANIFEST_ID,
+      session_id: SESSION_ID,
+      turn_index: 2,
+      purpose: "design",
+      target: { object_kind: "milestone", object_id: MILESTONE_ID },
+      entries: [
+        {
+          object_kind: "milestone",
+          object_id: MILESTONE_ID,
+          fetch_scope: "body",
+          revision_pin: ISO2,
+          required: true,
+          purpose: "primary input",
+        },
+        {
+          object_kind: "session_turn",
+          object_id: SESSION_ID,
+          turn_index: 1,
+          fetch_scope: "body",
+          revision_pin: turnPin,
+          required: false,
+          purpose: "prior turn 1 (reviewer) (request_changes)",
+        },
+      ],
+      created_at: ISO2,
+    });
+    const resolved = await resolveManifestEntries(store, manifest);
+    expect(resolved).toHaveLength(2);
+    const prompt = composePrompt({
+      agentProfileId: "atlas",
+      agentRoleInSession: "lead",
+      parentLoop: "outer",
+      phaseOrPurpose: "Discovery",
+      sessionId: SESSION_ID,
+      turnIndex: 2,
+      manifest,
+      workspaceRevisionPin: "deadbeef",
+      resolvedEntries: resolved,
+    });
+    expect(prompt).toContain("## Inputs");
+    expect(prompt).toContain("REVIEWER_OBJECTION_SHOULD_BE_VISIBLE");
+    expect(prompt).toContain("scope must enumerate CLI flags");
+    expect(prompt).toContain("request_changes");
+  });
 });

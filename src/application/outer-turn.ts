@@ -45,6 +45,7 @@
  * step takes its own `withFileLock(milestonePath)` inside
  * `dispatchOuterOutcome`.
  */
+import { createHash } from "node:crypto";
 import { newMonotonicId } from "../domain/ids.js";
 import {
   DialogueSession,
@@ -347,7 +348,14 @@ export async function runOneOuterTurn(
       t.verdict?.result === "request_changes" ? " (request_changes)" : "";
     drafts.push({
       object_kind: "session_turn",
-      object_id: `${session.session_id}#${i}`,
+      // incident-5: object_id is the session id; the per-entry `turn_index`
+      // distinguishes which `sessions/<id>/turns/<n>.json` the resolver
+      // reads. Prior to incident-5 this was encoded as
+      // `${session_id}#${i}` and parsed by OuterPinResolver — replaced by
+      // the schema-level field so resolveManifestEntries can also locate
+      // the turn file.
+      object_id: session.session_id,
+      turn_index: i,
       fetch_scope: "body",
       required: false,
       purpose: `prior turn ${i} (${t.agent_role_in_session})${rcSuffix}`,
@@ -1010,19 +1018,33 @@ class OuterPinResolver implements RevisionPinResolver {
     }
     if (entry.object_kind === "session_turn") {
       // PR #69 P1-3: prior turn entries are pinned by the persisted body's
-      // hash-equivalent — we just use the turn body length + first 64
-      // chars as a stable fingerprint (no native crypto needed for a
-      // Phase-5 manifest pin). Turn bodies are append-only so this is
-      // stable until/unless the turn is rewritten.
-      const idxStr = entry.object_id.includes("#")
-        ? entry.object_id.split("#")[1]!
-        : "0";
-      const idx = Number.parseInt(idxStr, 10);
+      // hash. Turn bodies are append-only so the hash is stable until/unless
+      // the turn is rewritten.
+      // PR #96 P0-1: full-body sha256 hex (replaces the previous
+      // `len=N:<first 32 chars>` fingerprint, which missed mutations in
+      // summary / verdict.rationale / failure / next_action_request when the
+      // new body happened to be the same length).
+      // incident-5: prefer the schema-level `turn_index`; fall back to
+      // legacy `${session_id}#${i}` parsing for any in-flight manifests
+      // built before the field was introduced.
+      // PR #96 P1-D: when neither the schema field nor the legacy `#` suffix
+      // supplies a turn index, surface an explicit "no_turn_index" sentinel
+      // pin instead of silently defaulting to turn 0 (which would fingerprint
+      // an unrelated turn body and either falsely pass or surface a
+      // misleading stale-pin diagnostic).
+      let idx: number;
+      if (entry.turn_index != null) {
+        idx = entry.turn_index;
+      } else if (entry.object_id.includes("#")) {
+        idx = Number.parseInt(entry.object_id.split("#")[1]!, 10);
+      } else {
+        return `missing:${entry.object_id}:no_turn_index`;
+      }
       const body = await this.store.readText(
         layout.sessionTurn(this.sessionId, idx),
       );
-      if (body == null) return `missing:${entry.object_id}`;
-      return `len=${body.length}:${body.slice(0, 32).replace(/\s+/g, "")}`;
+      if (body == null) return `missing:${entry.object_id}#${idx}`;
+      return createHash("sha256").update(body).digest("hex");
     }
     if (entry.object_kind === "slice_telemetry") {
       // KAC-SLICE-TELEMETRY (phase 8b): pin = telemetry audit_hash. Drift

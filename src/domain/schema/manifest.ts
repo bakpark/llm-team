@@ -60,6 +60,15 @@ export const ManifestEntry = z
      * backward compatibility with manifests created before phase 8a.
      */
     token_estimate: z.number().int().nonnegative().optional(),
+    /**
+     * incident-5 — for `(session_turn, body)` entries the resolver needs to
+     * know which turn file under `sessions/<session_id>/turns/<n>.json` to
+     * read; `object_id` carries the session id, but the turn index is a
+     * separate dimension. Optional for backward compatibility — entries that
+     * are not session_turn-bodied ignore it; the resolver throws when
+     * required for session_turn body resolution.
+     */
+    turn_index: z.number().int().nonnegative().optional(),
   })
   .strict();
 export type ManifestEntry = z.infer<typeof ManifestEntry>;

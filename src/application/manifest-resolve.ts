@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import type { ContextManifest, ManifestEntry } from "../domain/schema/manifest.js";
 import type { StorePort } from "../ports/store.js";
 import { Milestone } from "../domain/schema/milestone.js";
 import { FeatureRequest } from "../domain/schema/feature-request.js";
+import { SessionTurn } from "../domain/schema/session-turn.js";
 import { layout } from "./persistence-layout.js";
 
 /**
@@ -16,16 +18,28 @@ import { layout } from "./persistence-layout.js";
  * list of `ResolvedEntry` records that the prompt composer renders verbatim
  * under a new `# Inputs` section.
  *
- * Scope (incident-1b minimal):
+ * Scope (incident-1b minimum + incident-5):
  *   - `milestone` + `body` — load `milestones/<id>.json`, render title + intake
  *     source body (when the intake source is a `feature_request` we fetch the
  *     `feature_requests/<id>.json` body). Optionally append `milestones/<id>/spec.md`
  *     when present.
+ *   - `session_turn` + `body` — incident-5: load
+ *     `sessions/<session_id>/turns/<turn_index>.json` and project the
+ *     agent-relevant subset under `# Inputs` so prior reviewer rationales
+ *     reach the next lead/reviewer (breaks the
+ *     `request_changes ↔ need_context` Discovery loop).
  *   - Other (object_kind, fetch_scope) combinations throw an explicit
  *     "unsupported" error. The caller decides:
  *       - `required=true` → surface the error (caller turns into AGC-INVALID),
  *       - `required=false` → skip silently (entry omitted from `# Inputs`,
  *         prompt still renders so the agent can decide).
+ *
+ * TODO(incident-6+): slice / slice_merge / dialogue_session / verification_run
+ * resolvers — separate cycle. turn-worker (inner loop) and
+ * dialogue-coordinator (middle loop) currently DO NOT wire `StorePort` into
+ * `resolveManifestEntries`; only outer-turn does. Inner/middle loops still
+ * inline their own (slice, body) reads via composePrompt's legacy path until
+ * those resolvers exist here.
  *
  * Caller is `agent-io.callAgent` via the new optional `store` dep.
  */
@@ -95,16 +109,19 @@ async function resolveEntry(
   if (entry.object_kind === "milestone" && entry.fetch_scope === "body") {
     return resolveMilestoneBody(store, entry);
   }
-  // Other (kind, scope) pairs are out of scope for incident-1b. For
-  // `required=true` entries the resolver throws so the caller can surface an
-  // AGC-INVALID outcome (no silent empty prompt). For non-required entries
-  // the caller catches and skips (entry omitted from `# Inputs`). Future work
-  // can extend this switch with slice / slice_merge / dialogue_session /
-  // session_turn / verification_run resolution.
+  if (entry.object_kind === "session_turn" && entry.fetch_scope === "body") {
+    return resolveSessionTurnBody(store, entry);
+  }
+  // Other (kind, scope) pairs remain out of scope. For `required=true`
+  // entries the resolver throws so the caller can surface an AGC-INVALID
+  // outcome (no silent empty prompt). For non-required entries the caller
+  // catches and skips (entry omitted from `# Inputs`). Future work can
+  // extend this switch with slice / slice_merge / dialogue_session /
+  // verification_run resolution.
   if (entry.required) {
     throw new UnsupportedManifestEntryError(
       entry,
-      "resolver supports only (milestone, body) at incident-1b minimum",
+      "resolver supports (milestone, body) and (session_turn, body) only",
     );
   }
   return null;
@@ -156,4 +173,99 @@ async function resolveMilestoneBody(
   }
 
   return sections.join("\n\n");
+}
+
+/**
+ * incident-5 — resolve `(session_turn, body)` so Discovery atlas/sentinel
+ * can read prior turn rationales (especially reviewer `request_changes`)
+ * inline under `# Inputs` instead of looping forever in
+ * `request_changes ↔ need_context`.
+ *
+ * Layout: `sessions/<session_id>/turns/<turn_index>.json`. The persisted
+ * body is a SessionTurn record; we render only the agent-relevant fields
+ * (agent_profile_id, role, output_kind, summary, verdict, failure,
+ * next_action_request) so the prompt stays bounded — the full record can
+ * include adapter trace metadata that does not help the next turn.
+ *
+ * `entry.turn_index` is the new schema field (also pre-incident-5
+ * manifests embedded the index in `object_id` as `${session_id}#${i}`;
+ * we fall back to that legacy form so any in-flight manifest still
+ * resolves).
+ *
+ * Revision pin matches OuterPinResolver's session_turn fingerprint:
+ * full-body `sha256(raw)` hex (PR #96 P0-1 — replaces the original
+ * `len=<n>:<first 32 chars>` form, which silently passed when post-prefix
+ * fields like summary/verdict.rationale/failure/next_action_request changed
+ * without altering body length). Mismatches surface StaleManifestEntryError
+ * for required entries (mirrors milestone body).
+ */
+async function resolveSessionTurnBody(
+  store: StorePort,
+  entry: ManifestEntry,
+): Promise<string | null> {
+  const sessionId = entry.object_id.includes("#")
+    ? entry.object_id.split("#")[0]!
+    : entry.object_id;
+  const turnIndex =
+    entry.turn_index ??
+    (entry.object_id.includes("#")
+      ? Number.parseInt(entry.object_id.split("#")[1]!, 10)
+      : NaN);
+  if (!Number.isInteger(turnIndex) || turnIndex < 0) {
+    if (entry.required) {
+      throw new UnsupportedManifestEntryError(
+        entry,
+        "session_turn entry must carry turn_index (or legacy ${session_id}#${i} object_id)",
+      );
+    }
+    return null;
+  }
+  const path = layout.sessionTurn(sessionId, turnIndex);
+  const raw = await store.readText(path);
+  if (raw == null) {
+    if (entry.required) {
+      throw new MissingRequiredManifestEntryError(entry, path);
+    }
+    return null;
+  }
+  // Revision-pin check — must agree with OuterPinResolver.session_turn
+  // fingerprint format. Stale ⇒ throw for required, skip for non-required.
+  // PR #96 P0-1: full-body sha256 hex. The previous `len=N:<first 32 chars>`
+  // form missed mutations in summary / verdict.rationale / failure /
+  // next_action_request when the new body happened to be the same length,
+  // letting a stale-context turn pass the gate.
+  const expectedPin = createHash("sha256").update(raw).digest("hex");
+  if (expectedPin !== entry.revision_pin) {
+    if (entry.required) {
+      throw new StaleManifestEntryError(entry, expectedPin);
+    }
+    return null;
+  }
+  let turn: ReturnType<typeof SessionTurn.parse>;
+  try {
+    turn = SessionTurn.parse(JSON.parse(raw));
+  } catch {
+    // Persisted file is corrupt / not a SessionTurn; treat as missing.
+    if (entry.required) {
+      throw new MissingRequiredManifestEntryError(entry, path);
+    }
+    return null;
+  }
+  const env = turn.output_envelope;
+  // Project the agent-relevant subset; full envelope can include adapter
+  // metadata that does not help the next turn. Keep deterministic key
+  // ordering for stable prompt diffs.
+  const projection: Record<string, unknown> = {
+    session_id: turn.session_id,
+    turn_index: turn.turn_index,
+    agent_profile_id: turn.agent_profile_id,
+    agent_role_in_session: env.agent_role_in_session,
+    output_kind: env.output_kind,
+    contribution_kind: env.contribution_kind,
+    summary: env.summary,
+    verdict: env.verdict,
+    failure: env.failure,
+    next_action_request: env.next_action_request,
+  };
+  return JSON.stringify(projection, null, 2);
 }

@@ -30,6 +30,11 @@ export interface ManifestEntryDraft {
   fetch_scope: FetchScope;
   required: boolean;
   purpose: string;
+  /**
+   * incident-5 — populated for `(session_turn, body)` drafts so the
+   * downstream resolver can locate `sessions/<id>/turns/<n>.json`.
+   */
+  turn_index?: number;
 }
 
 export interface RevisionPinResolver {
@@ -53,13 +58,14 @@ export class ManifestBuilder {
   async build(input: BuildManifestInput): Promise<ContextManifestT> {
     const entries: ManifestEntry[] = [];
     for (const d of input.drafts) {
-      const partial = {
+      const partial: Omit<ManifestEntry, "token_estimate"> = {
         object_kind: d.object_kind,
         object_id: d.object_id,
         fetch_scope: d.fetch_scope,
         revision_pin: await this.resolver.resolve(d),
         required: d.required,
         purpose: d.purpose,
+        ...(d.turn_index != null ? { turn_index: d.turn_index } : {}),
       };
       // TCC-CONTEXT-BUDGET / phase 8a — char/4 heuristic over the entry's
       // serialized header. Body fetch is not required at manifest-build
@@ -92,6 +98,7 @@ export class ManifestBuilder {
         fetch_scope: e.fetch_scope,
         required: e.required,
         purpose: e.purpose,
+        ...(e.turn_index != null ? { turn_index: e.turn_index } : {}),
       });
       if (current !== e.revision_pin) stale.push(e);
     }
