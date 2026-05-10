@@ -172,6 +172,74 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     }
   }
 
+  // ---------- Phase 1 additive surface (cli-spicy-anchor.md §7-2) ----------
+
+  async findCommitByTrailer(input: {
+    branch: string;
+    trailerKey: string;
+    value: string;
+    depth?: number;
+  }): Promise<string | null> {
+    const depth = input.depth ?? 50;
+    // `git log -n <depth> --format=%H%x00%B%x00%x01` — split on \x01 then \x00.
+    let res: GitResult;
+    try {
+      res = await git(this.cfg.repoRoot, [
+        "log",
+        "-n",
+        String(depth),
+        "--format=%H%x00%B%x01",
+        input.branch,
+      ]);
+    } catch {
+      return null;
+    }
+    const records = res.stdout.split("\x01").filter((s) => s.length > 0);
+    const trailerRe = new RegExp(
+      `^${escapeRegExp(input.trailerKey)}:\\s*(.+)$`,
+      "m",
+    );
+    for (const rec of records) {
+      const idx = rec.indexOf("\x00");
+      if (idx < 0) continue;
+      const sha = rec.slice(0, idx).trim();
+      const body = rec.slice(idx + 1);
+      const m = trailerRe.exec(body);
+      if (m && m[1]?.trim() === input.value) return sha;
+    }
+    return null;
+  }
+
+  async getRemoteHeadSha(input: {
+    remote: string;
+    branch: string;
+  }): Promise<string | null> {
+    try {
+      const res = await git(this.cfg.repoRoot, [
+        "ls-remote",
+        "--heads",
+        input.remote,
+        input.branch,
+      ]);
+      const line = res.stdout.split("\n").find((l) => l.length > 0);
+      if (line == null) return null;
+      const sha = line.split(/\s+/)[0]?.trim();
+      return sha && sha.length > 0 ? sha : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async resetHard(input: { sliceId: string; sha: string }): Promise<void> {
+    const wt = this.worktreePath(input.sliceId);
+    await git(wt, ["reset", "--hard", input.sha]);
+  }
+
+  async cleanForce(input: { sliceId: string }): Promise<void> {
+    const wt = this.worktreePath(input.sliceId);
+    await git(wt, ["clean", "-fdx"]);
+  }
+
   private worktreePath(sliceId: string): string {
     return resolve(this.cfg.workspacesDir, sliceId);
   }
@@ -239,6 +307,10 @@ async function pathExists(p: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function assertSafeRel(rel: string): void {

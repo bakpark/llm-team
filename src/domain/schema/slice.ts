@@ -63,6 +63,13 @@ export const Slice = z
     spawning_proposal_id: UlidString.nullable().default(null),
     abandoned_reason: z.string().min(1).nullable().default(null),
     external_refs: z.array(ExternalRef).default(() => []),
+    /**
+     * Phase 1 (cli-spicy-anchor.md §5): optional pointer to the active
+     * ReviewSurface backing this slice's PR. Caller paths only — agent
+     * envelopes never set this field. Phase 2/3 wires the writers; until
+     * then, callers leave it absent.
+     */
+    review_surface_id: UlidString.optional(),
     created_at: z.string().datetime(),
     updated_at: z.string().datetime(),
   })

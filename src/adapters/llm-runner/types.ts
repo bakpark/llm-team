@@ -2,10 +2,18 @@
 // The contract-shaped LlmRunnerPort is implemented by the executor (runInvoke),
 // which composes stdin from prompt_ref/session_context_ref and dispatches here.
 
+import type { AgentCapabilityPolicy } from "../../domain/schema/agent-capability-policy.js";
+
 export interface LlmAdapterInput {
   stdin: string;
   agentCwd: string;
   timeoutSec: number;
+  /**
+   * Phase 1 (cli-spicy-anchor.md §1) — optional capability policy applied
+   * via L1 (CLI flags), L2 (cwd jail), L3 (env strip). Adapters that
+   * don't recognise the policy fall back to default behavior.
+   */
+  capabilityPolicy?: AgentCapabilityPolicy;
 }
 
 export interface LlmAdapterResult {

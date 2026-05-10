@@ -139,6 +139,73 @@ export class FakeWorkspace implements WorkspacePort {
     return this.knownRefs.has(ref);
   }
 
+  // ---------- Phase 1 additive surface (cli-spicy-anchor.md §7-2) ----------
+
+  /** Test-only registry of trailers seeded by the fake or by `commit`. */
+  private readonly commitTrailers = new Map<
+    string,
+    { sha: string; trailers: Map<string, string> }[]
+  >();
+
+  /** Test-only registry of remote heads keyed by `<remote>/<branch>`. */
+  private readonly remoteHeads = new Map<string, string>();
+
+  /** Counts of resetHard / cleanForce calls (test introspection). */
+  resetHardCount = 0;
+  cleanForceCount = 0;
+
+  /** Test seeder — appends a fake commit log entry with trailers. */
+  seedCommitTrailer(branch: string, sha: string, trailers: Record<string, string>): void {
+    const list = this.commitTrailers.get(branch) ?? [];
+    list.push({ sha, trailers: new Map(Object.entries(trailers)) });
+    this.commitTrailers.set(branch, list);
+  }
+
+  /** Test seeder — sets a remote head for `<remote>/<branch>`. */
+  seedRemoteHead(remote: string, branch: string, sha: string | null): void {
+    if (sha == null) this.remoteHeads.delete(`${remote}/${branch}`);
+    else this.remoteHeads.set(`${remote}/${branch}`, sha);
+  }
+
+  async findCommitByTrailer(input: {
+    branch: string;
+    trailerKey: string;
+    value: string;
+    depth?: number;
+  }): Promise<string | null> {
+    const list = this.commitTrailers.get(input.branch);
+    if (list == null || list.length === 0) return null;
+    const depth = input.depth ?? 50;
+    const slice = list.slice(-depth).reverse();
+    for (const entry of slice) {
+      if (entry.trailers.get(input.trailerKey) === input.value) {
+        return entry.sha;
+      }
+    }
+    return null;
+  }
+
+  async getRemoteHeadSha(input: {
+    remote: string;
+    branch: string;
+  }): Promise<string | null> {
+    return this.remoteHeads.get(`${input.remote}/${input.branch}`) ?? null;
+  }
+
+  async resetHard(input: { sliceId: string; sha: string }): Promise<void> {
+    this.resetHardCount += 1;
+    const cur = this.state.get(input.sliceId);
+    if (cur == null)
+      throw new Error(
+        `resetHard on un-prepared workspace for slice_id=${input.sliceId}`,
+      );
+    this.state.set(input.sliceId, { head: input.sha, commits: cur.commits });
+  }
+
+  async cleanForce(_input: { sliceId: string }): Promise<void> {
+    this.cleanForceCount += 1;
+  }
+
   async rebaseOntoTrunk(input: {
     sliceId: string;
     trunkRevision: string;

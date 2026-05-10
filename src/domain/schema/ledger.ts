@@ -43,6 +43,15 @@ export const LedgerActionKind = z.enum([
   "pause_resume",
   "signal_apply",
   "external_observation",
+  // Phase 1 (cli-spicy-anchor.md §7-1): outbox 2-phase + PRR signal events.
+  // Legacy readers must use union-read semantics (unknown action_kind →
+  // ignore the row) so older daemons keep functioning during rollout.
+  "outbox_pending",
+  "outbox_posted",
+  "outbox_failed",
+  "outbox_recovered",
+  "review_signal_applied",
+  "review_signal_dropped",
 ]);
 export type LedgerActionKind = z.infer<typeof LedgerActionKind>;
 
@@ -97,6 +106,17 @@ export const LedgerRow = z
     timestamp: z.string().datetime(),
     audit_hash: z.string().regex(/^[0-9a-f]{64}$/),
     audit_hash_prev: z.string().regex(/^[0-9a-f]{64}$/),
+    /**
+     * Phase 1 additive optional fields (cli-spicy-anchor.md §7-1, §6).
+     * Legacy rows omit these. Strict mode + .optional() makes legacy parses
+     * pass while new outbox / PRR rows can carry the extra correlation.
+     */
+    surface_ref: z.string().min(1).optional(),
+    external_review_id: z.string().min(1).optional(),
+    diagnostics_ref: z.string().min(1).optional(),
+    op_kind: z.string().min(1).optional(),
+    drop_reason: z.string().min(1).optional(),
+    nonce: z.string().min(1).optional(),
   })
   .strict();
 

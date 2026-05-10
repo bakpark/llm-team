@@ -1,3 +1,7 @@
+import {
+  applyCapabilityEnvStrip,
+  codexCliCapabilityFlags,
+} from "./common/capability.js";
 import { resolveSpawnEnv, spawnWithTimeout } from "./common/spawn.js";
 import type {
   LlmAdapterInput,
@@ -29,10 +33,11 @@ export class CodexCliAdapter implements LlmRunnerAdapter {
 
   async run(input: LlmAdapterInput): Promise<LlmAdapterResult> {
     const { cmd, args } = this.buildArgv(input);
-    const env = resolveSpawnEnv({
+    const baseEnv = resolveSpawnEnv({
       allowlist: this.cfg.envAllowlist,
       override: this.cfg.envOverride,
     });
+    const env = applyCapabilityEnvStrip(baseEnv, input.capabilityPolicy);
     const r = await spawnWithTimeout({
       cmd,
       args,
@@ -59,6 +64,9 @@ export class CodexCliAdapter implements LlmRunnerAdapter {
     ];
     if (this.cfg.model) flags.push("--model", this.cfg.model);
     if (this.cfg.profile) flags.push("--profile", this.cfg.profile);
+    if (input.capabilityPolicy) {
+      flags.push(...codexCliCapabilityFlags(input.capabilityPolicy));
+    }
     if (this.cfg.extraArgs) flags.push(...this.cfg.extraArgs);
     return { cmd, args: [...baseArgs, ...flags] };
   }
