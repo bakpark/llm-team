@@ -341,7 +341,14 @@ async function runMiddleReviewTurnInner(
       // timeout resolver, leaving prompt-budget overrides silent.
       contextBudget: deps.contextBudget,
     },
-    { llmRunner: deps.llmRunner, manifestBuilder },
+    // PR #112 review P0-1 (gpt5.5): incident-11 wired the
+    // `(slice_merge, body)` and `(verification_run, body)` resolvers in
+    // `manifest-resolve.ts`, but the middle review `callAgent` was still
+    // missing the StorePort dependency. Without `store`, `callAgent`
+    // skips body inlining and `# Inputs` falls back to
+    // `[BODY NOT INLINED]` — the very regression incident-11 set out to
+    // fix. Mirror the inner-cycle wiring at `turn-worker.ts:361`.
+    { llmRunner: deps.llmRunner, manifestBuilder, store: deps.store },
   );
 
   if (!agentOut.ok) {

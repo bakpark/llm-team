@@ -399,6 +399,64 @@ describe("Phase 3 middle review cycle", () => {
     ).toBeDefined();
   });
 
+  // PR #112 review P1-1: regression guard for incident-11 + this PR's
+  // P0 wiring fix. Without StorePort wired into the middle review
+  // `callAgent`, the new (slice_merge, body) + (verification_run, body)
+  // resolvers go un-invoked and the prompt's `# Inputs` falls back to
+  // `[BODY NOT INLINED]`, sending the sentinel right back to
+  // `failure: need_context`. Assert the prompt actually inlines both.
+  it("middle review prompt inlines slice_merge body + verification_run body (incident-11 regression guard)", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "middle-inline-"));
+    const wsRoot = mkdtempSync(join(tmpdir(), "ws-"));
+    seedFixture(workdir);
+    const store = new FsStore({ workdir });
+    const clock = new SystemClock();
+    const logger = new NdjsonLogger({ store, clock, relPath: LOG_DAEMON_PATH });
+    const ledger = new FileLedger({ store, logger });
+    const workspace = new FakeWorkspace(wsRoot);
+    await workspace.prepareInnerWorkspace({
+      sliceId: SLICE_ID,
+      trunkBaseRevision: "trunk-base",
+    });
+    await workspace.commit({
+      sliceId: SLICE_ID,
+      message: "initial",
+      files: [{ path: "src/add.ts", content: "x" }],
+    });
+
+    const adapter = new StampingFakeAdapter(envelopeFixture("approve"));
+    const llmRunner = new AdapterRunnerPort(adapter);
+
+    const out = await runOneMiddleReviewTurn({
+      store,
+      clock,
+      llmRunner,
+      workspace,
+      verification: new FakeVerification(clock, { test: { result: "pass" } }),
+      ledger,
+      callerId: "test-caller",
+      targetId: TARGET_ID,
+      environmentFingerprint: "vitest",
+      reverifyTestCommands: (cwd) => [{ argv: ["true"], cwd }],
+    });
+    expect(out.kind).toBe("turn_persisted");
+
+    // The middle review sentinel is the only agent invoked; capture its
+    // prompt and inspect the `# Inputs` section.
+    expect(adapter.receivedPrompts.length).toBeGreaterThan(0);
+    const prompt = adapter.receivedPrompts[0]!;
+    // `[BODY NOT INLINED]` is the placeholder agent-io emits when the
+    // resolver could not project the body — a regression of the entire
+    // incident-11 chain.
+    expect(prompt).not.toContain("[BODY NOT INLINED]");
+    // slice_merge body inlined.
+    expect(prompt).toContain(SLICE_MERGE_ID);
+    expect(prompt).toContain("SM_READY_FOR_REVIEW");
+    // verification_run body inlined.
+    expect(prompt).toContain(VERIFICATION_RUN_ID);
+    expect(prompt).toContain("\"target_revision\"");
+  });
+
   it("returns noop when no SM_READY_FOR_REVIEW exists", async () => {
     const workdir = mkdtempSync(join(tmpdir(), "middle-noop-"));
     const wsRoot = mkdtempSync(join(tmpdir(), "ws-"));
@@ -431,8 +489,13 @@ describe("Phase 3 middle review cycle", () => {
  */
 class StampingFakeAdapter {
   readonly id = "fake" as const;
+  // PR #112 review P1-1: capture each prompt the runner saw so tests can
+  // assert that `(slice_merge, body)` and `(verification_run, body)` are
+  // actually inlined under `# Inputs` (not `[BODY NOT INLINED]`).
+  readonly receivedPrompts: string[] = [];
   constructor(private readonly envelopeJson: string) {}
   async run(input: { stdin: string; agentCwd: string; timeoutSec: number }) {
+    this.receivedPrompts.push(input.stdin);
     const envelope = JSON.parse(this.envelopeJson) as Record<string, unknown>;
     const headers = parseFrontmatter(input.stdin);
     envelope.session_id = headers.session_id;

@@ -136,12 +136,13 @@ describe("resolveManifestEntries", () => {
   it("throws on required entries with unsupported (object_kind, fetch_scope)", async () => {
     const store = new MemoryStore();
     await seedMilestone(store, "raw");
-    // incident-9 made `(slice, body)` supported, so use `(slice_merge, body)`
-    // here as the still-unsupported pair.
+    // incident-9 made `(slice, body)` supported, and incident-11 made
+    // `(slice_merge, body)` and `(verification_run, body)` supported. Use
+    // `(slice_telemetry, body)` here as a still-unsupported pair.
     const manifest = buildManifest([
       {
-        object_kind: "slice_merge",
-        object_id: "01HZS00000000000000000000A",
+        object_kind: "slice_telemetry",
+        object_id: "01HZTM0000000000000000000A",
         fetch_scope: "body",
         revision_pin: "deadbeef",
         required: true,
@@ -696,6 +697,518 @@ describe("resolveManifestEntries — slice body (incident-9)", () => {
     });
     const resolved = await resolveManifestEntries(store, manifest);
     // Only the milestone entry survives.
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]!.manifest_entry_index).toBe(0);
+  });
+});
+
+/**
+ * incident-11 — `(slice_merge, body)` and `(verification_run, body)`
+ * resolver tests. Middle review sentinel (turn 10) was emitting
+ * `failure: need_context` because both entries rendered as
+ * `[BODY NOT INLINED]`. PR #108 covered (slice, body); this PR completes
+ * the manifest declared by `dialogueReviewTurn` in dialogue-coordinator.ts.
+ *
+ * Pin format mirrors `MiddleReviewPinResolver`:
+ *   - slice_merge → `pre_merge_workspace_revision ?? slice_merge_id`
+ *   - verification_run → `entry.object_id` (immutable evidence id)
+ */
+describe("resolveManifestEntries — slice_merge body (incident-11)", () => {
+  const SM_SESSION_ID = "01HZSE000000000000000000M1";
+  const SM_PRIMARY_MS = "01HZMS00000000000000000M02";
+  const SM_PRIMARY_FR = "01HZFR00000000000000000M02";
+  const SM_SLICE_ID = "01HZSC000000000000000000M2";
+  const SM_ID = "01HZSM000000000000000000M3";
+  const SM_INNER_SESSION = "01HZSE000000000000000000M2";
+  const SM_REVIEW_SESSION = "01HZSE000000000000000000M3";
+  const SM_VERIF_ID = "01HZVR000000000000000000M4";
+  const SM_ISO = "2026-05-09T09:00:00.000Z";
+  const SM_PRE_MERGE_REV = "trunk-pre-merge-deadbeef";
+
+  function buildSliceMerge(overrides: Partial<Record<string, unknown>> = {}) {
+    return {
+      slice_merge_id: SM_ID,
+      slice_id: SM_SLICE_ID,
+      target_id: "team-a",
+      pre_merge_workspace_revision: SM_PRE_MERGE_REV,
+      merge_revision: null,
+      inner_session_id: SM_INNER_SESSION,
+      review_session_id: SM_REVIEW_SESSION,
+      verification_run_id: SM_VERIF_ID,
+      state: "SM_READY_FOR_REVIEW",
+      merged_at: null,
+      merged_by_caller_id: null,
+      lease_token: "lease-secret-do-not-leak",
+      audit_chain_predecessor_id: null,
+      external_refs: [],
+      created_at: SM_ISO,
+      updated_at: SM_ISO,
+      ...overrides,
+    };
+  }
+
+  async function seedSmMilestone(store: MemoryStore) {
+    await store.writeAtomic(
+      layout.milestone(SM_PRIMARY_MS),
+      JSON.stringify({
+        milestone_id: SM_PRIMARY_MS,
+        target_id: "team-a",
+        title: "Middle review fix",
+        state: "M_DELIVERY_BUILDING",
+        slot_kind: "delivery",
+        intake_source_kind: "feature_request",
+        intake_source_id: SM_PRIMARY_FR,
+        spec_revision_pin: null,
+        context_summary_id: null,
+        external_refs: [],
+        created_at: SM_ISO,
+        updated_at: SM_ISO,
+      }),
+    );
+    await store.writeAtomic(
+      layout.featureRequest(SM_PRIMARY_FR),
+      JSON.stringify({
+        request_id: SM_PRIMARY_FR,
+        title: "Middle review fix",
+        body: "raw scope",
+        submitted_by: "user@example.com",
+        submitted_at: SM_ISO,
+        state: "queued",
+        promoted_milestone_id: null,
+        processed_at: null,
+        rejection_reason: null,
+      }),
+    );
+  }
+
+  function manifestWithSliceMerge(extra: any) {
+    return ContextManifest.parse({
+      manifest_id: "01HZMA00000000000000000M01",
+      session_id: SM_SESSION_ID,
+      turn_index: 0,
+      purpose: "review",
+      target: { object_kind: "slice_merge", object_id: SM_ID },
+      entries: [
+        {
+          object_kind: "milestone",
+          object_id: SM_PRIMARY_MS,
+          fetch_scope: "body",
+          revision_pin: SM_ISO,
+          required: true,
+          purpose: "primary",
+        },
+        extra,
+      ],
+      created_at: SM_ISO,
+    });
+  }
+
+  it("resolves required slice_merge body — projects review-relevant subset", async () => {
+    const store = new MemoryStore();
+    await seedSmMilestone(store);
+    await store.writeAtomic(
+      layout.sliceMerge(SM_ID),
+      JSON.stringify(buildSliceMerge()),
+    );
+    const manifest = manifestWithSliceMerge({
+      object_kind: "slice_merge",
+      object_id: SM_ID,
+      fetch_scope: "body",
+      revision_pin: SM_PRE_MERGE_REV,
+      required: true,
+      purpose: "review subject",
+    });
+    const resolved = await resolveManifestEntries(store, manifest);
+    expect(resolved).toHaveLength(2);
+    const smEntry = resolved.find((r) => r.manifest_entry_index === 1)!;
+    const body = smEntry.body;
+    for (const key of [
+      "slice_merge_id",
+      "slice_id",
+      "target_id",
+      "state",
+      "pre_merge_workspace_revision",
+      "merge_revision",
+      "inner_session_id",
+      "review_session_id",
+      "verification_run_id",
+    ]) {
+      expect(body, `selected field ${key} missing`).toContain(`"${key}"`);
+    }
+    expect(body).toContain(SM_ID);
+    expect(body).toContain(SM_PRE_MERGE_REV);
+    expect(body).toContain("SM_READY_FOR_REVIEW");
+    // Lease/audit metadata must NOT leak.
+    for (const key of [
+      "lease_token",
+      "merged_by_caller_id",
+      "audit_chain_predecessor_id",
+      "external_refs",
+      "created_at",
+      "updated_at",
+    ]) {
+      expect(body, `excluded field ${key} leaked`).not.toContain(`"${key}"`);
+    }
+    expect(body).not.toContain("lease-secret-do-not-leak");
+  });
+
+  it("falls back to slice_merge_id as pin when pre_merge_workspace_revision is null", async () => {
+    const store = new MemoryStore();
+    await seedSmMilestone(store);
+    await store.writeAtomic(
+      layout.sliceMerge(SM_ID),
+      JSON.stringify(buildSliceMerge({ pre_merge_workspace_revision: null })),
+    );
+    const manifest = manifestWithSliceMerge({
+      object_kind: "slice_merge",
+      object_id: SM_ID,
+      fetch_scope: "body",
+      revision_pin: SM_ID,
+      required: true,
+      purpose: "review subject",
+    });
+    const resolved = await resolveManifestEntries(store, manifest);
+    expect(resolved).toHaveLength(2);
+  });
+
+  it("throws MissingRequiredManifestEntryError when slice_merge file is absent", async () => {
+    const store = new MemoryStore();
+    await seedSmMilestone(store);
+    const manifest = manifestWithSliceMerge({
+      object_kind: "slice_merge",
+      object_id: SM_ID,
+      fetch_scope: "body",
+      revision_pin: SM_PRE_MERGE_REV,
+      required: true,
+      purpose: "review subject",
+    });
+    await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
+      /required manifest entry not found/,
+    );
+  });
+
+  it("throws StaleManifestEntryError when revision_pin disagrees with stored slice_merge pin", async () => {
+    const store = new MemoryStore();
+    await seedSmMilestone(store);
+    await store.writeAtomic(
+      layout.sliceMerge(SM_ID),
+      JSON.stringify(buildSliceMerge({ pre_merge_workspace_revision: "trunk-other" })),
+    );
+    const manifest = manifestWithSliceMerge({
+      object_kind: "slice_merge",
+      object_id: SM_ID,
+      fetch_scope: "body",
+      revision_pin: SM_PRE_MERGE_REV,
+      required: true,
+      purpose: "review subject",
+    });
+    await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
+      /revision_pin mismatch/,
+    );
+  });
+
+  it("silently skips non-required slice_merge body when file is absent", async () => {
+    const store = new MemoryStore();
+    await seedSmMilestone(store);
+    const manifest = manifestWithSliceMerge({
+      object_kind: "slice_merge",
+      object_id: SM_ID,
+      fetch_scope: "body",
+      revision_pin: SM_PRE_MERGE_REV,
+      required: false,
+      purpose: "advisory",
+    });
+    const resolved = await resolveManifestEntries(store, manifest);
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]!.manifest_entry_index).toBe(0);
+  });
+
+  // PR #112 review P1-2: parity with `(slice, body)` corrupt-JSON branch.
+  it("throws MissingRequiredManifestEntryError when slice_merge JSON is corrupt and required", async () => {
+    const store = new MemoryStore();
+    await seedSmMilestone(store);
+    await store.writeAtomic(layout.sliceMerge(SM_ID), "{not-json");
+    const manifest = manifestWithSliceMerge({
+      object_kind: "slice_merge",
+      object_id: SM_ID,
+      fetch_scope: "body",
+      revision_pin: SM_PRE_MERGE_REV,
+      required: true,
+      purpose: "review subject",
+    });
+    await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
+      /required manifest entry not found/,
+    );
+  });
+
+  it("throws MissingRequiredManifestEntryError when slice_merge fails Zod parse and required", async () => {
+    const store = new MemoryStore();
+    await seedSmMilestone(store);
+    // Valid JSON but missing required SliceMerge fields → Zod throws.
+    await store.writeAtomic(
+      layout.sliceMerge(SM_ID),
+      JSON.stringify({ slice_merge_id: SM_ID }),
+    );
+    const manifest = manifestWithSliceMerge({
+      object_kind: "slice_merge",
+      object_id: SM_ID,
+      fetch_scope: "body",
+      revision_pin: SM_PRE_MERGE_REV,
+      required: true,
+      purpose: "review subject",
+    });
+    await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
+      /required manifest entry not found/,
+    );
+  });
+
+  it("returns null for non-required slice_merge body when JSON is corrupt", async () => {
+    const store = new MemoryStore();
+    await seedSmMilestone(store);
+    await store.writeAtomic(layout.sliceMerge(SM_ID), "{not-json");
+    const manifest = manifestWithSliceMerge({
+      object_kind: "slice_merge",
+      object_id: SM_ID,
+      fetch_scope: "body",
+      revision_pin: SM_PRE_MERGE_REV,
+      required: false,
+      purpose: "advisory",
+    });
+    const resolved = await resolveManifestEntries(store, manifest);
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]!.manifest_entry_index).toBe(0);
+  });
+});
+
+describe("resolveManifestEntries — verification_run body (incident-11)", () => {
+  const VR_SESSION_ID = "01HZSE000000000000000000V1";
+  const VR_PRIMARY_MS = "01HZMS00000000000000000V02";
+  const VR_PRIMARY_FR = "01HZFR00000000000000000V02";
+  const VR_ID = "01HZVR000000000000000000V3";
+  const VR_ISO = "2026-05-09T10:00:00.000Z";
+
+  function buildRun(overrides: Partial<Record<string, unknown>> = {}) {
+    return {
+      verification_run_id: VR_ID,
+      target_id: "team-a",
+      target_revision: "trunk-after-merge-cafe",
+      commands_or_checks: ["npm run typecheck", "npm run test"],
+      environment_fingerprint: "node-20-darwin-arm64",
+      started_at: VR_ISO,
+      finished_at: VR_ISO,
+      result: "fail",
+      failed_tests: [
+        { path: "tests/x.test.ts", name: "loop converges", message: "expected 2 got 3" },
+      ],
+      log_ref: "verifications/01HZVR000000000000000000V3.log",
+      covers_ac_ids: ["AC-1", "AC-2"],
+      ...overrides,
+    };
+  }
+
+  async function seedVrMilestone(store: MemoryStore) {
+    await store.writeAtomic(
+      layout.milestone(VR_PRIMARY_MS),
+      JSON.stringify({
+        milestone_id: VR_PRIMARY_MS,
+        target_id: "team-a",
+        title: "Verification body inline",
+        state: "M_DELIVERY_BUILDING",
+        slot_kind: "delivery",
+        intake_source_kind: "feature_request",
+        intake_source_id: VR_PRIMARY_FR,
+        spec_revision_pin: null,
+        context_summary_id: null,
+        external_refs: [],
+        created_at: VR_ISO,
+        updated_at: VR_ISO,
+      }),
+    );
+    await store.writeAtomic(
+      layout.featureRequest(VR_PRIMARY_FR),
+      JSON.stringify({
+        request_id: VR_PRIMARY_FR,
+        title: "Verification body inline",
+        body: "raw scope",
+        submitted_by: "user@example.com",
+        submitted_at: VR_ISO,
+        state: "queued",
+        promoted_milestone_id: null,
+        processed_at: null,
+        rejection_reason: null,
+      }),
+    );
+  }
+
+  function manifestWithRun(extra: any) {
+    return ContextManifest.parse({
+      manifest_id: "01HZMA00000000000000000V01",
+      session_id: VR_SESSION_ID,
+      turn_index: 0,
+      purpose: "review",
+      target: { object_kind: "milestone", object_id: VR_PRIMARY_MS },
+      entries: [
+        {
+          object_kind: "milestone",
+          object_id: VR_PRIMARY_MS,
+          fetch_scope: "body",
+          revision_pin: VR_ISO,
+          required: true,
+          purpose: "primary",
+        },
+        extra,
+      ],
+      created_at: VR_ISO,
+    });
+  }
+
+  it("resolves required verification_run body — projects evidence subset", async () => {
+    const store = new MemoryStore();
+    await seedVrMilestone(store);
+    await store.writeAtomic(
+      layout.verification(VR_ID),
+      JSON.stringify(buildRun()),
+    );
+    const manifest = manifestWithRun({
+      object_kind: "verification_run",
+      object_id: VR_ID,
+      fetch_scope: "body",
+      revision_pin: VR_ID,
+      required: true,
+      purpose: "evidence",
+    });
+    const resolved = await resolveManifestEntries(store, manifest);
+    expect(resolved).toHaveLength(2);
+    const vrEntry = resolved.find((r) => r.manifest_entry_index === 1)!;
+    const body = vrEntry.body;
+    for (const key of [
+      "verification_run_id",
+      "target_id",
+      "target_revision",
+      "commands_or_checks",
+      "result",
+      "failed_tests",
+      "covers_ac_ids",
+      "log_ref",
+    ]) {
+      expect(body, `selected field ${key} missing`).toContain(`"${key}"`);
+    }
+    expect(body).toContain(VR_ID);
+    expect(body).toContain("loop converges");
+    expect(body).toContain("\"fail\"");
+    // environment_fingerprint / timestamps not relevant to reviewer.
+    for (const key of [
+      "environment_fingerprint",
+      "started_at",
+      "finished_at",
+    ]) {
+      expect(body, `excluded field ${key} leaked`).not.toContain(`"${key}"`);
+    }
+  });
+
+  it("throws MissingRequiredManifestEntryError when verification file is absent", async () => {
+    const store = new MemoryStore();
+    await seedVrMilestone(store);
+    const manifest = manifestWithRun({
+      object_kind: "verification_run",
+      object_id: VR_ID,
+      fetch_scope: "body",
+      revision_pin: VR_ID,
+      required: true,
+      purpose: "evidence",
+    });
+    await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
+      /required manifest entry not found/,
+    );
+  });
+
+  it("throws StaleManifestEntryError when revision_pin differs from verification_run_id", async () => {
+    const store = new MemoryStore();
+    await seedVrMilestone(store);
+    await store.writeAtomic(
+      layout.verification(VR_ID),
+      JSON.stringify(buildRun()),
+    );
+    const manifest = manifestWithRun({
+      object_kind: "verification_run",
+      object_id: VR_ID,
+      fetch_scope: "body",
+      revision_pin: "01HZVR000000000000000000XX",
+      required: true,
+      purpose: "evidence",
+    });
+    await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
+      /revision_pin mismatch/,
+    );
+  });
+
+  it("silently skips non-required verification_run body when file is absent", async () => {
+    const store = new MemoryStore();
+    await seedVrMilestone(store);
+    const manifest = manifestWithRun({
+      object_kind: "verification_run",
+      object_id: VR_ID,
+      fetch_scope: "body",
+      revision_pin: VR_ID,
+      required: false,
+      purpose: "advisory evidence",
+    });
+    const resolved = await resolveManifestEntries(store, manifest);
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]!.manifest_entry_index).toBe(0);
+  });
+
+  // PR #112 review P1-2: parity with `(slice, body)` corrupt-JSON branch.
+  it("throws MissingRequiredManifestEntryError when verification_run JSON is corrupt and required", async () => {
+    const store = new MemoryStore();
+    await seedVrMilestone(store);
+    await store.writeAtomic(layout.verification(VR_ID), "{not-json");
+    const manifest = manifestWithRun({
+      object_kind: "verification_run",
+      object_id: VR_ID,
+      fetch_scope: "body",
+      revision_pin: VR_ID,
+      required: true,
+      purpose: "evidence",
+    });
+    await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
+      /required manifest entry not found/,
+    );
+  });
+
+  it("throws MissingRequiredManifestEntryError when verification_run fails Zod parse and required", async () => {
+    const store = new MemoryStore();
+    await seedVrMilestone(store);
+    await store.writeAtomic(
+      layout.verification(VR_ID),
+      JSON.stringify({ verification_run_id: VR_ID }),
+    );
+    const manifest = manifestWithRun({
+      object_kind: "verification_run",
+      object_id: VR_ID,
+      fetch_scope: "body",
+      revision_pin: VR_ID,
+      required: true,
+      purpose: "evidence",
+    });
+    await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
+      /required manifest entry not found/,
+    );
+  });
+
+  it("returns null for non-required verification_run body when JSON is corrupt", async () => {
+    const store = new MemoryStore();
+    await seedVrMilestone(store);
+    await store.writeAtomic(layout.verification(VR_ID), "{not-json");
+    const manifest = manifestWithRun({
+      object_kind: "verification_run",
+      object_id: VR_ID,
+      fetch_scope: "body",
+      revision_pin: VR_ID,
+      required: false,
+      purpose: "advisory evidence",
+    });
+    const resolved = await resolveManifestEntries(store, manifest);
     expect(resolved).toHaveLength(1);
     expect(resolved[0]!.manifest_entry_index).toBe(0);
   });
