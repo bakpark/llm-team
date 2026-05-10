@@ -53,7 +53,7 @@
 
 **`signal_id` 산출**: `source=github_comment` 일 때 `signal_id = comment.node_id` (GitHub GraphQL node_id, REST `id` 와 1:1, 영속·전역 유일).
 
-**pin / session 슬롯 출처**: `source=github_comment` 인 envelope 은 동일 surface 의 Issue body 에 Caller 가 유지하는 `awaiting:` machine block 에서 `target_revision_pin`, `related_object_id`, `related_object_revision_pin`, `session_id` 를 채운다. block 부재 시 envelope 는 invalid 처리 (`docs/superpowers/specs/2026-05-06-human-github-boundary-contract-design.md` §4.4 참조).
+**pin / session 슬롯 출처**: `source=github_comment` 인 envelope 은 동일 surface 의 Issue body 에 Caller 가 유지하는 `awaiting:` machine block 에서 `target_revision_pin`, `related_object_id`, `related_object_revision_pin`, `session_id` 를 채운다. block 부재 시 envelope 는 invalid 처리.
 
 Caller 는 signal 집행 전에 다음을 검증한다.
 
@@ -472,7 +472,7 @@ VerificationRun 의 storage path 와 ID 발급 알고리즘은 본 contract 가 
 
 ### Append-compatible 정책
 
-legacy schema 의 row 는 immutable. 신규 row 는 새 schema 로 작성. parser 는 union read 로 양 schema 를 동시 지원 (Stage 2 ledger.sh rewrite 의 invariant — `docs/superpowers/specs/2026-05-05-loop-based-workflow-design.md` §12).
+legacy schema 의 row 는 immutable. 신규 row 는 새 schema 로 작성. parser 는 union read 로 양 schema 를 동시 지원 (Stage 2 ledger.sh rewrite 의 invariant).
 
 legacy `agent_role`, `operation`, `phase_run_id`, `quorum_decision` 필드는 본 ledger 에서 폐기 (신규 row 한정. 과거 row 는 보존되며 historical reader 가 union read).
 

@@ -24,12 +24,14 @@
 - [`architecture/`](architecture/) — 구현 매핑 문서 모음. 진입은 [`architecture/README.md`](architecture/README.md) 의 *읽는 순서* 를 따른다 (pipeline → application-modules → state-machine → AgentProfile → daemons → tools → adapter inventory).
 - [`operations/`](operations/) — 운영 절차.
   - [`operations/cli.md`](operations/cli.md)
+  - [`operations/healthcheck.md`](operations/healthcheck.md)
   - [`operations/onboarding.md`](operations/onboarding.md)
+  - [`operations/production-runbook.md`](operations/production-runbook.md)
+  - [`operations/production-target.md`](operations/production-target.md)
+- [`references/`](references/) — 참고용 (advisory) 종단 스냅샷·구조 안내. 권위 문서 아님, 신규 의존 금지. 진입은 [`references/README.md`](references/README.md).
 
 ## Draft / planning record — 제안·계획 기록 (참고)
 
 라운드별 제안 spec 과 implementation plan. 결정 라운드의 *기록* 이지 현재 읽어야 할 설계가 아니다. 신규 의존 금지 — 채택된 결과는 위 Active bucket 으로 graduation 된다.
 
-- [`superpowers/specs/`](superpowers/specs/) — proposal artifact (사람 작성).
-- [`superpowers/plans/`](superpowers/plans/) — implementation plan (라운드 실행 기록).
 

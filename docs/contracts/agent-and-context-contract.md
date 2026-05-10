@@ -132,7 +132,7 @@ prior_review_context:
 
 - **Advisory only**: contribution chain 에 영향 없음. reviewer 는 새 코드 기준 독립 판단. prompt 의 "참고 컨텍스트" 로만 동봉된다.
 - **동봉 조건**: 동일 Slice 의 직전 SliceMerge 가 `SM_CLOSED` 이며 종료 사유가 `SM_REQUEST_CHANGES → SM_CLOSED` (request_changes) 인 경우만. 그 외 사유 (`abandon`, `escalate`, SM_STALE→BLOCKED) 또는 직전 SliceMerge 부재 시 슬롯은 omit.
-- **출처**: 본 슬롯의 contract 결정은 [`docs/superpowers/specs/2026-05-06-human-github-boundary-contract-design.md`](../../docs/superpowers/specs/2026-05-06-human-github-boundary-contract-design.md) §4.7.
+- **출처**: 본 슬롯의 contract 결정은 사람·GitHub 경계 spec (§4.7) 에서 정의됨.
 
 <a id="AGC-PROMPT-SERIALIZATION"></a>
 ## AGC-PROMPT-SERIALIZATION: Prompt Body Serialization

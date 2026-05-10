@@ -59,7 +59,7 @@ echo_strict: true
 
 `echo_strict: true` 는 agent 가 envelope 의 동명 필드에 위 7 값을 *문자열 동일* 하게 echo 해야 함을 명시한다. envelope parser 는 7 필드의 동일성을 검증하며 불일치는 invalid envelope 으로 분류한다 ([`AGC-INVALID`](../contracts/agent-and-context-contract.md#AGC-INVALID)).
 
-> Status. 본 invariant 는 contract / prompt 형식 차원에서 정의되어 있다. 7 필드 동일성을 검증하는 application 측 envelope parser (runtime guard) 는 Stage 3a (Fake Runner MVP, [`docs/superpowers/specs/2026-05-05-loop-based-workflow-design.md`](../superpowers/specs/2026-05-05-loop-based-workflow-design.md) §14) 에서 구현 예정이다 — 본 PR 시점에는 contract-only 상태.
+> Status. 본 invariant 는 contract / prompt 형식 차원에서 정의되어 있다. 7 필드 동일성을 검증하는 application 측 envelope parser (runtime guard) 는 Stage 3a (Fake Runner MVP,  §14) 에서 구현 예정이다 — 본 PR 시점에는 contract-only 상태.
 
 frontmatter 는 위 8 개 키 외 다른 키를 포함해서는 안 된다. 다른 메타가 필요하면 instruction section 의 본문에 작성하거나 prompt template 자체에 정적으로 포함한다.
 
@@ -197,4 +197,4 @@ adapter 는 위 7 단계 어디에도 개입하지 않는다.
 2. `lib/ports/llm_runner.sh` 의 `lr_call` 헤더 파싱은 frontmatter 파싱으로 교체.
 3. `application/caller_dispatch.sh` 가 4-part wrap 의 단일 진입점이 된다.
 
-본 마이그레이션은 [`docs/superpowers/specs/2026-05-05-loop-based-workflow-design.md`](../superpowers/specs/2026-05-05-loop-based-workflow-design.md) Stage 2 (Implementation Foundation) 에서 contract 변경과 함께 진행한다.
+본 마이그레이션은  Stage 2 (Implementation Foundation) 에서 contract 변경과 함께 진행한다.
