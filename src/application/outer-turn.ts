@@ -64,7 +64,11 @@ import {
   type ContextBudget,
 } from "../config/target-schema.js";
 import { callAgent } from "./agent-io.js";
-import type { LeadInvoker, LeadInvokerOutcome } from "./lead-invoker.js";
+import {
+  loadExistingReviewSurfaceForLead,
+  type LeadInvoker,
+  type LeadInvokerOutcome,
+} from "./lead-invoker.js";
 import {
   classifyAgentIoStageFailure,
   countPromptComposeFailuresFromLedger,
@@ -494,6 +498,16 @@ export async function runOneOuterTurn(
         : phase === "Validation"
           ? `validate/${milestone.milestone_id}`
           : `spec/${milestone.milestone_id}/discovery`;
+    // PR #119 review P1a (gpt5.5): resolve the active per-phase
+    // ReviewSurface so reviewer `request_changes` re-engages the same PR.
+    const existingSurface = await loadExistingReviewSurfaceForLead(
+      {
+        parentKind: "milestone",
+        phase,
+        reviewSurfaceIds: milestone.review_surface_ids,
+      },
+      { store: deps.store },
+    );
     const leadOutcome = await deps.leadInvoker.invoke({
       agentProfileId,
       agentRoleInSession,
@@ -507,7 +521,7 @@ export async function runOneOuterTurn(
       parentKind: "milestone",
       parentId: milestone.milestone_id,
       parentPhase: phase,
-      existingSurface: null,
+      existingSurface,
       manifest,
       manifestBuilder,
       envelopeIdempotency: {
@@ -523,6 +537,28 @@ export async function runOneOuterTurn(
       runtimeMetadata: { milestone_id: milestone.milestone_id, phase },
       prTitle: `${phase} ${milestone.milestone_id}`,
     });
+    // PR #119 review P0a (qwen+gpt5.5): persist the SessionTurn with the
+    // additive refs so `current_turn_index` advances and the next outer
+    // pickup can route to the reviewer instead of re-picking the same lead.
+    // Outer dispatch (milestone-level convergence + dispatchOuterOutcome)
+    // remains the legacy path's responsibility — Phase 2 PR-first only
+    // closes the SessionTurn write hole here.
+    if (leadOutcome.kind === "succeeded") {
+      const callerRoutingDecision = decideRouting(leadOutcome.envelope);
+      await persistSessionTurn(
+        {
+          session,
+          envelope: leadOutcome.envelope,
+          callerRoutingDecision,
+          workspaceCommit: leadOutcome.commitSha,
+          verificationRunId: null,
+          newWorkspaceRevisionPin: session.workspace_revision_pin,
+          outputReceiptRef: leadOutcome.receiptPath,
+          outputIntentRef: leadOutcome.intentPath,
+        },
+        { store: deps.store, clock: deps.clock },
+      );
+    }
     return {
       kind: "lead_path_pr_first",
       sessionId: session.session_id,

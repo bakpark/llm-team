@@ -230,6 +230,22 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     }
   }
 
+  async push(input: {
+    sliceId: string;
+    remote: string;
+    branch: string;
+  }): Promise<void> {
+    const wt = this.worktreePath(input.sliceId);
+    // PR #119 review P0b (gpt5.5): real network push. `git push` is
+    // idempotent on no-op (remote already has the local head); errors
+    // propagate so the lead-invoker records `outbox_failed`.
+    await git(wt, [
+      "push",
+      input.remote,
+      `${input.branch}:${input.branch}`,
+    ]);
+  }
+
   async resetHard(input: { sliceId: string; sha: string }): Promise<void> {
     const wt = this.worktreePath(input.sliceId);
     await git(wt, ["reset", "--hard", input.sha]);

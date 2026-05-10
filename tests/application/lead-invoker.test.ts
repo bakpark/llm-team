@@ -183,12 +183,22 @@ async function buildTestEnv(opts: {
   envelopes: Array<Record<string, unknown> | "fail">;
   retryCap?: number;
   lastVerificationResult?: "pass" | "fail" | "pending";
+  /**
+   * PR #119 review P0b (gpt5.5): how `FakeWorkspace.push` mutates the
+   * remote-head registry. Default is "seed_remote_head" (real-push
+   * semantics). The crash-recovery test opts into "no_op" so the
+   * post-commit `getRemoteHeadSha` probe mismatches and the outbox row
+   * reaches `outbox_failed` for the recovery scenario.
+   */
+  pushBehavior?: "seed_remote_head" | "no_op";
 }): Promise<TestEnv> {
   const store = new MemoryStore();
   const clock = new FixedClock(FIXED_MS);
   const ledger = new FileLedger({ store });
   const wsRoot = mkdtempSync(join(tmpdir(), "li-ws-"));
-  const workspace = new FakeWorkspace(wsRoot);
+  const workspace = new FakeWorkspace(wsRoot, {
+    pushBehavior: opts.pushBehavior ?? "seed_remote_head",
+  });
   const gitHost = new FsMirrorGitHost(store);
   const outbox = new Outbox({ store, ledger });
   const runner = new StampingRunner(opts.envelopes);
@@ -611,6 +621,10 @@ describe("LeadInvoker — crash recovery (push_op via outbox.recover)", () => {
           files: [{ path: "src/x.ts", content: "export const x = 1;\n" }],
         }),
       ],
+      // PR #119 P0b: simulate a "push believed succeeded but did not
+      // propagate" race — push is a no-op so `getRemoteHeadSha` mismatches
+      // and the lead-invoker records `outbox_failed` for `push_op`.
+      pushBehavior: "no_op",
     });
     const inv = await defaultInvocation(env);
     // Do NOT seed remote head before commit — push_op probe will mismatch.

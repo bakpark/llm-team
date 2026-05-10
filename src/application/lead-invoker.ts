@@ -168,6 +168,19 @@ export type LeadInvokerOutcome =
       pushSha: string;
       prRef: ExternalRefHandle;
       leadIntent: LeadIntent;
+      /**
+       * PR #119 review P0a (qwen+gpt5.5): the agent's canonical envelope.
+       * Returned so callers (turn-worker, outer-turn) can persist a
+       * `SessionTurn` and advance `current_turn_index`, mirroring the
+       * legacy path's contract.
+       */
+      envelope: Envelope;
+      /** Receipt persistence path — used by callers to populate
+       *  `SessionTurn.output_receipt_ref`. */
+      receiptPath: string;
+      /** LeadIntent persistence path — used by callers to populate
+       *  `SessionTurn.output_intent_ref`. */
+      intentPath: string;
     }
   | {
       kind: "abandoned";
@@ -361,13 +374,11 @@ export class LeadInvoker {
     });
 
     // ---- Step 6: outbox push_op -------------------------------------------
-    // WorkspacePort does not yet expose a generic `push` method (only
-    // `prepareInnerWorkspace` / `commit` / `head` / `rebaseOntoTrunk` etc).
-    // Phase 2 fakes the push as a no-op `seedRemoteHead` equivalent: the
-    // probe `getRemoteHeadSha(remote, branch) == commitSha` MUST pass. Real
-    // push wiring is the adapter's job — when WorkspacePort.push lands we
-    // wire it here. For now we record the outbox row and assume the adapter
-    // is responsible for the network call before we observe the remote sha.
+    // PR #119 review P0b (gpt5.5): actually invoke `WorkspacePort.push`
+    // before the probe. Previously this relied on the adapter pre-seeding
+    // the remote head, so PR-first never reached PR open/update on a real
+    // workspace. Failures from `push` propagate to `outbox_failed` so the
+    // outbox retry/recovery path still applies.
     const remoteName = this.cfg.remoteName ?? DEFAULT_REMOTE;
     await this.deps.outbox.begin({
       opKind: "push_op",
@@ -377,6 +388,29 @@ export class LeadInvoker {
       objectId,
       manifestId: input.manifest.manifest_id,
     });
+    try {
+      await this.deps.workspace.push({
+        sliceId: input.sliceId,
+        remote: remoteName,
+        branch: input.branch,
+      });
+    } catch (e) {
+      await this.deps.outbox.complete({
+        opKind: "push_op",
+        idempotencyKey: k2,
+        status: "failed",
+        callerId: this.cfg.callerId,
+        targetId: this.cfg.targetId,
+        objectId,
+        manifestId: input.manifest.manifest_id,
+      });
+      return {
+        kind: "abandoned",
+        reason: "outbox_failed",
+        detail: `push_op: ${(e as Error).message}`,
+        attempts: attempt,
+      };
+    }
     const remoteSha = await this.deps.workspace.getRemoteHeadSha({
       remote: remoteName,
       branch: input.branch,
@@ -569,12 +603,14 @@ export class LeadInvoker {
       exit_status: "ok",
       recorded_at: now,
     });
+    const receiptPath = layout.agentRunReceipt(input.sessionId, input.turnIndex);
+    const intentPath = layout.leadIntent(input.sessionId, input.turnIndex);
     await this.deps.store.writeAtomic(
-      layout.agentRunReceipt(input.sessionId, input.turnIndex),
+      receiptPath,
       JSON.stringify(receipt, null, 2),
     );
     await this.deps.store.writeAtomic(
-      layout.leadIntent(input.sessionId, input.turnIndex),
+      intentPath,
       JSON.stringify(leadIntent, null, 2),
     );
 
@@ -620,6 +656,9 @@ export class LeadInvoker {
       pushSha: commitSha,
       prRef,
       leadIntent,
+      envelope: agentOut.envelope,
+      receiptPath,
+      intentPath,
     };
   }
 }
@@ -627,6 +666,64 @@ export class LeadInvoker {
 // --------------------------------------------------------------------------
 // Helpers
 // --------------------------------------------------------------------------
+
+/**
+ * PR #119 review P1a (gpt5.5): resolve the active ReviewSurface for a
+ * lead invocation when one already exists. Returns `null` for brand-new
+ * surfaces. Inputs:
+ *
+ *   - slice path: `Slice.review_surface_id` (Phase 2 inner).
+ *   - milestone path: `Milestone.review_surface_ids[<phase_key>]` (outer).
+ *
+ * Without this loader, callers passed `existingSurface: null` unconditionally
+ * so a reviewer's `request_changes` always opened a brand-new PR on the next
+ * lead pass — the §9 follow-up commit recovery transition was unreachable.
+ */
+export async function loadExistingReviewSurfaceForLead(
+  input:
+    | { parentKind: "slice"; reviewSurfaceId: string | undefined }
+    | {
+        parentKind: "milestone";
+        phase: ReviewSurfaceParentPhase | null;
+        reviewSurfaceIds:
+          | {
+              discovery?: string;
+              specification?: string;
+              planning?: string;
+              validation?: string;
+            }
+          | undefined;
+      },
+  deps: { store: StorePort },
+): Promise<ReviewSurfaceT | null> {
+  let surfaceId: string | undefined;
+  if (input.parentKind === "slice") {
+    surfaceId = input.reviewSurfaceId;
+  } else {
+    const map = input.reviewSurfaceIds;
+    if (map == null || input.phase == null) return null;
+    switch (input.phase) {
+      case "Discovery":
+        surfaceId = map.discovery;
+        break;
+      case "Specification":
+        surfaceId = map.specification;
+        break;
+      case "Planning":
+        surfaceId = map.planning;
+        break;
+      case "Validation":
+        surfaceId = map.validation;
+        break;
+      default:
+        surfaceId = undefined;
+    }
+  }
+  if (surfaceId == null || surfaceId.length === 0) return null;
+  const body = await deps.store.readText(layout.reviewSurface(surfaceId));
+  if (body == null) return null;
+  return ReviewSurface.parse(JSON.parse(body));
+}
 
 function buildCommitMessage(
   summary: string,

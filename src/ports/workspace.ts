@@ -120,6 +120,15 @@ export interface WorkspacePort {
   getRemoteHeadSha(input: { remote: string; branch: string }): Promise<string | null>;
 
   /**
+   * Push the slice-local branch to `<remote>/<branch>`. Used by `push_op`
+   * in the PR-first lead-invoker flow. The implementation MUST be a no-op
+   * when the remote already matches the local branch head (re-runs after
+   * outbox crash). Throws on real push failure so the caller can record
+   * `outbox_failed` and bail out.
+   */
+  push(input: { sliceId: string; remote: string; branch: string }): Promise<void>;
+
+  /**
    * Reset the slice worktree to `sha` (`git reset --hard <sha>`). Used by
    * lead-invoker to recover a dirty worktree before retrying parse/call.
    * The supplied sha must already be reachable from the worktree.
