@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,16 +24,24 @@ function safe(part: string): string {
   return part.replace(/[^A-Za-z0-9_.-]/g, "_");
 }
 
+// L-3-7: attempt directory is forced to 0700 — mkdir's `mode` only applies
+// to newly created paths, so we follow up with chmod to also tighten any
+// pre-existing dir (e.g. created by a prior run with a looser umask).
+// Only the diag dir itself is touched; parents are left alone.
 async function ensureDir(dir: string): Promise<void> {
-  await mkdir(dir, { recursive: true });
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await chmod(dir, 0o700);
 }
 
+// L-3-7: attempt files are written with 0600. POSIX rename preserves the
+// inode (and therefore the mode) so the final target file inherits 0600
+// from the temp file.
 async function atomicWrite(target: string, body: string): Promise<void> {
   // Same-directory mktemp + rename. If the target dir is on a single
   // filesystem (the default for os.tmpdir() on macOS/Linux), rename is
   // atomic. Cross-mount setups need operator review (verification step).
   const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tmp, body, { encoding: "utf8" });
+  await writeFile(tmp, body, { encoding: "utf8", mode: 0o600 });
   await rename(tmp, target);
 }
 
@@ -72,6 +80,13 @@ export async function openEnvelopeSlot(
 }
 
 export interface AttemptSlots {
+  /**
+   * Composed prompt slot — body is the exact stdin handed to the adapter,
+   * redacted at the write boundary. Persisted before adapter invocation so
+   * a 4-part layout violation (or any later failure) still leaves the
+   * offending prompt on disk for replay (L-3-1).
+   */
+  prompt: DiagnosticsSlot;
   /** stdout file slot (raw adapter stdout, redacted at write boundary). */
   stdout: DiagnosticsSlot;
   /** stderr file slot (redacted at write boundary). */
@@ -83,10 +98,10 @@ export interface AttemptSlots {
 }
 
 /**
- * Open the four per-attempt files for a single adapter invocation.
- * All four share the same attempt suffix so they correlate 1-to-1 in the
- * diagnostics directory. Used by the executor to keep stdout, stderr,
- * envelope, and metadata distinct (planning §3 phase-prod-2).
+ * Open the five per-attempt files for a single adapter invocation.
+ * All five share the same attempt suffix so they correlate 1-to-1 in the
+ * diagnostics directory. Used by the executor to keep prompt, stdout,
+ * stderr, envelope, and metadata distinct (planning §3 phase-prod-2 + L-3-1).
  */
 export async function openAttemptSlots(
   key: DiagnosticsKey,
@@ -95,6 +110,7 @@ export async function openAttemptSlots(
   await ensureDir(dir);
   const base = `${safe(key.sessionId)}-${key.turnIndex}-${safe(key.idempotencyKey)}-${attemptSuffix()}`;
   return {
+    prompt: makeSlot(join(dir, `${base}.prompt`)),
     stdout: makeSlot(join(dir, `${base}.stdout`)),
     stderr: makeSlot(join(dir, `${base}.stderr`)),
     envelope: makeSlot(join(dir, `${base}.envelope`)),

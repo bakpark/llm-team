@@ -17,20 +17,29 @@ import { classifyExit, classifyTransportReason } from "./llm-runner.js";
 // even on preflight failure or unexpected throw. Adapter primitives never
 // see the contract refs directly; this function resolves them into stdin.
 //
-// Per attempt, four files are written under LLM_TEAM_RUNNER_DIAG_DIR:
+// Per attempt, five files are written under LLM_TEAM_RUNNER_DIAG_DIR:
+//   - <base>.prompt       (composed stdin handed to the adapter, redacted;
+//                          written before assertFourPartLayout so layout
+//                          violations still leave the offending body on disk
+//                          — L-3-1)
 //   - <base>.stdout       (raw stdout, redacted at write boundary)
 //   - <base>.stderr       (raw stderr, redacted at write boundary; this is
 //                          the path returned as `diagnosticsRef`)
 //   - <base>.envelope     (extracted envelope JSON, or empty)
 //   - <base>.metadata.json
 //
-// Even on preflight failure all four files are written (with empty bodies)
-// so cycle bundles always reference a complete attempt directory.
+// Even on preflight failure all five files are written (with empty bodies
+// for slots that were never reached) so cycle bundles always reference a
+// complete attempt directory.
 export async function runInvoke(
   input: LlmRunnerInput,
   adapter: LlmRunnerAdapter,
 ): Promise<LlmRunnerResult> {
   const slots = await openAttemptSlots(input);
+  // Tracks whether the prompt body was already written by the success path
+  // before reaching `finish`. When false, finish writes an empty prompt file
+  // so the slot is never missing.
+  let promptWritten = false;
 
   const finish = async (
     exitStatus: ExitStatus,
@@ -60,6 +69,9 @@ export async function runInvoke(
     const envSources: NodeJS.ProcessEnv[] = bodies.spawnEnv
       ? [process.env, bodies.spawnEnv]
       : [process.env];
+    if (!promptWritten) {
+      await writeRedacted(slots.prompt, "", envSources);
+    }
     await writeRedacted(slots.stdout, bodies.stdout ?? "", envSources);
     await writeRedacted(slots.stderr, bodies.stderr ?? "", envSources);
     await writeRedacted(slots.envelope, bodies.envelope ?? "", envSources);
@@ -93,6 +105,14 @@ export async function runInvoke(
         reason: "compose_stdin_failed",
       });
     }
+
+    // L-3-1: persist the composed prompt before any further validation so
+    // a 4-part layout violation (or later adapter failure) still leaves the
+    // offending body on disk for replay. spawnEnv is unknown here — fall
+    // back to process.env for redaction; adapter envOverride secrets are
+    // unlikely to appear in the prompt body.
+    await writeRedacted(slots.prompt, stdin, [process.env]);
+    promptWritten = true;
 
     try {
       assertFourPartLayout(stdin);
