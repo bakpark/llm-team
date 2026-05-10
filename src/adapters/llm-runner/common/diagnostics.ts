@@ -40,7 +40,10 @@ async function atomicWrite(target: string, body: string): Promise<void> {
   // Same-directory mktemp + rename. If the target dir is on a single
   // filesystem (the default for os.tmpdir() on macOS/Linux), rename is
   // atomic. Cross-mount setups need operator review (verification step).
-  const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+  // The randomUUID suffix avoids tmp-file collisions when multiple
+  // concurrent writes within the same process land on the same target in
+  // the same millisecond (PR #91 qwen review).
+  const tmp = `${target}.${process.pid}.${Date.now()}.${randomUUID().slice(0, 8)}.tmp`;
   await writeFile(tmp, body, { encoding: "utf8", mode: 0o600 });
   await rename(tmp, target);
 }

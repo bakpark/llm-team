@@ -91,3 +91,25 @@ describe("diagnostics — does not chmod paths above the diag dir", () => {
     expect(modeBits(workDir)).toBe(parentMode);
   });
 });
+
+describe("diagnostics — atomicWrite tmp file collision (PR #91 qwen review)", () => {
+  it("concurrent writes to distinct slots do not collide on the tmp filename", async () => {
+    // Drive 8 parallel writes against 8 distinct slots in the same dir.
+    // Without a uuid suffix on the tmp file, two writes hitting the same
+    // millisecond inside the same pid would race on rename.
+    const slotsArr = await Promise.all(
+      Array.from({ length: 8 }, (_, i) =>
+        openAttemptSlots({
+          ...sampleKey,
+          idempotencyKey: `concurrent-${i}`,
+        }),
+      ),
+    );
+    await Promise.all(
+      slotsArr.map((s, i) => s.stdout.write(`body-${i}`)),
+    );
+    for (let i = 0; i < slotsArr.length; i++) {
+      expect(modeBits(slotsArr[i].stdout.path)).toBe(0o600);
+    }
+  });
+});
