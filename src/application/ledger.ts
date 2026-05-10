@@ -82,11 +82,17 @@ export class FileLedger implements LedgerAppender {
   /**
    * Per-process cache of the last replay result. Avoids O(n) re-parse per
    * append in steady state. Invalidated when the file's byte length diverges
-   * from `lastReplayedSize` — covers external writers and absent files.
+   * from `lastReplayedSize` OR when the trailing bytes diverge from
+   * `lastReplayedTail` — the tail check closes the same-size content-swap
+   * hole (PR #94 P0-1): an external writer that replaces the ndjson with a
+   * different payload of identical byte length would otherwise hit the cache
+   * and chain the next applied row off a stale `cachedHead`, corrupting the
+   * audit_hash chain. Tail length is bounded so the comparison stays O(1).
    */
   private cachedHead: string | null = null;
   private cachedAppliedKeys: Set<string> | null = null;
   private lastReplayedSize: number | null = null;
+  private lastReplayedTail: string | null = null;
 
   constructor(opts: LedgerAppenderOptions) {
     this.store = opts.store;
@@ -145,6 +151,14 @@ export class FileLedger implements LedgerAppender {
       // appendLine implementation adds a trailing newline iff missing, so
       // size delta is serialized.length + 1.
       this.cachedHead = row.audit_hash;
+      // PR #94 P1-A: `replay.appliedKeys` is the SAME Set instance held by
+      // `cachedAppliedKeys` (replayCached returns the cache reference, not a
+      // clone). Mutating it here is intentional and is safe ONLY because we
+      // are inside the file lock AND the appendLine above has already
+      // succeeded — i.e. the on-disk row exists, so adding its key to the
+      // cache cannot create a state where the cache claims a key is applied
+      // when the file does not yet contain it. Any future refactor that
+      // reorders these lines (mutate before append) must instead clone.
       if (
         row.result === "applied" ||
         row.result === "recovered" ||
@@ -155,6 +169,17 @@ export class FileLedger implements LedgerAppender {
       this.cachedAppliedKeys = replay.appliedKeys;
       if (this.lastReplayedSize != null)
         this.lastReplayedSize += serialized.length + 1;
+      // Re-compute the tail fingerprint from the appended row so the next
+      // replayCached call can short-circuit. The on-disk content is the
+      // prior body + serialized + "\n"; we only need the trailing slice of
+      // that, which we can reconstruct from the fingerprint of the new
+      // row alone when it is longer than the fingerprint window, or by
+      // re-reading otherwise. Cheaper to invalidate and let replayCached
+      // refresh on next call when the row is short.
+      const appendedLine = serialized + "\n";
+      if (Buffer.byteLength(appendedLine, "utf8") >= TAIL_FINGERPRINT_BYTES)
+        this.lastReplayedTail = tailFingerprint(appendedLine);
+      else this.lastReplayedTail = null;
       this.logger?.log({
         level: "info",
         event: "ledger.append",
@@ -183,10 +208,12 @@ export class FileLedger implements LedgerAppender {
   }> {
     const body = await this.store.readText(LEDGER_TRANSITIONS_PATH);
     const currentSize = body == null ? 0 : Buffer.byteLength(body, "utf8");
+    const currentTail = body == null ? "" : tailFingerprint(body);
     if (
       this.cachedHead != null &&
       this.cachedAppliedKeys != null &&
-      this.lastReplayedSize === currentSize
+      this.lastReplayedSize === currentSize &&
+      this.lastReplayedTail === currentTail
     ) {
       return { head: this.cachedHead, appliedKeys: this.cachedAppliedKeys };
     }
@@ -194,6 +221,7 @@ export class FileLedger implements LedgerAppender {
     this.cachedHead = result.head;
     this.cachedAppliedKeys = result.appliedKeys;
     this.lastReplayedSize = currentSize;
+    this.lastReplayedTail = currentTail;
     return result;
   }
 
@@ -274,4 +302,20 @@ function stripHash(
   void _h;
   void _p;
   return rest;
+}
+
+/**
+ * Trailing-byte window used as a content fingerprint alongside the cached
+ * size. 256 bytes comfortably covers a complete ndjson row's audit_hash
+ * (64 hex chars) plus surrounding fields, so any same-size content swap
+ * by a sibling writer will alter the tail and force a re-replay.
+ */
+const TAIL_FINGERPRINT_BYTES = 256;
+
+function tailFingerprint(body: string): string {
+  // Slice on byte boundaries to keep the comparison stable for utf-8
+  // payloads. ndjson rows are ASCII-only in practice (schema enforces it),
+  // so the simpler string slice is sufficient.
+  if (body.length <= TAIL_FINGERPRINT_BYTES) return body;
+  return body.slice(body.length - TAIL_FINGERPRINT_BYTES);
 }

@@ -222,12 +222,29 @@ export type DaemonPreludeOutcome =
  * A fresh pause signal — i.e. a different signal_id or a state change —
  * still causes a single emission. Belt-and-suspenders with the ledger's
  * own duplicate-skip; the row never even reaches appendTransition.
+ *
+ * Sizing: keyed by daemon role label, which is a finite,
+ * daemon-process-local set (turn-worker, dialogue-coordinator, etc.). Map
+ * size is bounded by the daemon role count and never grows with traffic,
+ * so no eviction is required (PR #94 P1-C).
  */
 const preludeEmitMemo = new Map<string, { signal_id: string; state: ControlState }>();
+
+/**
+ * In-flight singleflight registry (PR #94 P0-2). Keyed by role, holds the
+ * Promise of the *first* runDaemonPrelude call that observed a non-RUNNING
+ * gate before its memo entry was committed. Concurrent callers from the
+ * same role (Promise.all etc.) await the same Promise instead of each
+ * racing into appendTransition and emitting redundant noop rows. Entries
+ * are removed once the originating call resolves so a subsequent gate
+ * crossing for a different (signal_id, state) tuple still takes effect.
+ */
+const preludeInflight = new Map<string, Promise<DaemonPreludeOutcome>>();
 
 /** Visible for tests: reset the per-process prelude memo. */
 export function __resetDaemonPreludeMemo(): void {
   preludeEmitMemo.clear();
+  preludeInflight.clear();
 }
 
 /**
@@ -259,6 +276,31 @@ export async function runDaemonPrelude(
       ? { action: "paused", state: "PAUSED" }
       : { action: "stopped", state: "STOPPED" };
   }
+  // PR #94 P0-2 singleflight: if another caller in the same process is
+  // already in the middle of emitting the noop row for this role, await
+  // its result instead of racing into a second appendTransition. Without
+  // this gate, Promise.all-style concurrent invocations would all pass the
+  // memo check above (memo is only written *after* appendTransition
+  // resolves) and each persist a redundant noop row — the ledger's own
+  // duplicate-skip cannot collapse them because result="noop" is excluded
+  // from appliedKeys, so every concurrent row hits the applied path.
+  const inflight = preludeInflight.get(deps.role);
+  if (inflight != null) return inflight;
+  const promise = emitPreludeNoop(deps, current.state, current.signal_id, action);
+  preludeInflight.set(deps.role, promise);
+  try {
+    return await promise;
+  } finally {
+    preludeInflight.delete(deps.role);
+  }
+}
+
+async function emitPreludeNoop(
+  deps: DaemonPreludeDeps,
+  state: "PAUSED" | "STOPPED" | ControlState,
+  signal_id: string,
+  action: "paused" | "stopped",
+): Promise<DaemonPreludeOutcome> {
   // RGC-SIGNALS: emit a noop row so operators see the gate firing. The
   // idempotency key folds together (role, signal_id, state) so a daemon
   // looping while paused does not flood the ledger with duplicates per
@@ -267,8 +309,8 @@ export async function runDaemonPrelude(
     scope: "pause_resume",
     parts: {
       role: deps.role,
-      state: current.state,
-      signal_id: current.signal_id,
+      state,
+      signal_id,
     },
   });
   await deps.ledger.appendTransition({
@@ -277,7 +319,7 @@ export async function runDaemonPrelude(
     object_id: "system",
     object_kind: "system",
     from_state: null,
-    to_state: current.state,
+    to_state: state,
     loop_kind: null,
     phase: null,
     slice_id: null,
@@ -300,12 +342,12 @@ export async function runDaemonPrelude(
     lease_token: null,
     lease_kind: null,
     result: "noop",
-    result_detail: `paused:role=${deps.role}:signal_id=${current.signal_id}`,
+    result_detail: `paused:role=${deps.role}:signal_id=${signal_id}`,
     timestamp: deps.clock.isoNow(),
   });
   preludeEmitMemo.set(deps.role, {
-    signal_id: current.signal_id,
-    state: current.state,
+    signal_id,
+    state: state as ControlState,
   });
   return action === "paused"
     ? { action: "paused", state: "PAUSED" }
