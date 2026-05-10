@@ -333,7 +333,7 @@ async function runOneInnerTurnInner(
         deps.cfg.contextBudget,
         "inner",
         "tdd_build",
-        deps.cfg.agentTimeoutSec ?? 120,
+        deps.cfg.agentTimeoutSec,
       ),
       idempotency: {
         scope: "per_turn",
@@ -346,6 +346,11 @@ async function runOneInnerTurnInner(
         },
       },
       runtimeMetadata: { workspace_pin_before: prep.headBefore },
+      // PR #110 review P1-b (gpt5.5): forward operator
+      // `context_budget` so per-phase `token_hard_cap` reaches
+      // `composePromptWithBudget`. Previously this only fed the
+      // timeout resolver, leaving prompt-budget overrides silent.
+      contextBudget: deps.cfg.contextBudget,
     },
     // incident-9: wire StorePort so `callAgent` resolves the
     // `(slice, body)` manifest entry into the prompt's `# Inputs`
@@ -787,14 +792,21 @@ async function emitInvalidTurn(
  * PR #95 review P0-1 (incident-3): flip a SESSION_OPEN inner session to
  * ABANDONED after a retry cap is hit, and record a session_finalize ledger
  * row so the daemon's pickReadyInnerTurn selector (which guards on
- * `state === "SESSION_OPEN"`) stops re-picking it. The session stays
- * attached to its slice; the slice itself is left in its current state —
- * operator/recovery sweep handles the slice-side cleanup, identical to the
- * existing TIMEOUT path. `abandoned_reason` is `no_progress` because
- * `AbandonedReason` does not have a dedicated value for either incident-3
- * (`prompt_compose_truncation`) or incident-10 (`inner_lr_invoke_timeout`)
- * — the semantics align (prompt cannot be composed / runner keeps timing
- * out → no progress is achievable).
+ * `state === "SESSION_OPEN"`) stops re-picking it. `abandoned_reason` is
+ * `no_progress` because `AbandonedReason` does not have a dedicated value
+ * for either incident-3 (`prompt_compose_truncation`) or incident-10
+ * (`inner_lr_invoke_timeout`) — the semantics align (prompt cannot be
+ * composed / runner keeps timing out → no progress is achievable).
+ *
+ * PR #110 review P0 (gpt5.5): the slice MUST also be restored to
+ * SLICE_READY with `current_session_id: null` in the same flow. Otherwise
+ * the slice is left in SLICE_BUILDING pointing at an ABANDONED session,
+ * and the next `pickReadyInnerTurn` re-selects that SLICE_BUILDING slice
+ * (line 76 of ready-object), reads the session metadata at line 100, sees
+ * `state !== "SESSION_OPEN"`, and throws `SessionNotOpenError` — wedging
+ * the slice permanently. Wrapping the slice write in `withFileLock` is
+ * symmetric to `recovery.reanimateSliceIfNeeded` so a concurrent recovery
+ * sweep cannot interleave.
  *
  * `tag` differentiates the idempotency key + finalization_decision label so
  * separate cap-hits do not collide.
@@ -819,6 +831,27 @@ async function abandonInnerSession(
     layout.sessionMetadata(finalized.session_id),
     JSON.stringify(finalized, null, 2),
   );
+
+  // PR #110 review P0: restore slice → SLICE_READY + clear
+  // current_session_id so `pickReadyInnerTurn` does not re-select a
+  // SLICE_BUILDING slice that points at an ABANDONED session and throw
+  // `SessionNotOpenError`. File-lock symmetry with the success path
+  // (`SLICE_REVIEWING`) and `recovery.reanimateSliceIfNeeded`.
+  const slicePath = layout.slice(slice.slice_id);
+  const previousSliceState = slice.state;
+  await deps.store.withFileLock(slicePath, async () => {
+    const restoredSlice = Slice.parse({
+      ...slice,
+      state: "SLICE_READY",
+      current_session_id: null,
+      updated_at: deps.clock.isoNow(),
+    });
+    await deps.store.writeAtomic(
+      slicePath,
+      JSON.stringify(restoredSlice, null, 2),
+    );
+  });
+
   await deps.ledger.appendTransition({
     transition_id: newMonotonicId(deps.clock.now()),
     target_id: deps.cfg.targetId,
@@ -851,6 +884,50 @@ async function abandonInnerSession(
         final_verdict: "ABANDONED",
         finalization_decision: `abandoned:${tag}`,
         workspace_revision_pin_at_convergence: finalized.workspace_revision_pin,
+      },
+    }),
+    lease_token: null,
+    lease_kind: null,
+    result: "applied",
+    result_detail: reason,
+    timestamp: deps.clock.isoNow(),
+  });
+
+  // PR #110 review P0: ledger row for the slice rollback so the audit
+  // trail records the SLICE_BUILDING → SLICE_READY transition that
+  // accompanies the abandonment.
+  await deps.ledger.appendTransition({
+    transition_id: newMonotonicId(deps.clock.now()),
+    target_id: deps.cfg.targetId,
+    object_id: slice.slice_id,
+    object_kind: "slice",
+    from_state: previousSliceState,
+    to_state: "SLICE_READY",
+    loop_kind: "inner",
+    phase: null,
+    slice_id: slice.slice_id,
+    slice_kind: slice.slice_kind,
+    dod_revision: slice.dod_revision_pin,
+    session_id: finalized.session_id,
+    turn_index: null,
+    slot_kind: "delivery",
+    agent_profile_id: "forge",
+    contribution_kind: null,
+    action_kind: "session_progress",
+    final_verdict: null,
+    caller_id: deps.cfg.callerId,
+    manifest_id: null,
+    input_revision_pins: [],
+    output_hash: null,
+    verification_run_id: null,
+    metric_run_id: null,
+    idempotency_key: idempotencyKey({
+      scope: "external_observation",
+      parts: {
+        kind: "abandon_slice_rollback",
+        slice_id: slice.slice_id,
+        session_id: finalized.session_id,
+        tag,
       },
     }),
     lease_token: null,

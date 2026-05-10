@@ -76,17 +76,19 @@ describe("incident-10 — resolveAgentTimeoutSec", () => {
     const cfg = ContextBudget.parse({
       "inner.tdd_build": { token_hard_cap: 128_000, timeout_sec: 900 },
     });
-    expect(resolveAgentTimeoutSec(cfg, "inner", "tdd_build", 120)).toBe(900);
+    expect(resolveAgentTimeoutSec(cfg, "inner", "tdd_build", undefined)).toBe(
+      900,
+    );
   });
 
-  it("falls back to architecture default for the (loop, step) pair", () => {
-    expect(resolveAgentTimeoutSec(undefined, "inner", "tdd_build", 120)).toBe(
-      TIMEOUT_SEC_DEFAULTS["inner.tdd_build"],
-    );
-    expect(resolveAgentTimeoutSec({}, "outer", "Discovery", 120)).toBe(
+  it("falls back to architecture default for the (loop, step) pair when no caller override", () => {
+    expect(
+      resolveAgentTimeoutSec(undefined, "inner", "tdd_build", undefined),
+    ).toBe(TIMEOUT_SEC_DEFAULTS["inner.tdd_build"]);
+    expect(resolveAgentTimeoutSec({}, "outer", "Discovery", undefined)).toBe(
       TIMEOUT_SEC_DEFAULTS["outer.Discovery"],
     );
-    expect(resolveAgentTimeoutSec({}, "middle", "review", 120)).toBe(
+    expect(resolveAgentTimeoutSec({}, "middle", "review", undefined)).toBe(
       TIMEOUT_SEC_DEFAULTS["middle.review"],
     );
   });
@@ -95,13 +97,34 @@ describe("incident-10 — resolveAgentTimeoutSec", () => {
     expect(resolveAgentTimeoutSec({}, "rogue", "step", 77)).toBe(77);
   });
 
+  it("falls back to 120 when caller-supplied fallback is undefined and (loop, step) is unknown", () => {
+    expect(resolveAgentTimeoutSec({}, "rogue", "step", undefined)).toBe(120);
+  });
+
   it("ignores override when it is missing on the matching entry", () => {
     const cfg = ContextBudget.parse({
       "inner.tdd_build": { token_hard_cap: 128_000 },
     });
-    expect(resolveAgentTimeoutSec(cfg, "inner", "tdd_build", 120)).toBe(
+    expect(resolveAgentTimeoutSec(cfg, "inner", "tdd_build", undefined)).toBe(
       TIMEOUT_SEC_DEFAULTS["inner.tdd_build"],
     );
+  });
+
+  it("PR #110 P1-a: legacy agentTimeoutSec override wins over architecture default (operator-override precedence)", () => {
+    // Operator explicitly set `agentTimeoutSec: 30` (legacy global override)
+    // and did NOT set per-phase `context_budget.*.timeout_sec`. The
+    // resolver must honor 30s, not silently inflate to TIMEOUT_SEC_DEFAULTS.
+    expect(resolveAgentTimeoutSec(undefined, "inner", "tdd_build", 30)).toBe(
+      30,
+    );
+    expect(resolveAgentTimeoutSec({}, "outer", "Discovery", 45)).toBe(45);
+  });
+
+  it("PR #110 P1-a: per-phase context_budget.timeout_sec still wins over legacy agentTimeoutSec", () => {
+    const cfg = ContextBudget.parse({
+      "inner.tdd_build": { token_hard_cap: 128_000, timeout_sec: 900 },
+    });
+    expect(resolveAgentTimeoutSec(cfg, "inner", "tdd_build", 30)).toBe(900);
   });
 
   it("architecture defaults match the contract: outer/middle short, inner.tdd_build 600", () => {

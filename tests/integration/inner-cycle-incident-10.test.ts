@@ -186,7 +186,7 @@ describe("incident-10 — agentTimeoutSec resolution", () => {
     expect(runner.lastTimeoutSec).toBe(600);
   });
 
-  it("still honors the legacy agentTimeoutSec fallback when the (loop, step) entry has no timeout_sec", async () => {
+  it("PR #110 P1-a: legacy agentTimeoutSec wins over architecture default when no per-phase timeout_sec is set", async () => {
     const workdir = mkdtempSync(join(tmpdir(), "incident-10-legacy-"));
     const wsRoot = mkdtempSync(join(tmpdir(), "ws-incident-10-legacy-"));
     seedReadySlice(workdir);
@@ -196,17 +196,18 @@ describe("incident-10 — agentTimeoutSec resolution", () => {
         workdir,
         wsRoot,
         runner,
-        // The architecture default for inner.tdd_build is 600s — without a
-        // per-entry timeout_sec, that wins over the caller-supplied 120s
-        // legacy fallback. This is the documented backward-compat semantics:
-        // operators who never customise stay on architecture defaults.
-        agentTimeoutSec: 120,
+        // Operator explicitly set the legacy global `agentTimeoutSec: 30`
+        // and did NOT supply a per-phase `context_budget.*.timeout_sec`.
+        // Per PR #110 P1-a, the explicit caller override must take
+        // precedence over `TIMEOUT_SEC_DEFAULTS["inner.tdd_build"]` so
+        // operator-set short timeouts are not silently inflated.
+        agentTimeoutSec: 30,
         contextBudget: {
           "inner.tdd_build": { token_hard_cap: 128_000 },
         },
       }),
     );
-    expect(runner.lastTimeoutSec).toBe(600);
+    expect(runner.lastTimeoutSec).toBe(30);
   });
 });
 
@@ -341,5 +342,96 @@ describe("incident-10 — inner_lr_invoke_timeout retry cap", () => {
       }),
     );
     expect(second.kind).toBe("inner_lr_invoke_escalated");
+  });
+
+  it("PR #110 P0: on inner_lr_invoke_escalated the slice is rolled back to SLICE_READY with current_session_id=null and a slice-transition ledger row is appended", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "incident-10-p0-"));
+    const wsRoot = mkdtempSync(join(tmpdir(), "ws-incident-10-p0-"));
+    seedReadySlice(workdir);
+
+    const runner = new TimeoutRunner();
+    // cap=1 so we escalate on the 2nd pickup without injecting synthetic rows.
+    const first = await runOneInnerTurn(
+      buildDeps({
+        workdir,
+        wsRoot,
+        runner,
+        failurePolicy: { inner_lr_timeout_cap: 1 },
+      }),
+    );
+    expect(first.kind).toBe("invalid_envelope");
+    if (first.kind !== "invalid_envelope") return;
+    const sessionId = first.sessionId;
+
+    // After 1st turn the slice should be SLICE_BUILDING with current_session_id set.
+    const sliceMid = readJson(workdir, layout.slice(SLICE_ID), Slice.parse);
+    expect(sliceMid.state).toBe("SLICE_BUILDING");
+    expect(sliceMid.current_session_id).toBe(sessionId);
+
+    const second = await runOneInnerTurn(
+      buildDeps({
+        workdir,
+        wsRoot,
+        runner,
+        failurePolicy: { inner_lr_timeout_cap: 1 },
+      }),
+    );
+    expect(second.kind).toBe("inner_lr_invoke_escalated");
+
+    // P0 contract: slice restored to SLICE_READY, current_session_id cleared.
+    const sliceAfter = readJson(workdir, layout.slice(SLICE_ID), Slice.parse);
+    expect(sliceAfter.state).toBe("SLICE_READY");
+    expect(sliceAfter.current_session_id).toBeNull();
+
+    // Ledger must contain a slice transition row recording the rollback.
+    const rows = readNdjsonLines(workdir, "ledger/transitions.ndjson").map(
+      (l) => LedgerRow.parse(JSON.parse(l)),
+    );
+    const sliceRollback = rows.find(
+      (r) =>
+        r.object_kind === "slice" &&
+        r.object_id === SLICE_ID &&
+        r.to_state === "SLICE_READY" &&
+        r.session_id === sessionId &&
+        r.idempotency_key.includes("abandon_slice_rollback"),
+    );
+    expect(
+      sliceRollback,
+      "must record slice SLICE_BUILDING → SLICE_READY rollback row",
+    ).toBeDefined();
+  });
+});
+
+describe("incident-10 — context_budget forwarding (PR #110 P1-b)", () => {
+  it("forwards cfg.contextBudget to callAgent so per-phase token_hard_cap reaches composePromptWithBudget", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "incident-10-budget-"));
+    const wsRoot = mkdtempSync(join(tmpdir(), "ws-incident-10-budget-"));
+    seedReadySlice(workdir);
+
+    // Tiny per-phase token_hard_cap forces composePromptWithBudget to
+    // produce `context_budget_truncation` BEFORE the LLM runner is
+    // invoked. This is observable proof that `cfg.contextBudget` made it
+    // through callAgent → composePromptWithBudget. Without the P1-b fix,
+    // the resolver would only see contextBudget for the timeout path and
+    // composePromptWithBudget would fall back to architecture defaults
+    // (no truncation triggered).
+    const runner = new TimeoutRunner();
+    const outcome = await runOneInnerTurn(
+      buildDeps({
+        workdir,
+        wsRoot,
+        runner,
+        contextBudget: {
+          "inner.tdd_build": { token_hard_cap: 1 },
+        },
+      }),
+    );
+
+    expect(outcome.kind).toBe("invalid_envelope");
+    if (outcome.kind !== "invalid_envelope") return;
+    expect(outcome.stage).toBe("prompt_compose");
+    expect(outcome.reason).toBe("context_budget_truncation");
+    // Runner must NOT have been invoked — composePromptWithBudget short-circuits.
+    expect(runner.callCount).toBe(0);
   });
 });

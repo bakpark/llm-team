@@ -460,7 +460,7 @@ export async function runOneOuterTurn(
         deps.contextBudget,
         "outer",
         phase,
-        deps.agentTimeoutSec ?? 120,
+        deps.agentTimeoutSec,
       ),
       idempotency: {
         scope: "per_turn",
@@ -473,6 +473,11 @@ export async function runOneOuterTurn(
         },
       },
       runtimeMetadata: { milestone_id: milestone.milestone_id, phase },
+      // PR #110 review P1-b (gpt5.5): forward operator
+      // `context_budget` so per-phase `token_hard_cap` reaches
+      // `composePromptWithBudget`. Previously this only fed the
+      // timeout resolver, leaving prompt-budget overrides silent.
+      contextBudget: deps.contextBudget,
     },
     { llmRunner: deps.llmRunner, manifestBuilder, store: deps.store },
   );

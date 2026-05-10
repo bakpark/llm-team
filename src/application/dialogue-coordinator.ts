@@ -318,7 +318,7 @@ async function runMiddleReviewTurnInner(
         deps.contextBudget,
         "middle",
         "review",
-        deps.agentTimeoutSec ?? 120,
+        deps.agentTimeoutSec,
       ),
       idempotency: {
         scope: "per_turn",
@@ -335,6 +335,11 @@ async function runMiddleReviewTurnInner(
         pre_merge_workspace_revision:
           sliceMerge.pre_merge_workspace_revision ?? "",
       },
+      // PR #110 review P1-b (gpt5.5): forward operator
+      // `context_budget` so per-phase `token_hard_cap` reaches
+      // `composePromptWithBudget`. Previously this only fed the
+      // timeout resolver, leaving prompt-budget overrides silent.
+      contextBudget: deps.contextBudget,
     },
     { llmRunner: deps.llmRunner, manifestBuilder },
   );

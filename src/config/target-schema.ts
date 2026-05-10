@@ -365,27 +365,33 @@ export const TIMEOUT_SEC_DEFAULTS: Readonly<Record<LoopStep, number>> =
 /**
  * Resolves the LlmRunner timeout (seconds) for a `(parent_loop,
  * phase_or_purpose)` pair. Lookup order:
- *   1. Operator override at `cfg[loop.step].timeout_sec` (if present)
- *   2. `TIMEOUT_SEC_DEFAULTS[loop.step]` (if `(loop, step)` is a known LoopStep)
- *   3. Caller-supplied `fallbackSec` (preserves the legacy `?? 120` semantics)
+ *   1. Per-phase operator override at `cfg[loop.step].timeout_sec`
+ *   2. Caller-supplied legacy `agentTimeoutSec` override (only when
+ *      explicitly set — `undefined` skips this step). PR #110 review P1
+ *      (qwen): keeping legacy operator overrides ahead of architecture
+ *      defaults prevents `agentTimeoutSec: 30` from being silently
+ *      shadowed by `TIMEOUT_SEC_DEFAULTS[loop.step]`.
+ *   3. `TIMEOUT_SEC_DEFAULTS[loop.step]` (if `(loop, step)` is a known LoopStep)
+ *   4. `120` as final last-resort fallback (mirrors the previous default).
  *
  * Unlike `resolveContextBudget`, this never returns null — an unknown
- * (loop, step) simply falls through to `fallbackSec`. Callers are typically
- * already inside a `LoopStep`-typed branch, so this is defensive.
+ * (loop, step) falls through to step 2/4. Callers are typically already
+ * inside a `LoopStep`-typed branch, so this is defensive.
  */
 export function resolveAgentTimeoutSec(
   cfg: ContextBudget | undefined,
   parentLoop: string,
   phaseOrPurpose: string,
-  fallbackSec: number,
+  fallbackSec: number | undefined,
 ): number {
   const key = `${parentLoop}.${phaseOrPurpose}`;
   const parsed = LoopStep.safeParse(key);
-  if (!parsed.success) return fallbackSec;
+  if (!parsed.success) return fallbackSec ?? 120;
   const override = cfg?.[parsed.data]?.timeout_sec;
   if (override != null && override > 0) return override;
+  if (fallbackSec != null && fallbackSec > 0) return fallbackSec;
   const def = TIMEOUT_SEC_DEFAULTS[parsed.data];
-  return def ?? fallbackSec;
+  return def ?? 120;
 }
 
 /**
