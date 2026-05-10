@@ -581,3 +581,117 @@ describe("callAgent — manifest body inline (incident-1b Bug B)", () => {
     expect(prompt).toContain("request_changes");
   });
 });
+
+/**
+ * phase-0-stabilization C — when `deps.workdirRoot` is provided, the
+ * composed prompt body is persisted under
+ * `<workdir>/prompts/<sessionId>/<turnIndex>.md` instead of an OS-tmp
+ * mkdtempSync directory. The historical mkdtemp behaviour leaked one tmp
+ * directory per turn (6,503 dirs accumulated on a single self-host run);
+ * the workdir-root variant gives a stable predictable path that survives
+ * daemon restarts.
+ */
+describe("callAgent — prompt persistence under workdir (phase-0-stabilization C)", () => {
+  it("writes the composed prompt to <workdir>/prompts/<sessionId>/<turnIndex>.md when workdirRoot is provided", async () => {
+    const { existsSync, readFileSync } = await import("node:fs");
+    const fixtureDir = mkdtempSync(join(tmpdir(), "fixt-"));
+    writeFileSync(
+      join(fixtureDir, "forge-tdd_build.json"),
+      envelopeFixture(),
+      "utf8",
+    );
+    const cwd = mkdtempSync(join(tmpdir(), "cwd-"));
+    const workdir = mkdtempSync(join(tmpdir(), "workdir-"));
+    const runner = new AdapterRunnerPort(new FakeAdapter({ fixtureDir }));
+    const builder = new ManifestBuilder(
+      new StaticResolver("deadbeef"),
+      new FixedClock(0),
+    );
+    const out = await callAgent(
+      {
+        agentProfileId: "forge",
+        agentRoleInSession: "lead",
+        parentLoop: "inner",
+        phaseOrPurpose: "tdd_build",
+        sessionId: SESSION_ID,
+        turnIndex: 0,
+        manifest: buildManifest(),
+        workspaceRevisionPin: "deadbeef",
+        agentCwd: cwd,
+        timeoutSec: 30,
+        idempotency: {
+          scope: "per_turn",
+          parts: {
+            session_id: SESSION_ID,
+            turn_index: 0,
+            agent_profile_id: "forge",
+            manifest_id: MANIFEST_ID,
+            input_revision_pins: ["deadbeef"],
+          },
+        },
+        runtimeMetadata: { workspace_commit: "deadbeef" },
+      },
+      { llmRunner: runner, manifestBuilder: builder, workdirRoot: workdir },
+    );
+    expect(out.ok).toBe(true);
+    // Prompt lives at the predictable path — the runner's readFile of
+    // promptRef successfully composes stdin, which is why the outcome is
+    // ok=true. Assert the file exists and has frontmatter.
+    const promptPath = join(workdir, "prompts", SESSION_ID, "0.md");
+    expect(existsSync(promptPath)).toBe(true);
+    const body = readFileSync(promptPath, "utf8");
+    expect(body.startsWith("---\n")).toBe(true);
+    expect(body).toContain("# Context");
+    expect(body).toContain("# Instruction");
+    expect(body).toContain("# Output Schema");
+  });
+
+  it("falls back to OS-tmp when workdirRoot is omitted (legacy callers / single-shot tests)", async () => {
+    const { existsSync } = await import("node:fs");
+    const fixtureDir = mkdtempSync(join(tmpdir(), "fixt-"));
+    writeFileSync(
+      join(fixtureDir, "forge-tdd_build.json"),
+      envelopeFixture(),
+      "utf8",
+    );
+    const cwd = mkdtempSync(join(tmpdir(), "cwd-"));
+    const workdir = mkdtempSync(join(tmpdir(), "workdir-"));
+    const runner = new AdapterRunnerPort(new FakeAdapter({ fixtureDir }));
+    const builder = new ManifestBuilder(
+      new StaticResolver("deadbeef"),
+      new FixedClock(0),
+    );
+    const out = await callAgent(
+      {
+        agentProfileId: "forge",
+        agentRoleInSession: "lead",
+        parentLoop: "inner",
+        phaseOrPurpose: "tdd_build",
+        sessionId: SESSION_ID,
+        turnIndex: 0,
+        manifest: buildManifest(),
+        workspaceRevisionPin: "deadbeef",
+        agentCwd: cwd,
+        timeoutSec: 30,
+        idempotency: {
+          scope: "per_turn",
+          parts: {
+            session_id: SESSION_ID,
+            turn_index: 0,
+            agent_profile_id: "forge",
+            manifest_id: MANIFEST_ID,
+            input_revision_pins: ["deadbeef"],
+          },
+        },
+        runtimeMetadata: { workspace_commit: "deadbeef" },
+      },
+      // No workdirRoot in deps — legacy fallback path.
+      { llmRunner: runner, manifestBuilder: builder },
+    );
+    expect(out.ok).toBe(true);
+    // The fallback path does NOT write under workdir.
+    expect(existsSync(join(workdir, "prompts", SESSION_ID, "0.md"))).toBe(
+      false,
+    );
+  });
+});

@@ -1,7 +1,7 @@
 import { mkdtempSync } from "node:fs";
-import { writeFile, readFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { ContextManifest } from "../domain/schema/manifest.js";
 import type {
   AgentAuthoredEnvelope,
@@ -100,6 +100,20 @@ export interface AgentIoDeps {
    * sentinel placeholder so the LLM is told the body is not present.
    */
   store?: StorePort;
+  /**
+   * phase-0-stabilization C — absolute path to the workdir root. When
+   * provided, the composed prompt body is persisted to
+   * `<workdirRoot>/prompts/<sessionId>/<turnIndex>.md` instead of the
+   * historical OS-tmp `mkdtempSync` path. Predictable layout enables
+   * post-incident replay (`<workdir>/prompts/...` survives daemon restarts
+   * and is colocated with `sessions/`, `manifests/`, `ledger/`).
+   *
+   * When omitted, the legacy tmp behaviour is preserved so callers (single-
+   * shot tests, fixtures-only adapters) that have no workdir notion keep
+   * working without churn. Production daemon wiring always sets this — see
+   * `cli/daemon.ts` and `cli/runner.ts`.
+   */
+  workdirRoot?: string;
 }
 
 export async function callAgent(
@@ -154,7 +168,15 @@ export async function callAgent(
     };
   }
   const promptBody = composeOut.body;
-  const promptRef = await writePromptTmp(input.sessionId, input.turnIndex, promptBody);
+  const promptRef =
+    deps.workdirRoot != null
+      ? await writePromptUnderWorkdir(
+          deps.workdirRoot,
+          input.sessionId,
+          input.turnIndex,
+          promptBody,
+        )
+      : await writePromptTmp(input.sessionId, input.turnIndex, promptBody);
 
   const runnerInput: LlmRunnerInput = {
     agentProfileId: input.agentProfileId,
@@ -259,6 +281,34 @@ async function writePromptTmp(
 ): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), "llm-team-prompt-"));
   const path = join(dir, `${sessionId}-${turnIndex}.md`);
+  await writeFile(path, body, "utf8");
+  return path;
+}
+
+/**
+ * phase-0-stabilization C — write the composed prompt body to
+ * `<workdirRoot>/prompts/<sessionId>/<turnIndex>.md` and return the absolute
+ * path the LlmRunner consumes via `runInvoke.composeStdin → readFile`.
+ *
+ * Replaces `writePromptTmp` for callers that thread `workdirRoot` through
+ * `AgentIoDeps`. The historical `mkdtempSync(tmpdir(), "llm-team-prompt-")`
+ * behaviour leaked one tmp directory per turn (6,503 dirs accumulated on a
+ * single self-host run) with no cleanup hook. Persisting under the workdir
+ * gives a stable, predictable, operator-inspectable path for post-incident
+ * replay, and a single tree to GC when the operator chooses.
+ *
+ * Idempotent on (sessionId, turnIndex): rewrite of an existing file is
+ * tolerated because the runner re-reads the body on each invocation, but
+ * the typical caller writes once before invoking the runner.
+ */
+async function writePromptUnderWorkdir(
+  workdirRoot: string,
+  sessionId: string,
+  turnIndex: number,
+  body: string,
+): Promise<string> {
+  const path = join(workdirRoot, "prompts", sessionId, `${turnIndex}.md`);
+  await mkdir(dirname(path), { recursive: true });
   await writeFile(path, body, "utf8");
   return path;
 }

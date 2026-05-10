@@ -21,6 +21,7 @@
  */
 import { DialogueSession, type DialogueSession as DialogueSessionT } from "../domain/schema/dialogue-session.js";
 import type { Envelope } from "../domain/schema/envelope.js";
+import { ContextManifest, type ContextManifest as ContextManifestT } from "../domain/schema/manifest.js";
 import { SliceMerge, type SliceMerge as SliceMergeT } from "../domain/schema/slice-merge.js";
 import { Slice, type Slice as SliceT } from "../domain/schema/slice.js";
 import type { CallerRoutingDecision } from "../domain/schema/session-turn.js";
@@ -104,6 +105,13 @@ export interface CoordinatorDeps {
    */
   lease?: LeasePort;
   leaseConfig?: LeaseConfig;
+  /**
+   * phase-0-stabilization C — absolute workdir root. Threaded into
+   * `callAgent` so the composed middle-review prompt persists to
+   * `<workdir>/prompts/<sessionId>/<turnIndex>.md` instead of OS-tmp.
+   * Optional for backward compatibility with existing tests.
+   */
+  workdirRoot?: string;
 }
 
 export type RunMiddleReviewOutcome =
@@ -348,7 +356,15 @@ async function runMiddleReviewTurnInner(
     // skips body inlining and `# Inputs` falls back to
     // `[BODY NOT INLINED]` — the very regression incident-11 set out to
     // fix. Mirror the inner-cycle wiring at `turn-worker.ts:361`.
-    { llmRunner: deps.llmRunner, manifestBuilder, store: deps.store },
+    //
+    // phase-0-stabilization C: forward `workdirRoot` so the composed
+    // prompt persists under `<workdir>/prompts/<session>/<turn>.md`.
+    {
+      llmRunner: deps.llmRunner,
+      manifestBuilder,
+      store: deps.store,
+      workdirRoot: deps.workdirRoot,
+    },
   );
 
   if (!agentOut.ok) {
@@ -714,15 +730,191 @@ export async function pickReadyMiddleReview(
     );
     if (sBody == null) continue;
     const existing = DialogueSession.parse(JSON.parse(sBody));
-    if (existing.state !== "SESSION_OPEN") continue;
-    return {
-      slice,
-      sliceMerge: sm,
-      session: existing,
-      newSession: false,
-    };
+    if (existing.state === "SESSION_OPEN") {
+      return {
+        slice,
+        sliceMerge: sm,
+        session: existing,
+        newSession: false,
+      };
+    }
+    // phase-0-stabilization A: AWAITING_REVALIDATION reanimator.
+    //
+    // Background: a session_lease that expired during a long-running
+    // sentinel turn drives the session to AWAITING_REVALIDATION (see
+    // recovery.ts §reanimateSessionIfNeeded). The previous pickup filter
+    // (`if (existing.state !== "SESSION_OPEN") continue;`) then permanently
+    // skipped the session — and because `sm.review_session_id` is already
+    // populated, the new-session branch above is also skipped. The slice
+    // wedges in SLICE_REVIEWING with no progress path.
+    //
+    // Resolution: when a middle-review session is AWAITING_REVALIDATION,
+    // recompute the canonical input revision pins from the current slice +
+    // sliceMerge state and compare against the pins recorded in the most
+    // recent SessionTurn's manifest. If equivalent (no drift), transition
+    // the session back to SESSION_OPEN under a file lock + ledger row and
+    // resume the review. If drift is present, leave the session alone — the
+    // cross-slot-stale policy or operator action handles re-base.
+    if (existing.state === "AWAITING_REVALIDATION") {
+      const reanimated = await reanimateAwaitingRevalidationReviewSession(
+        slice,
+        sm,
+        existing,
+        deps,
+      );
+      if (reanimated != null) {
+        return {
+          slice,
+          sliceMerge: sm,
+          session: reanimated,
+          newSession: false,
+        };
+      }
+      continue;
+    }
+    // CONVERGED / TIMEOUT / ABANDONED — terminal, do not re-pick.
+    continue;
   }
   return null;
+}
+
+/**
+ * phase-0-stabilization A — recompute the middle-review input revision pins
+ * for an AWAITING_REVALIDATION session and, if they match the pins recorded
+ * in the latest persisted SessionTurn, transition the session back to
+ * SESSION_OPEN so the daemon's pickReadyMiddleReview can resume it.
+ *
+ * Pin equivalence is the conservative criterion: middle-review pins are
+ * derived purely from `slice.dod_revision_pin`, `sliceMerge
+ * .pre_merge_workspace_revision`, and `verification_run.id` (see
+ * `MiddleReviewPinResolver`). When the recomputed values match the prior
+ * manifest entry-by-entry, no input has drifted relative to the session's
+ * last turn, and resuming is safe.
+ *
+ * Edge cases:
+ *   - `current_turn_index === 0` (no turns yet): no manifest exists to
+ *     compare against, and no work has been pinned to anything that could
+ *     drift. Re-open directly.
+ *   - latest SessionTurn or manifest unreadable: bail (return null) — the
+ *     session stays AWAITING_REVALIDATION and an operator decides next.
+ *   - any pin differs: bail. Drift is handled by the existing cross-slot-
+ *     stale / abandon paths; this helper is only for the "lease expired,
+ *     nothing else changed" case.
+ *
+ * Atomicity: the state transition runs inside `withFileLock(sessionMetadata)`
+ * with a re-read so a concurrent recovery sweep cannot interleave. A second
+ * call after success is a noop (the live state is already SESSION_OPEN).
+ *
+ * Returns the live session record (post-transition) on success, null
+ * otherwise.
+ */
+async function reanimateAwaitingRevalidationReviewSession(
+  slice: SliceT,
+  sliceMerge: SliceMergeT,
+  session: DialogueSessionT,
+  deps: Pick<CoordinatorDeps, "store" | "clock" | "ledger" | "callerId" | "targetId">,
+): Promise<DialogueSessionT | null> {
+  if (session.current_turn_index > 0) {
+    const lastIdx = session.current_turn_index - 1;
+    const turnBody = await deps.store.readText(
+      layout.sessionTurn(session.session_id, lastIdx),
+    );
+    if (turnBody == null) return null;
+    let priorManifestId: string;
+    try {
+      const turn = JSON.parse(turnBody) as { input_manifest_id?: unknown };
+      if (typeof turn.input_manifest_id !== "string") return null;
+      priorManifestId = turn.input_manifest_id;
+    } catch {
+      return null;
+    }
+    const manifestBody = await deps.store.readText(
+      layout.manifest(priorManifestId),
+    );
+    if (manifestBody == null) return null;
+    let priorManifest: ContextManifestT;
+    try {
+      priorManifest = ContextManifest.parse(JSON.parse(manifestBody));
+    } catch {
+      return null;
+    }
+    const resolver = new MiddleReviewPinResolver(slice, sliceMerge);
+    for (const entry of priorManifest.entries) {
+      const livePin = await resolver.resolve({
+        object_kind: entry.object_kind,
+        object_id: entry.object_id,
+        fetch_scope: entry.fetch_scope,
+        required: entry.required,
+        purpose: entry.purpose,
+      });
+      if (livePin !== entry.revision_pin) return null;
+    }
+  }
+  // Pins matched (or no turns yet) → flip back to SESSION_OPEN under lock.
+  const sessionPath = layout.sessionMetadata(session.session_id);
+  const transitioned = await deps.store.withFileLock(sessionPath, async () => {
+    const fresh = await deps.store.readText(sessionPath);
+    if (fresh == null) return null;
+    let live: DialogueSessionT;
+    try {
+      live = DialogueSession.parse(JSON.parse(fresh));
+    } catch {
+      return null;
+    }
+    if (live.state !== "AWAITING_REVALIDATION") return null;
+    const next = DialogueSession.parse({
+      ...live,
+      state: "SESSION_OPEN",
+      updated_at: deps.clock.isoNow(),
+    });
+    await deps.store.writeAtomic(sessionPath, JSON.stringify(next, null, 2));
+    return next;
+  });
+  if (transitioned == null) return null;
+  await deps.ledger.appendTransition({
+    transition_id: newMonotonicId(deps.clock.now()),
+    target_id: deps.targetId,
+    object_id: session.session_id,
+    object_kind: "dialogue_session",
+    from_state: "AWAITING_REVALIDATION",
+    to_state: "SESSION_OPEN",
+    loop_kind: "middle",
+    phase: null,
+    slice_id: slice.slice_id,
+    slice_kind: slice.slice_kind,
+    dod_revision: slice.dod_revision_pin,
+    session_id: session.session_id,
+    turn_index: null,
+    slot_kind: "delivery",
+    agent_profile_id: "sentinel",
+    contribution_kind: null,
+    action_kind: "recover",
+    final_verdict: null,
+    caller_id: deps.callerId,
+    manifest_id: null,
+    input_revision_pins: [],
+    output_hash: null,
+    verification_run_id: sliceMerge.verification_run_id,
+    metric_run_id: null,
+    idempotency_key: idempotencyKey({
+      scope: "recover",
+      parts: {
+        kind: "awaiting_revalidation_reanimate",
+        session_id: session.session_id,
+        // Tie idempotency to the live updated_at so a re-stale → re-resume
+        // cycle produces a distinct ledger row each time. The previous
+        // session's updated_at (before this transition) is the natural key.
+        from_updated_at: session.updated_at,
+      },
+    }),
+    lease_token: null,
+    lease_kind: null,
+    result: "recovered",
+    result_detail:
+      "AWAITING_REVALIDATION pins match live slice/slice_merge — resumed SESSION_OPEN",
+    timestamp: deps.clock.isoNow(),
+  });
+  return transitioned;
 }
 
 async function openMiddleReviewSession(

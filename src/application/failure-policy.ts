@@ -36,12 +36,19 @@ export interface RetryConfig {
    */
   promptComposeTruncationLimit?: number;
   /**
-   * incident-10: maximum consecutive `lr_invoke/lr_exit_status` failures
-   * whose detail string indicates a runner-level timeout
-   * (`exitStatus=timeout`) before an inner session is ABANDONED. Distinct
-   * from agent-side `no_progress` because no envelope is ever produced —
-   * the streak counter has no agent signal to advance, and the daemon
-   * would otherwise re-pick the session indefinitely. Default 5.
+   * incident-10 (timeout-only) → phase-0-stabilization (generalized): maximum
+   * consecutive `lr_invoke/lr_exit_status` failures of *any* non-ok
+   * `ExitStatus` (timeout / transport_error / adapter_unavailable /
+   * malformed_output) before an inner session is ABANDONED. Distinct from
+   * agent-side `no_progress` because no envelope is ever produced — the
+   * streak counter has no agent signal to advance, and the daemon would
+   * otherwise re-pick the session indefinitely. Default 5.
+   *
+   * Internal name kept as `innerLrInvokeTimeoutLimit` and operator config
+   * field stays as `inner_lr_timeout_cap` for backward compatibility (see
+   * target-schema.ts FailurePolicy.inner_lr_timeout_cap). The semantic
+   * generalization is body-only — any non-ok exit status now contributes
+   * to the streak.
    */
   innerLrInvokeTimeoutLimit?: number;
 }
@@ -63,6 +70,13 @@ export type FailureClassification =
   | "middle_review_attempt"
   | "slice_merge_revalidation"
   | "prompt_compose_truncation"
+  /**
+   * Internal identifier kept as `inner_lr_invoke_timeout` for backward
+   * compatibility with existing log readers / ledger replays. Despite the
+   * name, the classification now matches *any* non-ok ExitStatus at the
+   * `lr_invoke` stage (phase-0-stabilization B — transport_error /
+   * adapter_unavailable / malformed_output were previously unbounded retry).
+   */
   | "inner_lr_invoke_timeout";
 
 export type RetryDecision =
@@ -126,15 +140,20 @@ export function classifyAgentIoStageFailure(outcome: {
 }): FailureClassification | null {
   if (outcome.ok) return null;
   if (outcome.stage === "prompt_compose") return "prompt_compose_truncation";
-  // incident-10: only the runner-level timeout flavor of `lr_invoke` failures
-  // contributes to the inner abandon counter. Other `lr_invoke` failures
-  // (e.g. spawn errors, non-zero exit) are surfaced as invalid envelopes
-  // but do not advance this streak — they are typically environmental and
-  // operator-recoverable, distinct from the "model is hanging" signal.
+  // incident-10 (timeout-only) → phase-0-stabilization B (generalized): every
+  // non-ok `lr_invoke/lr_exit_status` failure contributes to the inner
+  // abandon counter. Previously only `exitStatus=timeout` was capped, so a
+  // self-host outer session could spawn 416 `transport_error` invocations in
+  // 11 minutes without escalation. The detail string produced by
+  // `agent-io.callAgent` always begins with `LlmRunner exitStatus=<status>`
+  // for non-ok exits (see agent-io.ts §lr_invoke return), so we match on
+  // that prefix and exclude only the `=ok` case (which never reaches this
+  // branch in practice but is excluded defensively).
   if (
     outcome.stage === "lr_invoke" &&
     typeof outcome.detail === "string" &&
-    outcome.detail.includes("exitStatus=timeout")
+    outcome.detail.startsWith("LlmRunner exitStatus=") &&
+    !outcome.detail.startsWith("LlmRunner exitStatus=ok")
   ) {
     return "inner_lr_invoke_timeout";
   }
@@ -180,14 +199,15 @@ export async function countPromptComposeFailuresFromLedger(
 }
 
 /**
- * incident-10: count prior `lr_invoke/lr_exit_status` invalid ledger rows
- * for a given session whose detail string indicates a runner-level timeout
- * (`exitStatus=timeout`). Mirrors `countPromptComposeFailuresFromLedger` —
- * the ledger is the only durable record that survives daemon restarts, and
- * timeouts produce no envelope so no agent-side streak counter advances.
+ * incident-10 (timeout-only) → phase-0-stabilization B (generalized): count
+ * prior `lr_invoke/lr_exit_status` invalid ledger rows for a given session
+ * regardless of which non-ok ExitStatus produced them. Mirrors
+ * `countPromptComposeFailuresFromLedger` — the ledger is the only durable
+ * record that survives daemon restarts, and lr_invoke failures produce no
+ * envelope so no agent-side streak counter advances.
  *
  * Format produced by `turn-worker.emitInvalidTurn`:
- *   `result_detail = "lr_invoke/lr_exit_status: LlmRunner exitStatus=timeout; envelopeRef=..."`
+ *   `result_detail = "lr_invoke/lr_exit_status: LlmRunner exitStatus=<status>; envelopeRef=..."`
  *
  * Callers use the returned count as `currentCount` for `evaluateRetry`.
  */
@@ -211,7 +231,13 @@ export async function countLrInvokeTimeoutsFromLedger(
     if (
       typeof row.result_detail === "string" &&
       row.result_detail.startsWith("lr_invoke/lr_exit_status") &&
-      row.result_detail.includes("exitStatus=timeout")
+      // Match every non-ok ExitStatus. The `=ok` exclusion is defensive —
+      // a successful invocation never produces a result="invalid" row, but
+      // pinning the predicate to a positive ExitStatus prefix prevents an
+      // unrelated `lr_exit_status` extension from being counted by accident.
+      /exitStatus=(timeout|transport_error|adapter_unavailable|malformed_output)/.test(
+        row.result_detail,
+      )
     ) {
       count += 1;
     }

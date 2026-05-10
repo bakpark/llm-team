@@ -698,6 +698,281 @@ describe("Phase 3 middle review cycle", () => {
     expect(sm.state).toBe("SM_READY_FOR_REVIEW");
   });
 
+  // phase-0-stabilization A: when a middle-review session is in
+  // AWAITING_REVALIDATION (typically because the session_lease expired and
+  // recovery flipped it) and the canonical input pins (slice/slice_merge/
+  // verification_run) are unchanged relative to the prior turn's manifest,
+  // pickReadyMiddleReview must reanimate the session back to SESSION_OPEN
+  // and resume the review. Previously the `state !== "SESSION_OPEN"` filter
+  // permanently skipped these sessions, wedging the slice in SLICE_REVIEWING.
+  it("AWAITING_REVALIDATION + pins match → reanimated to SESSION_OPEN and middle review resumes (phase-0-stabilization A)", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "middle-reanimate-"));
+    const wsRoot = mkdtempSync(join(tmpdir(), "ws-"));
+    seedFixture(workdir);
+    // Mark the SliceMerge as already pointing at a pre-existing review
+    // session (the one a previous run crashed mid-turn) so the resume
+    // branch is exercised, not the new-session branch.
+    const sessionId = "01HZSE0000000000000000000B";
+    const sm = SliceMerge.parse({
+      ...JSON.parse(
+        readFileSync(join(workdir, layout.sliceMerge(SLICE_MERGE_ID)), "utf8"),
+      ),
+      review_session_id: sessionId,
+      updated_at: ISO,
+    });
+    writeFileSync(
+      join(workdir, layout.sliceMerge(SLICE_MERGE_ID)),
+      JSON.stringify(sm),
+      "utf8",
+    );
+    // Seed an AWAITING_REVALIDATION session whose current_turn_index=0
+    // (no manifest comparison required — the simplest path through the
+    // reanimator's pin-equivalence check).
+    mkdirSync(join(workdir, "sessions", sessionId, "turns"), {
+      recursive: true,
+    });
+    const session = DialogueSession.parse({
+      session_id: sessionId,
+      parent_object_kind: "slice",
+      parent_object_id: SLICE_ID,
+      parent_loop: "middle",
+      purpose: "review",
+      participants: [{ agent_profile_id: "sentinel", role: "lead" }],
+      session_termination: {
+        finalization_rule: "any_request_changes_blocks",
+        required_evidence: [
+          {
+            kind: "verification_green",
+            acceptance_tests: ["tests/add.test.ts:add"],
+            deterministic_checks: [],
+          },
+        ],
+        composite_rule: "finalization_AND_evidence",
+      },
+      workspace_revision_pin: "inner-commit-1",
+      current_turn_index: 0,
+      state: "AWAITING_REVALIDATION",
+      max_turns: 5,
+      created_at: ISO,
+      updated_at: ISO,
+    });
+    writeFileSync(
+      join(workdir, layout.sessionMetadata(sessionId)),
+      JSON.stringify(session),
+      "utf8",
+    );
+
+    const store = new FsStore({ workdir });
+    const clock = new SystemClock();
+    const logger = new NdjsonLogger({
+      store,
+      clock,
+      relPath: LOG_DAEMON_PATH,
+    });
+    const ledger = new FileLedger({ store, logger });
+    const workspace = new FakeWorkspace(wsRoot);
+    await workspace.prepareInnerWorkspace({
+      sliceId: SLICE_ID,
+      trunkBaseRevision: "trunk-base",
+    });
+    await workspace.commit({
+      sliceId: SLICE_ID,
+      message: "initial",
+      files: [{ path: "src/add.ts", content: "x" }],
+    });
+    const adapter = new StampingFakeAdapter(envelopeFixture("approve"));
+    const llmRunner = new AdapterRunnerPort(adapter);
+    const verification = new FakeVerification(clock, {
+      test: { result: "pass" },
+    });
+
+    const out = await runOneMiddleReviewTurn({
+      store,
+      clock,
+      llmRunner,
+      workspace,
+      verification,
+      ledger,
+      callerId: "test-caller",
+      targetId: TARGET_ID,
+      environmentFingerprint: "vitest",
+      reverifyTestCommands: (cwd) => [{ argv: ["true"], cwd }],
+    });
+
+    // Reanimation succeeds → review proceeds → approve → SM_MERGED path.
+    expect(out.kind).toBe("turn_persisted");
+    if (out.kind !== "turn_persisted") return;
+    expect(out.sessionId).toBe(sessionId);
+
+    // Ledger contains a recover row from AWAITING_REVALIDATION → SESSION_OPEN.
+    const rows = readLedgerRows(workdir);
+    const reanimateRow = rows.find(
+      (r) =>
+        r.object_id === sessionId &&
+        r.from_state === "AWAITING_REVALIDATION" &&
+        r.to_state === "SESSION_OPEN" &&
+        r.action_kind === "recover" &&
+        r.result === "recovered",
+    );
+    expect(reanimateRow).toBeDefined();
+  });
+
+  // Negative case: AWAITING_REVALIDATION + pins differ → reanimation declines
+  // (the cross-slot-stale / abandon path remains responsible for resolving
+  // the drift). pickReadyMiddleReview must NOT silently re-open.
+  it("AWAITING_REVALIDATION + pins drift → reanimation declines, pickup returns noop (phase-0-stabilization A)", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "middle-reanimate-drift-"));
+    const wsRoot = mkdtempSync(join(tmpdir(), "ws-"));
+    seedFixture(workdir);
+    const sessionId = "01HZSE0000000000000000000C";
+    const turnZeroManifestId = "01HZMA0000000000000000000A";
+    // Wire the SliceMerge to the pre-existing session.
+    const sm = SliceMerge.parse({
+      ...JSON.parse(
+        readFileSync(
+          join(workdir, layout.sliceMerge(SLICE_MERGE_ID)),
+          "utf8",
+        ),
+      ),
+      review_session_id: sessionId,
+      updated_at: ISO,
+    });
+    writeFileSync(
+      join(workdir, layout.sliceMerge(SLICE_MERGE_ID)),
+      JSON.stringify(sm),
+      "utf8",
+    );
+    // Persist a SessionTurn so the reanimator finds a manifest to compare.
+    mkdirSync(join(workdir, "sessions", sessionId, "turns"), {
+      recursive: true,
+    });
+    // Persist a manifest whose recorded slice pin disagrees with the live
+    // slice.dod_revision_pin ("dod-pin"). Because MiddleReviewPinResolver
+    // returns `slice.dod_revision_pin` for object_kind=slice, recording
+    // "OLD-DOD" here forces a mismatch.
+    mkdirSync(join(workdir, "manifests"), { recursive: true });
+    const driftedManifest = {
+      manifest_id: turnZeroManifestId,
+      session_id: sessionId,
+      turn_index: 0,
+      purpose: "review",
+      target: { object_kind: "slice_merge", object_id: SLICE_MERGE_ID },
+      entries: [
+        {
+          object_kind: "slice",
+          object_id: SLICE_ID,
+          fetch_scope: "body",
+          revision_pin: "OLD-DOD-DIFFERENT", // disagrees with live dod-pin
+          required: true,
+          purpose: "primary input",
+          token_estimate: 0,
+        },
+      ],
+      created_at: ISO,
+    };
+    writeFileSync(
+      join(workdir, layout.manifest(turnZeroManifestId)),
+      JSON.stringify(driftedManifest),
+      "utf8",
+    );
+    const turnZero = {
+      session_id: sessionId,
+      turn_index: 0,
+      agent_profile_id: "sentinel",
+      input_manifest_id: turnZeroManifestId,
+      input_turn_log_snapshot_ref: null,
+      output_envelope: null,
+      next_action_request: null,
+      caller_routing_decision: null,
+      workspace_commit: null,
+      verification_result_ref: VERIFICATION_RUN_ID,
+      recorded_at: ISO,
+    };
+    writeFileSync(
+      join(workdir, layout.sessionTurn(sessionId, 0)),
+      JSON.stringify(turnZero),
+      "utf8",
+    );
+    const session = DialogueSession.parse({
+      session_id: sessionId,
+      parent_object_kind: "slice",
+      parent_object_id: SLICE_ID,
+      parent_loop: "middle",
+      purpose: "review",
+      participants: [{ agent_profile_id: "sentinel", role: "lead" }],
+      session_termination: {
+        finalization_rule: "any_request_changes_blocks",
+        required_evidence: [
+          {
+            kind: "verification_green",
+            acceptance_tests: ["tests/add.test.ts:add"],
+            deterministic_checks: [],
+          },
+        ],
+        composite_rule: "finalization_AND_evidence",
+      },
+      workspace_revision_pin: "inner-commit-1",
+      // current_turn_index=1 means turn 0 already persisted → reanimator
+      // compares the turn-0 manifest pins against live values.
+      current_turn_index: 1,
+      state: "AWAITING_REVALIDATION",
+      max_turns: 5,
+      created_at: ISO,
+      updated_at: ISO,
+    });
+    writeFileSync(
+      join(workdir, layout.sessionMetadata(sessionId)),
+      JSON.stringify(session),
+      "utf8",
+    );
+
+    const store = new FsStore({ workdir });
+    const clock = new SystemClock();
+    const logger = new NdjsonLogger({
+      store,
+      clock,
+      relPath: LOG_DAEMON_PATH,
+    });
+    const ledger = new FileLedger({ store, logger });
+    const adapter = new StampingFakeAdapter(envelopeFixture("approve"));
+    const llmRunner = new AdapterRunnerPort(adapter);
+    const out = await runOneMiddleReviewTurn({
+      store,
+      clock,
+      llmRunner,
+      workspace: new FakeWorkspace(wsRoot),
+      verification: new FakeVerification(clock),
+      ledger,
+      callerId: "test-caller",
+      targetId: TARGET_ID,
+      environmentFingerprint: "vitest",
+      reverifyTestCommands: () => [],
+    });
+
+    // Drift refused: pickReadyMiddleReview skips the session, no other
+    // SM_READY_FOR_REVIEW candidate → outcome is noop.
+    expect(out.kind).toBe("noop");
+
+    // Session state unchanged.
+    const live = readJson(
+      workdir,
+      layout.sessionMetadata(sessionId),
+      (raw) => DialogueSession.parse(raw),
+    );
+    expect(live.state).toBe("AWAITING_REVALIDATION");
+
+    // No reanimate ledger row was emitted.
+    const rows = readLedgerRows(workdir);
+    expect(
+      rows.find(
+        (r) =>
+          r.object_id === sessionId &&
+          r.from_state === "AWAITING_REVALIDATION" &&
+          r.to_state === "SESSION_OPEN",
+      ),
+    ).toBeUndefined();
+  });
+
   it("returns noop when no SM_READY_FOR_REVIEW exists", async () => {
     const workdir = mkdtempSync(join(tmpdir(), "middle-noop-"));
     const wsRoot = mkdtempSync(join(tmpdir(), "ws-"));

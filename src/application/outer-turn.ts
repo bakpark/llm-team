@@ -135,6 +135,13 @@ export interface OuterTurnDeps {
    * absent the legacy fallback is used (placeholder pin / no verification).
    */
   workspace?: WorkspacePort;
+  /**
+   * phase-0-stabilization C — absolute workdir root. Threaded into
+   * `callAgent` so the composed outer prompt persists to
+   * `<workdir>/prompts/<sessionId>/<turnIndex>.md` instead of OS-tmp.
+   * Optional for backward compatibility with existing tests.
+   */
+  workdirRoot?: string;
 }
 
 export type RunOneOuterTurnOutcome =
@@ -479,7 +486,14 @@ export async function runOneOuterTurn(
       // timeout resolver, leaving prompt-budget overrides silent.
       contextBudget: deps.contextBudget,
     },
-    { llmRunner: deps.llmRunner, manifestBuilder, store: deps.store },
+    // phase-0-stabilization C: forward `workdirRoot` so the composed
+    // prompt persists under `<workdir>/prompts/<session>/<turn>.md`.
+    {
+      llmRunner: deps.llmRunner,
+      manifestBuilder,
+      store: deps.store,
+      workdirRoot: deps.workdirRoot,
+    },
   );
 
   if (!agentOut.ok) {

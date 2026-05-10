@@ -184,6 +184,14 @@ export interface TurnWorkerDeps {
    */
   lease?: LeasePort;
   leaseConfig?: LeaseConfig;
+  /**
+   * phase-0-stabilization C — absolute workdir root. Threaded into
+   * `callAgent` so the composed prompt persists to
+   * `<workdir>/prompts/<sessionId>/<turnIndex>.md` instead of OS-tmp.
+   * Optional: when omitted, agent-io falls back to the legacy
+   * `mkdtempSync(tmpdir(), ...)` path (preserves test backward compat).
+   */
+  workdirRoot?: string;
 }
 
 export async function runOneInnerTurn(
@@ -358,7 +366,15 @@ async function runOneInnerTurnInner(
     // `BODY NOT INLINED` sentinel and (correctly) refused to author
     // patches, returning `failure: need_context` indefinitely. The
     // resolver gained `(slice, body)` support in this same change.
-    { llmRunner: deps.llmRunner, manifestBuilder, store: deps.store },
+    //
+    // phase-0-stabilization C: forward `workdirRoot` so the composed
+    // prompt persists under `<workdir>/prompts/<session>/<turn>.md`.
+    {
+      llmRunner: deps.llmRunner,
+      manifestBuilder,
+      store: deps.store,
+      workdirRoot: deps.workdirRoot,
+    },
   );
   if (!agentOut.ok) {
     // P0 fix (PR #61 review): record an invalid ledger row so the audit

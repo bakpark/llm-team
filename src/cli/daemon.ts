@@ -410,6 +410,9 @@ async function main(argv: readonly string[]): Promise<number> {
             },
             lease,
             leaseConfig: cfg.lease,
+            // phase-0-stabilization C: persist composed prompts under
+            // `<workdir>/prompts/<session>/<turn>.md` instead of OS-tmp.
+            workdirRoot: workdir,
           });
           outcomeJson = JSON.stringify({ role: args.role, outcome });
           break;
@@ -431,6 +434,9 @@ async function main(argv: readonly string[]): Promise<number> {
             contextBudget: cfg.context_budget,
             lease,
             leaseConfig: cfg.lease,
+            // phase-0-stabilization C: persist composed prompts under
+            // `<workdir>/prompts/<session>/<turn>.md` instead of OS-tmp.
+            workdirRoot: workdir,
           });
           outcomeJson = JSON.stringify({ role: args.role, outcome });
           break;
@@ -453,6 +459,9 @@ async function main(argv: readonly string[]): Promise<number> {
             workspace,
             // incident-10: per-phase outer.* timeout overrides.
             contextBudget: cfg.context_budget,
+            // phase-0-stabilization C: persist composed prompts under
+            // `<workdir>/prompts/<session>/<turn>.md` instead of OS-tmp.
+            workdirRoot: workdir,
           });
           outcomeJson = JSON.stringify({ role: args.role, outcome });
           break;
