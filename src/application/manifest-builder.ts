@@ -100,12 +100,16 @@ export class ManifestBuilder {
 }
 
 /**
- * Deterministic token estimate for a manifest entry header. Uses the
- * canonical char/4 heuristic over the JSON serialization. Body content is
- * not fetched here — adapters compute body-aware costs separately if needed.
+ * Deterministic token estimate for a manifest entry HEADER (object_kind,
+ * object_id, fetch_scope, revision_pin, …). Uses the canonical char/4
+ * heuristic over the JSON serialization of the header — body content is
+ * NOT included here and is intentionally not fetched at manifest-build
+ * time. `application/prompt-compose.ts` adds a fixed per-entry framing
+ * constant plus the resolved body's char/4 cost when comparing the total
+ * to the `token_hard_cap`.
  *
- * The estimate is forecast-grade: prompt-compose adds a fixed per-entry
- * envelope overhead before comparing to the budget cap.
+ * Do NOT compare a resolved body's token count to this value (incident-3):
+ * it is a header-overhead forecast, not a body budget.
  */
 export function estimateTokensFromHeader(
   entry: Omit<ManifestEntry, "token_estimate">,
