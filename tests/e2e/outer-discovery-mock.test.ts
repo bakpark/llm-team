@@ -17,8 +17,10 @@
 import { describe, expect, it } from "vitest";
 
 import { createE2eRun } from "../helpers/e2e-harness.js";
+import { resolve } from "node:path";
 import { AdapterRunnerPort } from "../../src/adapters/llm-runner/runtime-port.js";
 import { FsStore } from "../../src/adapters/store/fs.js";
+import { FakeWorkspace } from "../../src/adapters/workspace/fake.js";
 import { FileLedger } from "../../src/application/ledger.js";
 import { runOneOuterTurn } from "../../src/application/outer-turn.js";
 import { layout } from "../../src/application/persistence-layout.js";
@@ -232,6 +234,10 @@ describe("Phase prod-5 — outer Discovery mock smoke (default-pass)", () => {
         sentinel: [reviewerVerdict(MILESTONE_ID, "spec_accept")],
       });
       const llmRunner = new AdapterRunnerPort(adapter);
+      // incident-8: deterministic workspace adapter so the session_open
+      // path resolves a real-looking trunk HEAD instead of crashing on the
+      // legacy placeholder fallback.
+      const workspace = new FakeWorkspace(resolve(handle.workdir, "workspaces"));
       const baseDeps = {
         store,
         clock,
@@ -239,6 +245,7 @@ describe("Phase prod-5 — outer Discovery mock smoke (default-pass)", () => {
         ledger,
         callerId: "e2e-caller",
         targetId,
+        workspace,
       };
 
       // Turn 0: lead draft.

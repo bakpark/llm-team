@@ -19,10 +19,11 @@
  */
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { AdapterRunnerPort } from "../../src/adapters/llm-runner/runtime-port.js";
 import { FsStore } from "../../src/adapters/store/fs.js";
+import { FakeWorkspace } from "../../src/adapters/workspace/fake.js";
 import { FileLedger } from "../../src/application/ledger.js";
 import { runOneOuterTurn } from "../../src/application/outer-turn.js";
 import { layout } from "../../src/application/persistence-layout.js";
@@ -294,7 +295,15 @@ function setup() {
   const clock = new SystemClock();
   const logger = new CollectingLogger();
   const ledger = new FileLedger({ store, logger });
-  return { workdir, store, clock, logger, ledger };
+  // incident-8: provide a deterministic workspace adapter so resolveOuter
+  // WorkspaceRevisionPin can fall back to a real-looking SHA when
+  // milestone.spec_revision_pin is null. The Planning slice fixtures pin
+  // each slice's trunk_base_revision to "trunk-base"; allowlist that ref so
+  // verifyRef() succeeds without rewriting every fixture.
+  const workspace = new FakeWorkspace(resolve(workdir, "workspaces"), {
+    knownRefs: new Set(["trunk-base", "spec-rev-1"]),
+  });
+  return { workdir, store, clock, logger, ledger, workspace };
 }
 
 /**
@@ -387,6 +396,7 @@ describe("runOneOuterTurn — Discovery quorum_then_lead spec_accept", () => {
       ledger: env.ledger,
       callerId: "test",
       targetId: "demo",
+      workspace: env.workspace,
     };
 
     // Turn 0: lead draft
@@ -457,6 +467,7 @@ describe("runOneOuterTurn — Discovery reviewer request_changes re-engages lead
       ledger: env.ledger,
       callerId: "test",
       targetId: "demo",
+      workspace: env.workspace,
     };
 
     const t0 = await runOneOuterTurn(baseDeps);
@@ -507,6 +518,7 @@ describe("runOneOuterTurn — Specification quorum=2 spec_accept", () => {
       ledger: env.ledger,
       callerId: "test",
       targetId: "demo",
+      workspace: env.workspace,
     };
 
     // Specification needs quorum_min=2 reviewers + lead.
@@ -566,6 +578,7 @@ describe("runOneOuterTurn — Planning unanimous_approve persists slice DAG", ()
       ledger: env.ledger,
       callerId: "test",
       targetId: "demo",
+      workspace: env.workspace,
     };
 
     let last;
@@ -622,6 +635,7 @@ describe("runOneOuterTurn — Validation lead_only PASS finalizes M_DONE", () =>
       ledger: env.ledger,
       callerId: "test",
       targetId: "demo",
+      workspace: env.workspace,
     };
 
     const out = await runOneOuterTurn(baseDeps);
@@ -807,6 +821,7 @@ describe("runOneOuterTurn — Validation lead_only PASS finalizes M_DONE", () =>
       ledger: env.ledger,
       callerId: "test",
       targetId: "demo",
+      workspace: env.workspace,
     };
     const out = await runOneOuterTurn(baseDeps);
     expect(out.kind).toBe("turn_persisted");
@@ -824,6 +839,38 @@ describe("runOneOuterTurn — Validation lead_only PASS finalizes M_DONE", () =>
       JSON.parse((await env.store.readText(layout.milestone(MILESTONE_ID)))!),
     );
     expect(m.state).toBe("M_DELIVERY_BUILDING");
+  });
+});
+
+describe("runOneOuterTurn — incident-8 workspace_revision_pin resolution", () => {
+  it("opens session with workspace.getTrunkHead() when milestone.spec_revision_pin is null (NOT 'outer-trunk-base')", async () => {
+    const env = setup();
+    await seedMilestone(env.store, "M_DISCOVERY_DRAFT"); // spec_revision_pin=null
+    const { adapter } = makeStub({
+      atlas: [specProposalDraft(MILESTONE_ID, "draft")],
+    });
+    const llmRunner = new AdapterRunnerPort(adapter);
+    const fixtureHead = await env.workspace.getTrunkHead();
+
+    const out = await runOneOuterTurn({
+      store: env.store,
+      clock: env.clock,
+      llmRunner,
+      ledger: env.ledger,
+      callerId: "test",
+      targetId: "demo",
+      workspace: env.workspace,
+    });
+    expect(out.kind).toBe("turn_persisted");
+    if (out.kind !== "turn_persisted") return;
+
+    const session = DialogueSession.parse(
+      JSON.parse(
+        (await env.store.readText(layout.sessionMetadata(out.sessionId)))!,
+      ),
+    );
+    expect(session.workspace_revision_pin).toBe(fixtureHead);
+    expect(session.workspace_revision_pin).not.toBe("outer-trunk-base");
   });
 });
 
