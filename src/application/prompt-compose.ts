@@ -13,6 +13,7 @@ import {
   type ContextBudget,
 } from "../config/target-schema.js";
 import { estimateTokensFromHeader } from "./manifest-builder.js";
+import type { ResolvedEntry } from "./manifest-resolve.js";
 
 /**
  * 4-part prompt composition (#AGC-PROMPT-SERIALIZATION,
@@ -61,6 +62,14 @@ export interface ComposePromptInput {
   workspaceRevisionPin: string;
   /** Optional extra instruction body appended to the role default. */
   extraInstruction?: string;
+  /**
+   * Resolved manifest-entry bodies (incident-1b Bug B). When provided, the
+   * composer renders a `# Inputs` section right after `## Manifest` containing
+   * each body verbatim, keyed to its manifest entry. When omitted or empty,
+   * required `body` entries surface a sentinel placeholder so the LLM is told
+   * the body was NOT inlined (no silent degradation).
+   */
+  resolvedEntries?: ResolvedEntry[];
 }
 
 export function composePrompt(input: ComposePromptInput): string {
@@ -76,7 +85,8 @@ export function composePrompt(input: ComposePromptInput): string {
     "---",
   ].join("\n");
   const manifestJson = JSON.stringify(input.manifest, null, 2);
-  const context = [
+  const inputsSection = renderInputsSection(input);
+  const contextLines = [
     "# Context",
     "",
     "## Manifest",
@@ -85,8 +95,12 @@ export function composePrompt(input: ComposePromptInput): string {
     manifestJson,
     "```",
     "",
-    `workspace_revision_pin: ${input.workspaceRevisionPin}`,
-  ].join("\n");
+  ];
+  if (inputsSection != null) {
+    contextLines.push(inputsSection, "");
+  }
+  contextLines.push(`workspace_revision_pin: ${input.workspaceRevisionPin}`);
+  const context = contextLines.join("\n");
   const instruction = [
     "# Instruction",
     "",
@@ -97,6 +111,47 @@ export function composePrompt(input: ComposePromptInput): string {
     .join("\n");
   const outputSchema = renderOutputSchema(input);
   return [fm, "", context, "", instruction, "", outputSchema, ""].join("\n");
+}
+
+/**
+ * Render `# Inputs` — verbatim bodies for manifest entries that have been
+ * resolved through `resolveManifestEntries`. When a `required=true` entry
+ * with `fetch_scope=body` is NOT resolved, emit a sentinel placeholder so the
+ * LLM is told the body was not inlined (rather than silently producing an
+ * empty prompt). Returns null when the section would be empty (no resolved
+ * entries AND no required-body sentinels needed).
+ */
+function renderInputsSection(input: ComposePromptInput): string | null {
+  const resolvedByIndex = new Map<number, string>();
+  for (const r of input.resolvedEntries ?? []) {
+    resolvedByIndex.set(r.manifest_entry_index, r.body);
+  }
+  const blocks: string[] = [];
+  for (let i = 0; i < input.manifest.entries.length; i++) {
+    const entry = input.manifest.entries[i]!;
+    const body = resolvedByIndex.get(i);
+    if (body != null) {
+      blocks.push(
+        [
+          `### entry[${i}] ${entry.object_kind}/${entry.object_id} (fetch_scope=${entry.fetch_scope})`,
+          "",
+          body,
+        ].join("\n"),
+      );
+      continue;
+    }
+    if (entry.required && entry.fetch_scope === "body") {
+      blocks.push(
+        [
+          `### entry[${i}] ${entry.object_kind}/${entry.object_id} (fetch_scope=${entry.fetch_scope})`,
+          "",
+          "[BODY NOT INLINED — resolution layer did not provide this entry's body. Do NOT fabricate; if the body is essential, return failure.type=need_context with a rationale citing this entry.]",
+        ].join("\n"),
+      );
+    }
+  }
+  if (blocks.length === 0) return null;
+  return ["## Inputs", "", ...blocks].join("\n\n");
 }
 
 /**
@@ -144,6 +199,15 @@ function renderOutputSchema(input: ComposePromptInput): string {
     "  or `output_kind=milestone_package`; null otherwise.",
     "- `failure` ({ type, rationale }): REQUIRED when `output_kind=failure`;",
     "  null otherwise. The loop-conditional fields above still apply.",
+    "  `failure.type` MUST be exactly one of: `need_context`, `invalid_output`,",
+    "  `no_progress`, `regression`, `scope_violation`. Do NOT invent other",
+    "  values (e.g. `missing_required_input`) — pick `need_context` when the",
+    "  manifest declares a required body that is not inlined or otherwise",
+    "  unavailable, `invalid_output` when prior turns produced malformed",
+    "  artefacts, `no_progress` when retries cannot advance the goal,",
+    "  `regression` when a prior verdict was undone, and `scope_violation`",
+    "  when the requested change exceeds the declared slice scope. Free-text",
+    "  context goes in `failure.rationale`.",
     "",
     "Optional top-level fields (use null when not applicable — never omit a key):",
     "- `parent_review_verdict_id` (ULID | null)",
@@ -156,9 +220,11 @@ function renderOutputSchema(input: ComposePromptInput): string {
     "narrative inside `summary`.",
     "",
     "When you need a follow-up turn from another agent, populate",
-    "`next_action_request` as `{ addressed_to: <agent_profile_id|\"caller\">,",
-    "intent: <short string>, evidence_request: [{ kind, scope }, …],",
-    "proposal_artifact_ref: <string|null> }`. Otherwise set it to `null`.",
+    "`next_action_request` as `{ addressed_to: <recipient>, intent: <short",
+    "string>, evidence_request: [{ kind, scope }, …], proposal_artifact_ref:",
+    "<string|null> }`. `addressed_to` MUST be exactly one of: `atlas`,",
+    "`forge`, `sentinel`, `scout`, `caller`. Otherwise set the whole field",
+    "to `null`.",
     "",
     "Minimal valid example for the current (parent_loop, phase, role) — copy",
     "the SHAPE, not the values:",
@@ -502,9 +568,29 @@ export type ComposePromptWithBudgetOutcome =
       tokenEstimate: number;
     };
 
+/** Multiplier applied to a manifest entry's `token_estimate` when validating
+ * the resolved body length (chars/4). Resolved bodies that exceed this bound
+ * surface as `context_budget_truncation` so the runner is never invoked with
+ * a silently bloated prompt. Conservative — `token_estimate` is itself a
+ * char/4 heuristic over the entry header only. */
+const RESOLVED_BODY_SAFETY_MARGIN = 2;
+
 export function composePromptWithBudget(
   input: ComposePromptWithBudgetInput,
 ): ComposePromptWithBudgetOutcome {
+  // Validate resolved-body sizes against per-entry token_estimate before any
+  // truncation work — surfacing a clear AGC-INVALID is preferable to silently
+  // bloating the prompt past the runner cap.
+  const oversize = checkResolvedBodyBudget(input);
+  if (oversize != null) {
+    return {
+      ok: false,
+      reason: "context_budget_truncation",
+      detail: oversize,
+      cap: null,
+      tokenEstimate: 0,
+    };
+  }
   const cap = resolveContextBudget(
     input.contextBudget,
     input.parentLoop,
@@ -555,7 +641,23 @@ export function composePromptWithBudget(
     ...input.manifest,
     entries,
   };
-  const body = composePrompt({ ...input, manifest: truncatedManifest });
+  // Remap `resolvedEntries.manifest_entry_index` against the (possibly
+  // truncated) entry list — original indices shift when low-priority entries
+  // are dropped. Entries whose source was dropped are skipped (the body is no
+  // longer needed since the corresponding manifest header is gone too).
+  const remappedResolved =
+    input.resolvedEntries != null && droppedEntries.length > 0
+      ? remapResolvedEntries(
+          input.resolvedEntries,
+          input.manifest.entries,
+          entries,
+        )
+      : input.resolvedEntries;
+  const body = composePrompt({
+    ...input,
+    manifest: truncatedManifest,
+    resolvedEntries: remappedResolved,
+  });
   return {
     ok: true,
     body,
@@ -601,4 +703,50 @@ function sortDroppable(entries: ManifestEntry[]): ManifestEntry[] {
     return entryTokenCost(b) - entryTokenCost(a);
   });
   return droppable;
+}
+
+/**
+ * Validates that each `ResolvedEntry.body` fits within
+ * `manifest.entries[i].token_estimate * RESOLVED_BODY_SAFETY_MARGIN` (chars/4
+ * heuristic). Returns the first violation as a detail string, or null when
+ * everything is within bounds.
+ */
+function checkResolvedBodyBudget(
+  input: ComposePromptWithBudgetInput,
+): string | null {
+  const resolved = input.resolvedEntries;
+  if (resolved == null || resolved.length === 0) return null;
+  for (const r of resolved) {
+    const entry = input.manifest.entries[r.manifest_entry_index];
+    if (entry == null) continue;
+    if (entry.token_estimate == null) continue;
+    const actualTokens = Math.ceil(r.body.length / 4);
+    const cap = entry.token_estimate * RESOLVED_BODY_SAFETY_MARGIN;
+    if (actualTokens > cap) {
+      return `resolved body for entry[${r.manifest_entry_index}] (${entry.object_kind}/${entry.object_id}) exceeds token_estimate × ${RESOLVED_BODY_SAFETY_MARGIN}: ${actualTokens} > ${cap}`;
+    }
+  }
+  return null;
+}
+
+/**
+ * After truncation drops a subset of manifest entries, the remaining entries
+ * keep their relative order but their absolute indices change. Map each
+ * `ResolvedEntry` from the original index space to the truncated one,
+ * dropping resolved entries whose source manifest entry was removed.
+ */
+function remapResolvedEntries(
+  resolved: ResolvedEntry[],
+  originalEntries: ManifestEntry[],
+  truncatedEntries: ManifestEntry[],
+): ResolvedEntry[] {
+  const out: ResolvedEntry[] = [];
+  for (const r of resolved) {
+    const original = originalEntries[r.manifest_entry_index];
+    if (original == null) continue;
+    const newIndex = truncatedEntries.indexOf(original);
+    if (newIndex < 0) continue;
+    out.push({ manifest_entry_index: newIndex, body: r.body });
+  }
+  return out;
 }
