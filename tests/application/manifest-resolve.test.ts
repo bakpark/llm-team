@@ -16,7 +16,7 @@ const MILESTONE_ID = "01HZMS0000000000000000000A";
 const REQUEST_ID = "01HZFR0000000000000000000A";
 const ISO = "2026-05-07T00:00:00.000Z";
 
-function buildManifest(extraEntries: any[] = []) {
+function buildManifest(extraEntries: any[] = [], primaryRevisionPin = ISO) {
   return ContextManifest.parse({
     manifest_id: MANIFEST_ID,
     session_id: SESSION_ID,
@@ -28,7 +28,7 @@ function buildManifest(extraEntries: any[] = []) {
         object_kind: "milestone",
         object_id: MILESTONE_ID,
         fetch_scope: "body",
-        revision_pin: "deadbeef",
+        revision_pin: primaryRevisionPin,
         required: true,
         purpose: "primary",
       },
@@ -92,10 +92,44 @@ describe("resolveManifestEntries", () => {
     expect(resolved[0]!.body).toContain("Problem framing");
   });
 
-  it("returns empty result (no throw) when required milestone file is missing", async () => {
+  it("throws on required milestone whose store object is missing (PR #93 P0-A)", async () => {
     const store = new MemoryStore();
-    const resolved = await resolveManifestEntries(store, buildManifest());
+    await expect(resolveManifestEntries(store, buildManifest())).rejects.toThrow(
+      /required manifest entry not found/,
+    );
+  });
+
+  it("skips non-required milestone entries silently when store object is missing", async () => {
+    const store = new MemoryStore();
+    const manifest = ContextManifest.parse({
+      manifest_id: MANIFEST_ID,
+      session_id: SESSION_ID,
+      turn_index: 0,
+      purpose: "design",
+      target: { object_kind: "milestone", object_id: MILESTONE_ID },
+      entries: [
+        {
+          object_kind: "milestone",
+          object_id: MILESTONE_ID,
+          fetch_scope: "body",
+          revision_pin: ISO,
+          required: false,
+          purpose: "advisory",
+        },
+      ],
+      created_at: ISO,
+    });
+    const resolved = await resolveManifestEntries(store, manifest);
     expect(resolved).toHaveLength(0);
+  });
+
+  it("throws on required milestone when revision_pin differs from store updated_at (PR #93 P0-B)", async () => {
+    const store = new MemoryStore();
+    await seedMilestone(store, "raw");
+    const stalePin = "2025-01-01T00:00:00.000Z";
+    await expect(
+      resolveManifestEntries(store, buildManifest([], stalePin)),
+    ).rejects.toThrow(/revision_pin mismatch/);
   });
 
   it("throws on required entries with unsupported (object_kind, fetch_scope)", async () => {

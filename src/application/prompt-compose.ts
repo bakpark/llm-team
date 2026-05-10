@@ -618,13 +618,22 @@ export function composePromptWithBudget(
   const droppable = sortDroppable(entries);
   let droppedEntries: ManifestEntry[] = [];
 
-  let total = computeTotal(entries, baseOverhead);
+  // PR #93 P0-C: include resolved-body token cost in the total so the cap
+  // comparison reflects the prompt that will actually be rendered (bodies
+  // inlined under `# Inputs`). Resolved bodies are keyed by their original
+  // manifest_entry_index, so translate them to a (entry → body chars) map
+  // that survives truncation.
+  const resolvedBodyByEntry = buildResolvedBodyMap(
+    input.manifest.entries,
+    input.resolvedEntries,
+  );
+  let total = computeTotal(entries, baseOverhead, resolvedBodyByEntry);
   while (total > cap.token_hard_cap && droppable.length > 0) {
     const victim = droppable.shift()!;
     const idx = entries.indexOf(victim);
     if (idx >= 0) entries.splice(idx, 1);
     droppedEntries.push(victim);
-    total = computeTotal(entries, baseOverhead);
+    total = computeTotal(entries, baseOverhead, resolvedBodyByEntry);
   }
 
   if (total > cap.token_hard_cap) {
@@ -668,12 +677,40 @@ export function composePromptWithBudget(
   };
 }
 
-function computeTotal(entries: ManifestEntry[], baseOverhead: number): number {
+function computeTotal(
+  entries: ManifestEntry[],
+  baseOverhead: number,
+  resolvedBodyByEntry?: Map<ManifestEntry, number>,
+): number {
   let total = baseOverhead;
   for (const e of entries) {
     total += entryTokenCost(e) + ENTRY_FRAMING_TOKENS;
+    if (resolvedBodyByEntry != null) {
+      const bodyTokens = resolvedBodyByEntry.get(e);
+      if (bodyTokens != null) total += bodyTokens;
+    }
   }
   return total;
+}
+
+/**
+ * Map each `ResolvedEntry` back to its source `ManifestEntry` (object
+ * identity) and store the chars/4 token cost of the inlined body. Used by
+ * `computeTotal` so the budget comparison sees the prompt that will actually
+ * be rendered (PR #93 P0-C). Returns null when there are no resolved bodies.
+ */
+function buildResolvedBodyMap(
+  originalEntries: ManifestEntry[],
+  resolved: ResolvedEntry[] | undefined,
+): Map<ManifestEntry, number> | undefined {
+  if (resolved == null || resolved.length === 0) return undefined;
+  const out = new Map<ManifestEntry, number>();
+  for (const r of resolved) {
+    const entry = originalEntries[r.manifest_entry_index];
+    if (entry == null) continue;
+    out.set(entry, Math.ceil(r.body.length / 4));
+  }
+  return out;
 }
 
 /**

@@ -233,7 +233,9 @@ describe("callAgent — manifest body inline (incident-1b Bug B)", () => {
           object_kind: "milestone",
           object_id: MILESTONE_ID,
           fetch_scope: "body",
-          revision_pin: "deadbeef",
+          // PR #93 P0-B: revision_pin must match the persisted milestone's
+          // updated_at; otherwise resolveManifestEntries throws stale.
+          revision_pin: ISO2,
           required: true,
           purpose: "primary input",
         },

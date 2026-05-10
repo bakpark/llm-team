@@ -52,6 +52,22 @@ class UnsupportedManifestEntryError extends Error {
   }
 }
 
+class MissingRequiredManifestEntryError extends Error {
+  constructor(entry: ManifestEntry, path: string) {
+    super(
+      `required manifest entry not found in store: object_kind=${entry.object_kind} object_id=${entry.object_id} fetch_scope=${entry.fetch_scope} (path=${path})`,
+    );
+  }
+}
+
+class StaleManifestEntryError extends Error {
+  constructor(entry: ManifestEntry, actual: string) {
+    super(
+      `manifest entry revision_pin mismatch: object_kind=${entry.object_kind} object_id=${entry.object_id} declared=${entry.revision_pin} actual=${actual}`,
+    );
+  }
+}
+
 export async function resolveManifestEntries(
   store: StorePort,
   manifest: ContextManifest,
@@ -77,7 +93,7 @@ async function resolveEntry(
   entry: ManifestEntry,
 ): Promise<string | null> {
   if (entry.object_kind === "milestone" && entry.fetch_scope === "body") {
-    return resolveMilestoneBody(store, entry.object_id);
+    return resolveMilestoneBody(store, entry);
   }
   // Other (kind, scope) pairs are out of scope for incident-1b. For
   // `required=true` entries the resolver throws so the caller can surface an
@@ -96,11 +112,32 @@ async function resolveEntry(
 
 async function resolveMilestoneBody(
   store: StorePort,
-  milestoneId: string,
+  entry: ManifestEntry,
 ): Promise<string | null> {
-  const raw = await store.readText(layout.milestone(milestoneId));
-  if (raw == null) return null;
+  const milestoneId = entry.object_id;
+  const milestonePath = layout.milestone(milestoneId);
+  const raw = await store.readText(milestonePath);
+  if (raw == null) {
+    // Required missing-store object MUST surface an explicit error so callers
+    // (callAgent) emit a `prompt_compose` AGC-INVALID outcome instead of
+    // silently dropping the entry and invoking the LLM with an empty body.
+    if (entry.required) {
+      throw new MissingRequiredManifestEntryError(entry, milestonePath);
+    }
+    return null;
+  }
   const milestone = Milestone.parse(JSON.parse(raw));
+  // RGC-CROSS-SLOT-STALE: the manifest-time pin must match the store's actual
+  // revision identifier; otherwise the resolved body is stale relative to the
+  // manifest header and would produce a grounded-context contradiction. For
+  // milestone bodies the revision identifier is `updated_at`. Required
+  // entries surface an error; non-required entries are silently skipped.
+  if (milestone.updated_at !== entry.revision_pin) {
+    if (entry.required) {
+      throw new StaleManifestEntryError(entry, milestone.updated_at);
+    }
+    return null;
+  }
   const sections: string[] = [`title: ${milestone.title}`];
 
   // Intake source body — feature_request currently the only kind in production.
