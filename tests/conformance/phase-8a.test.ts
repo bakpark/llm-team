@@ -431,12 +431,19 @@ describe("Phase 8a — composePromptWithBudget enforcement", () => {
     if (r.ok) expect(r.cap).toBe(128_000);
   });
 
-  // PR #93 P1-B: dedicated coverage for `checkResolvedBodyBudget` 2x safety
-  // margin. Three cases: (a) under margin → ok, (b) exactly at margin → ok,
-  // (c) clearly over margin → context_budget_truncation.
-  describe("resolved-body 2x safety margin (PR #93 P1-B)", () => {
-    function inputWithResolved(tokenEstimate: number, bodyChars: number) {
+  // incident-3: aggregate budget enforcement against `token_hard_cap` covers
+  // the resolved-body footprint. The previously misapplied per-entry × 2
+  // check (PR #93 P1-B) was removed because it compared body tokens to the
+  // header-serialization heuristic in `token_estimate`, producing false
+  // positives for any non-trivial body.
+  describe("resolved-body aggregate enforcement (incident-3)", () => {
+    function inputWithResolved(
+      tokenEstimate: number,
+      bodyChars: number,
+      contextBudget?: ContextBudget,
+    ) {
       return baseInput({
+        contextBudget,
         manifest: {
           ...baseInput().manifest,
           entries: [
@@ -457,25 +464,91 @@ describe("Phase 8a — composePromptWithBudget enforcement", () => {
       });
     }
 
-    it("accepts a resolved body well under token_estimate × 2", () => {
-      // token_estimate=100 → cap=200 tokens (~800 chars). Use 400 chars (~100 tokens).
-      const r = composePromptWithBudget(inputWithResolved(100, 400));
+    it("accepts a resolved body whose real size dwarfs the header token_estimate (false-positive regression)", () => {
+      // Concrete shape from incident-3 ledger: header≈44 tokens,
+      // body≈108 tokens — would have failed `token_estimate × 2 = 88`.
+      // With the per-entry check removed and the default `outer.Discovery`
+      // cap (256_000), this composes cleanly.
+      const r = composePromptWithBudget(
+        baseInput({
+          parentLoop: "outer",
+          phaseOrPurpose: "Discovery",
+          manifest: {
+            ...baseInput().manifest,
+            purpose: "design",
+            entries: [
+              {
+                object_kind: "milestone",
+                object_id: "01KR7SGPAZNF3SCDG9HT1ZZAJV",
+                fetch_scope: "body",
+                revision_pin: "p1",
+                required: true,
+                purpose: "primary",
+                token_estimate: 44,
+              },
+            ],
+          },
+          resolvedEntries: [
+            { manifest_entry_index: 0, body: "x".repeat(500) },
+          ],
+        }),
+      );
       expect(r.ok).toBe(true);
+      if (r.ok) {
+        // Aggregate total includes the resolved body cost (PR #93 P0-C).
+        expect(r.tokenEstimate).toBeGreaterThan(44);
+        expect(r.cap).toBe(256_000);
+      }
     });
 
-    it("accepts a resolved body exactly at token_estimate × 2", () => {
-      // token_estimate=100, cap=200 tokens. ceil(800/4)=200 exactly.
-      const r = composePromptWithBudget(inputWithResolved(100, 800));
-      expect(r.ok).toBe(true);
-    });
-
-    it("emits context_budget_truncation when resolved body clearly exceeds token_estimate × 2", () => {
-      // token_estimate=100, cap=200 tokens. ceil(2000/4)=500 → over.
+    it("accepts large resolved bodies as long as the aggregate stays under the cap", () => {
+      // header token_estimate=100, body=2000 chars (~500 tokens). Default
+      // inner.tdd_build cap is 128_000 — well clear.
       const r = composePromptWithBudget(inputWithResolved(100, 2000));
+      expect(r.ok).toBe(true);
+    });
+
+    it("still emits context_budget_truncation when resolved bodies push the aggregate over token_hard_cap", () => {
+      // Tight cap = 1_500 tokens, scaffold ~1200, body 4_000 chars (~1000
+      // tokens). The single entry is `required` so it cannot be dropped.
+      const tinyCap: ContextBudget = ContextBudget.parse({
+        "inner.tdd_build": { token_hard_cap: 1_500 },
+      });
+      const r = composePromptWithBudget(inputWithResolved(50, 4_000, tinyCap));
       expect(r.ok).toBe(false);
       if (!r.ok) {
         expect(r.reason).toBe("context_budget_truncation");
-        expect(r.detail).toMatch(/exceeds token_estimate × 2/);
+        expect(r.cap).toBe(1_500);
+        expect(r.detail).toMatch(/overflow/);
+      }
+    });
+
+    // PR #95 review P0-2 (gpt5.5): the pre-truncation `computeTotal()`
+    // estimate omits the dynamic `## Inputs` framing (per-entry headers,
+    // blank lines, separators) the renderer emits. Near-cap manifests
+    // could pass the estimate and produce a rendered prompt that
+    // exceeded the cap. The post-render `body.length / 4` re-measurement
+    // must catch that case and surface `context_budget_truncation` so the
+    // LLM is never invoked with a prompt over `token_hard_cap`.
+    it("rejects when post-render prompt exceeds token_hard_cap even though the estimate fit", () => {
+      // Pick a cap that lands between (estimate) and (rendered): the body
+      // is large enough that the dynamic Inputs framing tips it over. The
+      // entry is `required` so truncation cannot save it.
+      const cap: ContextBudget = ContextBudget.parse({
+        "inner.tdd_build": { token_hard_cap: 1_850 },
+      });
+      // Use a body sized so estimate <= cap but rendered > cap. With
+      // scaffold≈1200 and ENTRY_FRAMING≈8, a ~2400-char body (~600 tokens)
+      // gives total≈1808 < 1850, while the rendered prompt (frontmatter +
+      // manifest JSON + `## Inputs` + entry header + body + blank lines +
+      // instruction + output schema) measures ~1900+ tokens.
+      const r = composePromptWithBudget(inputWithResolved(0, 2_400, cap));
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.reason).toBe("context_budget_truncation");
+        expect(r.cap).toBe(1_850);
+        expect(r.detail).toContain("after_render");
+        expect(r.tokenEstimate).toBeGreaterThan(1_850);
       }
     });
   });

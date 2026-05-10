@@ -28,6 +28,13 @@ export interface RetryConfig {
   middleReviewAttemptsLimit?: number;
   /** loop_policies.middle.merge.max_revalidation_attempts */
   sliceMergeRevalidationLimit?: number;
+  /**
+   * Maximum consecutive `prompt_compose` AGC-INVALID outcomes before
+   * escalation (incident-3). The stage runs before any LLM invocation, so
+   * an unbounded retry burns no model tokens but does loop the daemon —
+   * tighter than agent-side streaks. Default 3.
+   */
+  promptComposeTruncationLimit?: number;
 }
 
 export const DEFAULT_RETRY_CONFIG: Required<RetryConfig> = {
@@ -36,6 +43,7 @@ export const DEFAULT_RETRY_CONFIG: Required<RetryConfig> = {
   innerScopeViolationLimit: 3,
   middleReviewAttemptsLimit: 3,
   sliceMergeRevalidationLimit: 1,
+  promptComposeTruncationLimit: 3,
 };
 
 export type FailureClassification =
@@ -43,7 +51,8 @@ export type FailureClassification =
   | "regression"
   | "scope_violation"
   | "middle_review_attempt"
-  | "slice_merge_revalidation";
+  | "slice_merge_revalidation"
+  | "prompt_compose_truncation";
 
 export type RetryDecision =
   | { decision: "continue"; remaining: number }
@@ -79,5 +88,67 @@ function limitFor(
       return cfg.middleReviewAttemptsLimit;
     case "slice_merge_revalidation":
       return cfg.sliceMergeRevalidationLimit;
+    case "prompt_compose_truncation":
+      return cfg.promptComposeTruncationLimit;
   }
+}
+
+/**
+ * Pure classifier — maps an `agent-io.callAgent` outcome to a
+ * `FailureClassification` bucket suitable for `evaluateRetry`. Returns null
+ * for outcomes that do not contribute to a retry counter (success, or
+ * stages handled by other failure paths such as
+ * inner/middle no_progress / regression streaks).
+ *
+ * incident-3: `prompt_compose` failures short-circuit before the LLM is
+ * invoked, so they would otherwise loop indefinitely with no agent-side
+ * streak ever advancing. Mapping them to `prompt_compose_truncation` gives
+ * the caller a counter that escalates after `promptComposeTruncationLimit`
+ * consecutive failures.
+ */
+export function classifyAgentIoStageFailure(outcome: {
+  ok: boolean;
+  stage?: string;
+}): FailureClassification | null {
+  if (outcome.ok) return null;
+  if (outcome.stage === "prompt_compose") return "prompt_compose_truncation";
+  return null;
+}
+
+/**
+ * Count prior `prompt_compose/...` invalid ledger rows for a given session
+ * (incident-3 retry counter source). Walks `ledger/transitions.ndjson`
+ * directly via the StorePort — there is no persisted `failure_counters`
+ * advisory slot for this classification, and the ledger is the only durable
+ * record that survives daemon restarts.
+ *
+ * The returned count is the number of `result="invalid"` rows whose
+ * `result_detail` begins with `prompt_compose/` and whose `session_id`
+ * matches. Callers use it as `currentCount` for `evaluateRetry`.
+ */
+export async function countPromptComposeFailuresFromLedger(
+  store: { readText(relPath: string): Promise<string | null> },
+  sessionId: string,
+): Promise<number> {
+  const body = await store.readText("ledger/transitions.ndjson");
+  if (body == null || body.length === 0) return 0;
+  let count = 0;
+  for (const line of body.split("\n")) {
+    if (line.length === 0) continue;
+    let row: { session_id?: unknown; result?: unknown; result_detail?: unknown };
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (row.session_id !== sessionId) continue;
+    if (row.result !== "invalid") continue;
+    if (
+      typeof row.result_detail === "string" &&
+      row.result_detail.startsWith("prompt_compose/")
+    ) {
+      count += 1;
+    }
+  }
+  return count;
 }

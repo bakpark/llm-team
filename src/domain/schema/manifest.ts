@@ -50,12 +50,14 @@ export const ManifestEntry = z
     purpose: z.string().min(1),
     /**
      * AGC-CONTEXT-BUDGET / TCC-CONTEXT-BUDGET — deterministic token-cost
-     * forecast used by `application/prompt-compose.ts` to apply the
-     * `(parent_loop, phase_or_purpose)` cap before the 1-shot LLM call. The
-     * estimate is computed by `application/manifest-builder.ts` from a
-     * char/4 heuristic over the entry's serialized header (no body fetch is
-     * required at manifest-build time). Optional for backward compatibility
-     * with manifests created before phase 8a.
+     * forecast for the manifest entry HEADER overhead (object_kind,
+     * object_id, fetch_scope, revision_pin, …). This is NOT a body budget;
+     * `application/manifest-builder.ts` computes it via a char/4 heuristic
+     * over the entry's serialized header so manifests can be sized without
+     * fetching bodies. `application/prompt-compose.ts` sums these alongside
+     * the resolved body sizes and the prompt scaffold to compare against
+     * the `(parent_loop, phase_or_purpose)` `token_hard_cap`. Optional for
+     * backward compatibility with manifests created before phase 8a.
      */
     token_estimate: z.number().int().nonnegative().optional(),
   })

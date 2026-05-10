@@ -512,6 +512,15 @@ function outerInstructionBody(input: ComposePromptInput): string {
  * On persistent overflow the function returns the AGC-INVALID classification
  * `context_budget_truncation` so the caller skips the LLM invocation. This
  * mirrors `parseAgentAuthored` / `enrichEnvelope` outcome shape.
+ *
+ * Sole guard: PR #95 dropped the per-entry × 2 body-vs-header heuristic
+ * (false-positive prone). The aggregate `token_hard_cap` is now the only
+ * size enforcement in this seam — both the pre-truncation estimate AND the
+ * post-render `body.length / 4` re-measurement (PR #95 review P0-2) must
+ * stay under cap. Detecting an individual entry's body bloat in isolation
+ * is intentionally out of scope; if that ever becomes a debugging concern,
+ * a warn-level per-entry observer can be reintroduced as a non-blocking
+ * sibling check without re-enabling the rejected guard.
  */
 
 /** Truncation priority per AGC-CONTEXT-BUDGET (lowest = drop first). */
@@ -568,29 +577,17 @@ export type ComposePromptWithBudgetOutcome =
       tokenEstimate: number;
     };
 
-/** Multiplier applied to a manifest entry's `token_estimate` when validating
- * the resolved body length (chars/4). Resolved bodies that exceed this bound
- * surface as `context_budget_truncation` so the runner is never invoked with
- * a silently bloated prompt. Conservative — `token_estimate` is itself a
- * char/4 heuristic over the entry header only. */
-const RESOLVED_BODY_SAFETY_MARGIN = 2;
-
 export function composePromptWithBudget(
   input: ComposePromptWithBudgetInput,
 ): ComposePromptWithBudgetOutcome {
-  // Validate resolved-body sizes against per-entry token_estimate before any
-  // truncation work — surfacing a clear AGC-INVALID is preferable to silently
-  // bloating the prompt past the runner cap.
-  const oversize = checkResolvedBodyBudget(input);
-  if (oversize != null) {
-    return {
-      ok: false,
-      reason: "context_budget_truncation",
-      detail: oversize,
-      cap: null,
-      tokenEstimate: 0,
-    };
-  }
+  // Aggregate AGC-CONTEXT-BUDGET enforcement below already includes the
+  // resolved-body token cost via `computeTotal(... resolvedBodyByEntry)`, so
+  // the prompt that will actually be rendered is compared to
+  // `context_budget.token_hard_cap`. A per-entry size check against
+  // `manifest_entry.token_estimate × N` was removed (incident-3): that field
+  // is a header-serialization heuristic, not a body budget — comparing body
+  // tokens to it produced false-positive `context_budget_truncation` for any
+  // non-trivial body and short-circuited the LLM call in a tight retry loop.
   const cap = resolveContextBudget(
     input.contextBudget,
     input.parentLoop,
@@ -667,6 +664,25 @@ export function composePromptWithBudget(
     manifest: truncatedManifest,
     resolvedEntries: remappedResolved,
   });
+  // PR #95 review P0-2 (gpt5.5): the aggregate cap above compares
+  // `computeTotal(...)` — an estimate that sums entry headers + framing +
+  // resolved bodies — against `token_hard_cap`. The estimate omits the
+  // dynamic `## Inputs` section framing (`### entry[i] ...` headers, blank
+  // lines, separators) the actual renderer emits, so a near-cap manifest
+  // can pass the estimate and still produce a rendered prompt that exceeds
+  // the cap. Re-measure the rendered string with the same char/4 heuristic
+  // and fail closed when over — so the LLM is never invoked with a prompt
+  // that violates `token_hard_cap`.
+  const renderedTokens = Math.ceil(body.length / 4);
+  if (renderedTokens > cap.token_hard_cap) {
+    return {
+      ok: false,
+      reason: "context_budget_truncation",
+      detail: `final rendered prompt exceeds cap after compose: rendered=${renderedTokens} > cap ${cap.token_hard_cap} (estimate=${total}, loop=${input.parentLoop} step=${input.phaseOrPurpose}, dropped=${droppedEntries.length}); after_render`,
+      cap: cap.token_hard_cap,
+      tokenEstimate: renderedTokens,
+    };
+  }
   return {
     ok: true,
     body,
@@ -740,30 +756,6 @@ function sortDroppable(entries: ManifestEntry[]): ManifestEntry[] {
     return entryTokenCost(b) - entryTokenCost(a);
   });
   return droppable;
-}
-
-/**
- * Validates that each `ResolvedEntry.body` fits within
- * `manifest.entries[i].token_estimate * RESOLVED_BODY_SAFETY_MARGIN` (chars/4
- * heuristic). Returns the first violation as a detail string, or null when
- * everything is within bounds.
- */
-function checkResolvedBodyBudget(
-  input: ComposePromptWithBudgetInput,
-): string | null {
-  const resolved = input.resolvedEntries;
-  if (resolved == null || resolved.length === 0) return null;
-  for (const r of resolved) {
-    const entry = input.manifest.entries[r.manifest_entry_index];
-    if (entry == null) continue;
-    if (entry.token_estimate == null) continue;
-    const actualTokens = Math.ceil(r.body.length / 4);
-    const cap = entry.token_estimate * RESOLVED_BODY_SAFETY_MARGIN;
-    if (actualTokens > cap) {
-      return `resolved body for entry[${r.manifest_entry_index}] (${entry.object_kind}/${entry.object_id}) exceeds token_estimate × ${RESOLVED_BODY_SAFETY_MARGIN}: ${actualTokens} > ${cap}`;
-    }
-  }
-  return null;
 }
 
 /**
