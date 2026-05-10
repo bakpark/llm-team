@@ -522,5 +522,34 @@ describe("Phase 8a — composePromptWithBudget enforcement", () => {
         expect(r.detail).toMatch(/overflow/);
       }
     });
+
+    // PR #95 review P0-2 (gpt5.5): the pre-truncation `computeTotal()`
+    // estimate omits the dynamic `## Inputs` framing (per-entry headers,
+    // blank lines, separators) the renderer emits. Near-cap manifests
+    // could pass the estimate and produce a rendered prompt that
+    // exceeded the cap. The post-render `body.length / 4` re-measurement
+    // must catch that case and surface `context_budget_truncation` so the
+    // LLM is never invoked with a prompt over `token_hard_cap`.
+    it("rejects when post-render prompt exceeds token_hard_cap even though the estimate fit", () => {
+      // Pick a cap that lands between (estimate) and (rendered): the body
+      // is large enough that the dynamic Inputs framing tips it over. The
+      // entry is `required` so truncation cannot save it.
+      const cap: ContextBudget = ContextBudget.parse({
+        "inner.tdd_build": { token_hard_cap: 1_850 },
+      });
+      // Use a body sized so estimate <= cap but rendered > cap. With
+      // scaffold≈1200 and ENTRY_FRAMING≈8, a ~2400-char body (~600 tokens)
+      // gives total≈1808 < 1850, while the rendered prompt (frontmatter +
+      // manifest JSON + `## Inputs` + entry header + body + blank lines +
+      // instruction + output schema) measures ~1900+ tokens.
+      const r = composePromptWithBudget(inputWithResolved(0, 2_400, cap));
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.reason).toBe("context_budget_truncation");
+        expect(r.cap).toBe(1_850);
+        expect(r.detail).toContain("after_render");
+        expect(r.tokenEstimate).toBeGreaterThan(1_850);
+      }
+    });
   });
 });

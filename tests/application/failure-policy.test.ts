@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_RETRY_CONFIG,
   classifyAgentIoStageFailure,
+  countPromptComposeFailuresFromLedger,
   evaluateRetry,
 } from "../../src/application/failure-policy.js";
 
@@ -78,6 +79,44 @@ describe("classifyAgentIoStageFailure (incident-3)", () => {
     ] as const) {
       expect(classifyAgentIoStageFailure({ ok: false, stage })).toBeNull();
     }
+  });
+
+  it("countPromptComposeFailuresFromLedger counts only prompt_compose/* invalid rows for the session", async () => {
+    const sessionId = "01HZS00000000000000000000A";
+    const otherSession = "01HZS00000000000000000000B";
+    const rows = [
+      { session_id: sessionId, result: "invalid", result_detail: "prompt_compose/context_budget_truncation: foo" },
+      { session_id: sessionId, result: "applied", result_detail: null },
+      { session_id: sessionId, result: "invalid", result_detail: "envelope_parse/schema_violation: bar" },
+      { session_id: otherSession, result: "invalid", result_detail: "prompt_compose/context_budget_truncation: baz" },
+      { session_id: sessionId, result: "invalid", result_detail: "prompt_compose/prompt_layout_violation: qux" },
+    ];
+    const ndjson = rows.map((r) => JSON.stringify(r)).join("\n");
+    const fakeStore = {
+      readText: async (relPath: string) => {
+        expect(relPath).toBe("ledger/transitions.ndjson");
+        return ndjson;
+      },
+    };
+    expect(
+      await countPromptComposeFailuresFromLedger(fakeStore, sessionId),
+    ).toBe(2);
+    expect(
+      await countPromptComposeFailuresFromLedger(fakeStore, otherSession),
+    ).toBe(1);
+    // Empty / missing ledger short-circuits to 0.
+    expect(
+      await countPromptComposeFailuresFromLedger(
+        { readText: async () => null },
+        sessionId,
+      ),
+    ).toBe(0);
+    expect(
+      await countPromptComposeFailuresFromLedger(
+        { readText: async () => "" },
+        sessionId,
+      ),
+    ).toBe(0);
   });
 
   it("integration: 4 consecutive prompt_compose failures exhaust the retry budget", () => {

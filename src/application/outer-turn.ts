@@ -59,6 +59,11 @@ import type { LlmRunnerPort } from "../ports/llm-runner.js";
 import type { StorePort } from "../ports/store.js";
 import { callAgent } from "./agent-io.js";
 import {
+  classifyAgentIoStageFailure,
+  countPromptComposeFailuresFromLedger,
+  evaluateRetry,
+} from "./failure-policy.js";
+import {
   dispatchOuterOutcome,
   type OuterDispatchInput,
   type OuterDispatchResult,
@@ -426,6 +431,41 @@ export async function runOneOuterTurn(
       agentOut.detail,
       agentProfileId,
     );
+    // PR #95 review P0-1: incident-3 retry cap wiring. When the failure was
+    // at the `prompt_compose` stage (e.g. `context_budget_truncation`), the
+    // LLM was never invoked, so no agent-side streak (no_progress /
+    // regression / scope_violation) advances. Without an escalation hook the
+    // daemon would re-pick this milestone every tick and burn CPU on the
+    // same compose failure. Count prior `prompt_compose/...` invalid rows
+    // for this session in the ledger; if `evaluateRetry` says escalate,
+    // mark the session ABANDONED via the existing TIMEOUT/ABANDONED finalize
+    // path so it stops being picked. `abandoned_reason="no_progress"` is
+    // the closest permitted enum value (`AbandonedReason` does not include
+    // a `prompt_compose_truncation` bucket — semantics: no progress is
+    // achievable while the prompt cannot be composed).
+    const classification = classifyAgentIoStageFailure(agentOut);
+    if (classification != null) {
+      const totalFailures = await countPromptComposeFailuresFromLedger(
+        deps.store,
+        session.session_id,
+      );
+      const decision = evaluateRetry(classification, totalFailures - 1);
+      if (decision.decision === "escalate") {
+        return finalizeNonConvergedSession(
+          session,
+          milestone,
+          phase,
+          {
+            converged: false,
+            reason: "abandoned",
+            abandoned_reason: "no_progress",
+          },
+          null,
+          turnIndex,
+          deps,
+        );
+      }
+    }
     return {
       kind: "invalid_envelope",
       sessionId: session.session_id,

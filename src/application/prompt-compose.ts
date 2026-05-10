@@ -512,6 +512,15 @@ function outerInstructionBody(input: ComposePromptInput): string {
  * On persistent overflow the function returns the AGC-INVALID classification
  * `context_budget_truncation` so the caller skips the LLM invocation. This
  * mirrors `parseAgentAuthored` / `enrichEnvelope` outcome shape.
+ *
+ * Sole guard: PR #95 dropped the per-entry × 2 body-vs-header heuristic
+ * (false-positive prone). The aggregate `token_hard_cap` is now the only
+ * size enforcement in this seam — both the pre-truncation estimate AND the
+ * post-render `body.length / 4` re-measurement (PR #95 review P0-2) must
+ * stay under cap. Detecting an individual entry's body bloat in isolation
+ * is intentionally out of scope; if that ever becomes a debugging concern,
+ * a warn-level per-entry observer can be reintroduced as a non-blocking
+ * sibling check without re-enabling the rejected guard.
  */
 
 /** Truncation priority per AGC-CONTEXT-BUDGET (lowest = drop first). */
@@ -655,6 +664,25 @@ export function composePromptWithBudget(
     manifest: truncatedManifest,
     resolvedEntries: remappedResolved,
   });
+  // PR #95 review P0-2 (gpt5.5): the aggregate cap above compares
+  // `computeTotal(...)` — an estimate that sums entry headers + framing +
+  // resolved bodies — against `token_hard_cap`. The estimate omits the
+  // dynamic `## Inputs` section framing (`### entry[i] ...` headers, blank
+  // lines, separators) the actual renderer emits, so a near-cap manifest
+  // can pass the estimate and still produce a rendered prompt that exceeds
+  // the cap. Re-measure the rendered string with the same char/4 heuristic
+  // and fail closed when over — so the LLM is never invoked with a prompt
+  // that violates `token_hard_cap`.
+  const renderedTokens = Math.ceil(body.length / 4);
+  if (renderedTokens > cap.token_hard_cap) {
+    return {
+      ok: false,
+      reason: "context_budget_truncation",
+      detail: `final rendered prompt exceeds cap after compose: rendered=${renderedTokens} > cap ${cap.token_hard_cap} (estimate=${total}, loop=${input.parentLoop} step=${input.phaseOrPurpose}, dropped=${droppedEntries.length}); after_render`,
+      cap: cap.token_hard_cap,
+      tokenEstimate: renderedTokens,
+    };
+  }
   return {
     ok: true,
     body,

@@ -31,6 +31,11 @@ import type { StorePort } from "../ports/store.js";
 import type { CommandSpec, VerificationPort } from "../ports/verification.js";
 import type { WorkspacePort } from "../ports/workspace.js";
 import { callAgent } from "./agent-io.js";
+import {
+  classifyAgentIoStageFailure,
+  countPromptComposeFailuresFromLedger,
+  evaluateRetry,
+} from "./failure-policy.js";
 import { prepareAgentWorkspace } from "./agent-workspace.js";
 import {
   dispatchOutcome,
@@ -107,6 +112,18 @@ export type RunMiddleReviewOutcome =
       sliceId: string;
       stage: string;
       reason: string;
+      detail: string;
+    }
+  | {
+      /**
+       * PR #95 review P0-1 (incident-3): mirror of the inner outcome —
+       * the middle review session has hit the
+       * `prompt_compose_truncation` retry cap. The session is ABANDONED
+       * and the daemon stops re-picking it.
+       */
+      kind: "prompt_compose_escalated";
+      sessionId: string;
+      sliceId: string;
       detail: string;
     }
   | {
@@ -317,6 +334,33 @@ async function runMiddleReviewTurnInner(
       agentOut,
       deps,
     );
+    // PR #95 review P0-1: incident-3 retry cap wiring. See `outer-turn.ts`
+    // for the rationale. Abandon the middle review session when the
+    // `prompt_compose` failure count for this session reaches the cap so
+    // the daemon's pickReadyMiddleReview selector stops re-picking it.
+    const classification = classifyAgentIoStageFailure(agentOut);
+    if (classification != null) {
+      const totalFailures = await countPromptComposeFailuresFromLedger(
+        deps.store,
+        session.session_id,
+      );
+      const decision = evaluateRetry(classification, totalFailures - 1);
+      if (decision.decision === "escalate") {
+        await abandonMiddleSessionForPromptCompose(
+          slice,
+          session,
+          turnIndex,
+          decision.reason,
+          deps,
+        );
+        return {
+          kind: "prompt_compose_escalated",
+          sessionId: session.session_id,
+          sliceId: slice.slice_id,
+          detail: decision.reason,
+        };
+      }
+    }
     return {
       kind: "invalid_envelope",
       sessionId: session.session_id,
@@ -976,6 +1020,76 @@ async function emitInvalidReviewTurn(
     lease_kind: null,
     result: "invalid",
     result_detail: `${failure.stage}/${failure.reason}: ${failure.detail.slice(0, 200)}`,
+    timestamp: deps.clock.isoNow(),
+  });
+}
+
+/**
+ * PR #95 review P0-1 (incident-3): mirror of
+ * `turn-worker.abandonInnerSessionForPromptCompose` for the middle review
+ * loop. Flips the SESSION_OPEN middle session to ABANDONED and records a
+ * session_finalize ledger row so `pickReadyMiddleReview` (which guards on
+ * `state === "SESSION_OPEN"`) stops re-picking it. The slice itself is
+ * left in SLICE_REVIEWING — the recovery sweep / operator handles
+ * downstream cleanup, identical to other terminal middle outcomes.
+ */
+async function abandonMiddleSessionForPromptCompose(
+  slice: SliceT,
+  session: DialogueSessionT,
+  turnIndex: number,
+  reason: string,
+  deps: CoordinatorDeps,
+): Promise<void> {
+  const finalized = DialogueSession.parse({
+    ...session,
+    state: "ABANDONED",
+    final_verdict: null,
+    abandoned_reason: "no_progress",
+    finalization_decision: null,
+    updated_at: deps.clock.isoNow(),
+  });
+  await deps.store.writeAtomic(
+    layout.sessionMetadata(finalized.session_id),
+    JSON.stringify(finalized, null, 2),
+  );
+  await deps.ledger.appendTransition({
+    transition_id: newMonotonicId(deps.clock.now()),
+    target_id: deps.targetId,
+    object_id: finalized.session_id,
+    object_kind: "dialogue_session",
+    from_state: "SESSION_OPEN",
+    to_state: "ABANDONED",
+    loop_kind: "middle",
+    phase: null,
+    slice_id: slice.slice_id,
+    slice_kind: slice.slice_kind,
+    dod_revision: slice.dod_revision_pin,
+    session_id: finalized.session_id,
+    turn_index: turnIndex,
+    slot_kind: "delivery",
+    agent_profile_id: "sentinel",
+    contribution_kind: null,
+    action_kind: "session_finalize",
+    final_verdict: null,
+    caller_id: deps.callerId,
+    manifest_id: null,
+    input_revision_pins: [],
+    output_hash: null,
+    verification_run_id: null,
+    metric_run_id: null,
+    idempotency_key: idempotencyKey({
+      scope: "per_session_outcome",
+      parts: {
+        session_id: finalized.session_id,
+        final_verdict: "ABANDONED",
+        finalization_decision: "abandoned:prompt_compose_truncation",
+        workspace_revision_pin_at_convergence: finalized.workspace_revision_pin,
+      },
+    }),
+    lease_token: null,
+    lease_kind: null,
+    result: "applied",
+    result_detail: reason,
     timestamp: deps.clock.isoNow(),
   });
 }

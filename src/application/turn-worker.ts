@@ -21,6 +21,11 @@ import type {
 import type { WorkspacePort } from "../ports/workspace.js";
 import type { LeaseConfig } from "../config/target-schema.js";
 import { callAgent, type AgentIoOutcome } from "./agent-io.js";
+import {
+  classifyAgentIoStageFailure,
+  countPromptComposeFailuresFromLedger,
+  evaluateRetry,
+} from "./failure-policy.js";
 import { idempotencyKey } from "./idempotency.js";
 import { assertCanAcquire } from "./lease-acquisition-order.js";
 import { withLeaseHeartbeat } from "./lease-heartbeat.js";
@@ -89,6 +94,19 @@ export type TurnWorkerOutcome =
       sliceId: string;
       stage: string;
       reason: string;
+      detail: string;
+    }
+  | {
+      /**
+       * PR #95 review P0-1 (incident-3): the session has hit the
+       * `prompt_compose_truncation` retry cap (default 3 prior failures).
+       * The runner has flipped the DialogueSession to ABANDONED and
+       * appended the session_finalize ledger row, so the daemon stops
+       * picking this session.
+       */
+      kind: "prompt_compose_escalated";
+      sessionId: string;
+      sliceId: string;
       detail: string;
     }
   | {
@@ -305,6 +323,33 @@ async function runOneInnerTurnInner(
       turnIdempotency,
       agentOut,
     );
+    // PR #95 review P0-1: incident-3 retry cap wiring — see
+    // `outer-turn.ts` for the rationale. When prior `prompt_compose`
+    // failures for this session reach the cap, mark the session ABANDONED
+    // so the inner ready-object selector stops re-picking it.
+    const classification = classifyAgentIoStageFailure(agentOut);
+    if (classification != null) {
+      const totalFailures = await countPromptComposeFailuresFromLedger(
+        deps.store,
+        session.session_id,
+      );
+      const decision = evaluateRetry(classification, totalFailures - 1);
+      if (decision.decision === "escalate") {
+        await abandonInnerSessionForPromptCompose(
+          deps,
+          slice,
+          session,
+          turnIndex,
+          decision.reason,
+        );
+        return {
+          kind: "prompt_compose_escalated",
+          sessionId: session.session_id,
+          sliceId: slice.slice_id,
+          detail: decision.reason,
+        };
+      }
+    }
     return {
       kind: "invalid_envelope",
       sessionId: session.session_id,
@@ -649,6 +694,79 @@ async function emitInvalidTurn(
     lease_kind: null,
     result: "invalid",
     result_detail: `${failure.stage}/${failure.reason}: ${truncate(failure.detail, 200)}`,
+    timestamp: deps.clock.isoNow(),
+  });
+}
+
+/**
+ * PR #95 review P0-1 (incident-3): flip a SESSION_OPEN inner session to
+ * ABANDONED after the `prompt_compose_truncation` retry cap is hit, and
+ * record a session_finalize ledger row so the daemon's pickReadyInnerTurn
+ * selector (which guards on `state === "SESSION_OPEN"`) stops re-picking
+ * it. The session stays attached to its slice; the slice itself is left
+ * in its current state — operator/recovery sweep handles the slice-side
+ * cleanup, identical to the existing TIMEOUT path. `abandoned_reason` is
+ * `no_progress` because `AbandonedReason` does not have a dedicated
+ * `prompt_compose_truncation` value and the semantics align (prompt
+ * cannot be composed → no progress is achievable).
+ */
+async function abandonInnerSessionForPromptCompose(
+  deps: TurnWorkerDeps,
+  slice: SliceT,
+  session: DialogueSessionT,
+  turnIndex: number,
+  reason: string,
+): Promise<void> {
+  const finalized = DialogueSession.parse({
+    ...session,
+    state: "ABANDONED",
+    final_verdict: null,
+    abandoned_reason: "no_progress",
+    finalization_decision: null,
+    updated_at: deps.clock.isoNow(),
+  });
+  await deps.store.writeAtomic(
+    layout.sessionMetadata(finalized.session_id),
+    JSON.stringify(finalized, null, 2),
+  );
+  await deps.ledger.appendTransition({
+    transition_id: newMonotonicId(deps.clock.now()),
+    target_id: deps.cfg.targetId,
+    object_id: finalized.session_id,
+    object_kind: "dialogue_session",
+    from_state: "SESSION_OPEN",
+    to_state: "ABANDONED",
+    loop_kind: "inner",
+    phase: null,
+    slice_id: slice.slice_id,
+    slice_kind: slice.slice_kind,
+    dod_revision: slice.dod_revision_pin,
+    session_id: finalized.session_id,
+    turn_index: turnIndex,
+    slot_kind: "delivery",
+    agent_profile_id: "forge",
+    contribution_kind: null,
+    action_kind: "session_finalize",
+    final_verdict: null,
+    caller_id: deps.cfg.callerId,
+    manifest_id: null,
+    input_revision_pins: [],
+    output_hash: null,
+    verification_run_id: null,
+    metric_run_id: null,
+    idempotency_key: idempotencyKey({
+      scope: "per_session_outcome",
+      parts: {
+        session_id: finalized.session_id,
+        final_verdict: "ABANDONED",
+        finalization_decision: "abandoned:prompt_compose_truncation",
+        workspace_revision_pin_at_convergence: finalized.workspace_revision_pin,
+      },
+    }),
+    lease_token: null,
+    lease_kind: null,
+    result: "applied",
+    result_detail: reason,
     timestamp: deps.clock.isoNow(),
   });
 }

@@ -114,3 +114,41 @@ export function classifyAgentIoStageFailure(outcome: {
   if (outcome.stage === "prompt_compose") return "prompt_compose_truncation";
   return null;
 }
+
+/**
+ * Count prior `prompt_compose/...` invalid ledger rows for a given session
+ * (incident-3 retry counter source). Walks `ledger/transitions.ndjson`
+ * directly via the StorePort — there is no persisted `failure_counters`
+ * advisory slot for this classification, and the ledger is the only durable
+ * record that survives daemon restarts.
+ *
+ * The returned count is the number of `result="invalid"` rows whose
+ * `result_detail` begins with `prompt_compose/` and whose `session_id`
+ * matches. Callers use it as `currentCount` for `evaluateRetry`.
+ */
+export async function countPromptComposeFailuresFromLedger(
+  store: { readText(relPath: string): Promise<string | null> },
+  sessionId: string,
+): Promise<number> {
+  const body = await store.readText("ledger/transitions.ndjson");
+  if (body == null || body.length === 0) return 0;
+  let count = 0;
+  for (const line of body.split("\n")) {
+    if (line.length === 0) continue;
+    let row: { session_id?: unknown; result?: unknown; result_detail?: unknown };
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (row.session_id !== sessionId) continue;
+    if (row.result !== "invalid") continue;
+    if (
+      typeof row.result_detail === "string" &&
+      row.result_detail.startsWith("prompt_compose/")
+    ) {
+      count += 1;
+    }
+  }
+  return count;
+}
