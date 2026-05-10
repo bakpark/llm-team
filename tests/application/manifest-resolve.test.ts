@@ -136,9 +136,11 @@ describe("resolveManifestEntries", () => {
   it("throws on required entries with unsupported (object_kind, fetch_scope)", async () => {
     const store = new MemoryStore();
     await seedMilestone(store, "raw");
+    // incident-9 made `(slice, body)` supported, so use `(slice_merge, body)`
+    // here as the still-unsupported pair.
     const manifest = buildManifest([
       {
-        object_kind: "slice",
+        object_kind: "slice_merge",
         object_id: "01HZS00000000000000000000A",
         fetch_scope: "body",
         revision_pin: "deadbeef",
@@ -482,6 +484,215 @@ describe("resolveManifestEntries — session_turn body (incident-5)", () => {
       revision_pin: "len=0:",
       required: false,
       purpose: "advisory prior turn",
+    });
+    const resolved = await resolveManifestEntries(store, manifest);
+    // Only the milestone entry survives.
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]!.manifest_entry_index).toBe(0);
+  });
+});
+
+/**
+ * incident-9 — `(slice, body)` resolver tests. The inner TDD `forge` agent
+ * was stuck in `failure: need_context` for 29+ turns because the
+ * `(slice, body)` manifest entry rendered as `[BODY NOT INLINED]` in the
+ * prompt. These tests lock the new behaviour: body is read from
+ * `slices/<slice_id>.json`, projected to agent-relevant Slice fields, with
+ * the same revision_pin / required-missing / stale-pin failure modes as
+ * milestone / session_turn body resolution. Pin equality is matched
+ * against `slice.dod_revision_pin` (logical marker, not content hash).
+ */
+describe("resolveManifestEntries — slice body (incident-9)", () => {
+  const SLICE_SESSION_ID = "01HZSE000000000000000000S1";
+  const SLICE_PRIMARY_MS = "01HZMS00000000000000000S02";
+  const SLICE_PRIMARY_FR = "01HZFR00000000000000000S02";
+  const SLICE_ID = "01HZSC000000000000000000S2";
+  const SLICE_ISO = "2026-05-09T08:00:00.000Z";
+  const DOD_PIN = "selfhost-dod-v1";
+
+  function buildSlice(overrides: Partial<Record<string, unknown>> = {}) {
+    return {
+      slice_id: SLICE_ID,
+      milestone_id: SLICE_PRIMARY_MS,
+      slice_kind: "internal",
+      value_statement: "Discovery loop fix — inline session_turn body",
+      ac_ids: ["AC-1", "AC-2"],
+      acceptance_tests: [
+        { path: "tests/x.test.ts", name: "loop converges", ac_id: "AC-1" },
+      ],
+      declared_scope: ["src/application/manifest-resolve.ts"],
+      declared_metric_threshold: null,
+      interface_break: false,
+      dependencies: [],
+      trunk_base_revision: "trunk-abc123",
+      dod_revision_pin: DOD_PIN,
+      state: "SLICE_BUILDING",
+      current_session_id: SLICE_SESSION_ID,
+      spawning_proposal_id: null,
+      abandoned_reason: null,
+      external_refs: [],
+      created_at: SLICE_ISO,
+      updated_at: SLICE_ISO,
+      ...overrides,
+    };
+  }
+
+  async function seedSliceMilestone(store: MemoryStore) {
+    await store.writeAtomic(
+      layout.milestone(SLICE_PRIMARY_MS),
+      JSON.stringify({
+        milestone_id: SLICE_PRIMARY_MS,
+        target_id: "team-a",
+        title: "Inner TDD slice resolution",
+        state: "M_DELIVERY_BUILDING",
+        slot_kind: "delivery",
+        intake_source_kind: "feature_request",
+        intake_source_id: SLICE_PRIMARY_FR,
+        spec_revision_pin: null,
+        context_summary_id: null,
+        external_refs: [],
+        created_at: SLICE_ISO,
+        updated_at: SLICE_ISO,
+      }),
+    );
+    await store.writeAtomic(
+      layout.featureRequest(SLICE_PRIMARY_FR),
+      JSON.stringify({
+        request_id: SLICE_PRIMARY_FR,
+        title: "Inner TDD slice resolution",
+        body: "raw scope text",
+        submitted_by: "user@example.com",
+        submitted_at: SLICE_ISO,
+        state: "queued",
+        promoted_milestone_id: null,
+        processed_at: null,
+        rejection_reason: null,
+      }),
+    );
+  }
+
+  function manifestWithSlice(extra: any) {
+    return ContextManifest.parse({
+      manifest_id: "01HZMA00000000000000000S01",
+      session_id: SLICE_SESSION_ID,
+      turn_index: 0,
+      purpose: "tdd_build",
+      target: { object_kind: "slice", object_id: SLICE_ID },
+      entries: [
+        {
+          object_kind: "milestone",
+          object_id: SLICE_PRIMARY_MS,
+          fetch_scope: "body",
+          revision_pin: SLICE_ISO,
+          required: true,
+          purpose: "primary",
+        },
+        extra,
+      ],
+      created_at: SLICE_ISO,
+    });
+  }
+
+  it("resolves required slice body — projects agent-relevant Slice subset", async () => {
+    const store = new MemoryStore();
+    await seedSliceMilestone(store);
+    await store.writeAtomic(
+      layout.slice(SLICE_ID),
+      JSON.stringify(buildSlice()),
+    );
+    const manifest = manifestWithSlice({
+      object_kind: "slice",
+      object_id: SLICE_ID,
+      fetch_scope: "body",
+      revision_pin: DOD_PIN,
+      required: true,
+      purpose: "primary input",
+    });
+    const resolved = await resolveManifestEntries(store, manifest);
+    expect(resolved).toHaveLength(2);
+    const sliceEntry = resolved.find((r) => r.manifest_entry_index === 1)!;
+    const body = sliceEntry.body;
+    // Selected fields must appear.
+    for (const key of [
+      "slice_id",
+      "slice_kind",
+      "value_statement",
+      "ac_ids",
+      "acceptance_tests",
+      "declared_scope",
+      "dependencies",
+      "state",
+      "dod_revision_pin",
+      "trunk_base_revision",
+    ]) {
+      expect(body, `selected field ${key} missing`).toContain(`"${key}"`);
+    }
+    expect(body).toContain(SLICE_ID);
+    expect(body).toContain(DOD_PIN);
+    expect(body).toContain("Discovery loop fix");
+    expect(body).toContain("trunk-abc123");
+    // Excluded fields (caller/lease metadata, timestamps).
+    for (const key of [
+      "current_session_id",
+      "spawning_proposal_id",
+      "abandoned_reason",
+      "external_refs",
+      "created_at",
+      "updated_at",
+      "milestone_id",
+      "interface_break",
+      "declared_metric_threshold",
+    ]) {
+      expect(body, `excluded field ${key} leaked`).not.toContain(`"${key}"`);
+    }
+  });
+
+  it("throws MissingRequiredManifestEntryError when slice file is absent and required", async () => {
+    const store = new MemoryStore();
+    await seedSliceMilestone(store);
+    const manifest = manifestWithSlice({
+      object_kind: "slice",
+      object_id: SLICE_ID,
+      fetch_scope: "body",
+      revision_pin: DOD_PIN,
+      required: true,
+      purpose: "primary input",
+    });
+    await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
+      /required manifest entry not found/,
+    );
+  });
+
+  it("throws StaleManifestEntryError when revision_pin differs from slice.dod_revision_pin", async () => {
+    const store = new MemoryStore();
+    await seedSliceMilestone(store);
+    await store.writeAtomic(
+      layout.slice(SLICE_ID),
+      JSON.stringify(buildSlice({ dod_revision_pin: "selfhost-dod-v2" })),
+    );
+    const manifest = manifestWithSlice({
+      object_kind: "slice",
+      object_id: SLICE_ID,
+      fetch_scope: "body",
+      revision_pin: DOD_PIN,
+      required: true,
+      purpose: "primary input",
+    });
+    await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
+      /revision_pin mismatch/,
+    );
+  });
+
+  it("silently skips non-required slice body when file is absent", async () => {
+    const store = new MemoryStore();
+    await seedSliceMilestone(store);
+    const manifest = manifestWithSlice({
+      object_kind: "slice",
+      object_id: SLICE_ID,
+      fetch_scope: "body",
+      revision_pin: DOD_PIN,
+      required: false,
+      purpose: "advisory slice",
     });
     const resolved = await resolveManifestEntries(store, manifest);
     // Only the milestone entry survives.

@@ -4,6 +4,7 @@ import type { StorePort } from "../ports/store.js";
 import { Milestone } from "../domain/schema/milestone.js";
 import { FeatureRequest } from "../domain/schema/feature-request.js";
 import { SessionTurn } from "../domain/schema/session-turn.js";
+import { Slice } from "../domain/schema/slice.js";
 import { layout } from "./persistence-layout.js";
 
 /**
@@ -28,6 +29,14 @@ import { layout } from "./persistence-layout.js";
  *     agent-relevant subset under `# Inputs` so prior reviewer rationales
  *     reach the next lead/reviewer (breaks the
  *     `request_changes ↔ need_context` Discovery loop).
+ *   - `slice` + `body` — incident-9: load `slices/<slice_id>.json` and
+ *     project the agent-relevant subset (slice_id, slice_kind,
+ *     value_statement, ac_ids, acceptance_tests, declared_scope,
+ *     dependencies, state, dod_revision_pin, trunk_base_revision) so the
+ *     inner TDD `forge` agent can author patches instead of looping on
+ *     `failure: need_context`. Revision pin is matched by equality with
+ *     `slice.dod_revision_pin` (a logical marker like `selfhost-dod-v1`,
+ *     not a SHA — consistent with `SliceLocalPinResolver` in turn-worker).
  *   - Other (object_kind, fetch_scope) combinations throw an explicit
  *     "unsupported" error. The caller decides:
  *       - `required=true` → surface the error (caller turns into AGC-INVALID),
@@ -112,16 +121,19 @@ async function resolveEntry(
   if (entry.object_kind === "session_turn" && entry.fetch_scope === "body") {
     return resolveSessionTurnBody(store, entry);
   }
+  if (entry.object_kind === "slice" && entry.fetch_scope === "body") {
+    return resolveSliceBody(store, entry);
+  }
   // Other (kind, scope) pairs remain out of scope. For `required=true`
   // entries the resolver throws so the caller can surface an AGC-INVALID
   // outcome (no silent empty prompt). For non-required entries the caller
   // catches and skips (entry omitted from `# Inputs`). Future work can
-  // extend this switch with slice / slice_merge / dialogue_session /
+  // extend this switch with slice_merge / dialogue_session /
   // verification_run resolution.
   if (entry.required) {
     throw new UnsupportedManifestEntryError(
       entry,
-      "resolver supports (milestone, body) and (session_turn, body) only",
+      "resolver supports (milestone, body), (session_turn, body), (slice, body) only",
     );
   }
   return null;
@@ -266,6 +278,75 @@ async function resolveSessionTurnBody(
     verdict: env.verdict,
     failure: env.failure,
     next_action_request: env.next_action_request,
+  };
+  return JSON.stringify(projection, null, 2);
+}
+
+/**
+ * incident-9 — resolve `(slice, body)` so the inner TDD `forge` agent can
+ * read its primary input (slice scope, AC list, declared_scope,
+ * dod_revision_pin, trunk_base_revision) inline under `# Inputs` instead
+ * of returning `failure: need_context` because the body section reports
+ * `BODY NOT INLINED`.
+ *
+ * Layout: `slices/<slice_id>.json` (see `persistence-layout.ts`).
+ *
+ * Revision pin: equality with `slice.dod_revision_pin`. Unlike milestone
+ * (`updated_at`) and session_turn (full-body sha256) pins which are
+ * content-derived, the slice pin is a LOGICAL marker authored by the
+ * outer/middle loops (e.g. `selfhost-dod-v1`) and stored on the slice
+ * record itself. `SliceLocalPinResolver` in `turn-worker.ts` uses the
+ * same `slice.dod_revision_pin` to populate the manifest pin, so a match
+ * is the correct freshness check. Mismatches surface
+ * `StaleManifestEntryError` for required entries (mirrors milestone /
+ * session_turn body).
+ *
+ * Projection: agent-relevant subset only. The full Slice record contains
+ * caller/lease metadata (`current_session_id`, `spawning_proposal_id`,
+ * `abandoned_reason`, `external_refs`, timestamps) that don't help
+ * `forge` author the patch.
+ */
+async function resolveSliceBody(
+  store: StorePort,
+  entry: ManifestEntry,
+): Promise<string | null> {
+  const path = layout.slice(entry.object_id);
+  const raw = await store.readText(path);
+  if (raw == null) {
+    if (entry.required) {
+      throw new MissingRequiredManifestEntryError(entry, path);
+    }
+    return null;
+  }
+  let slice: ReturnType<typeof Slice.parse>;
+  try {
+    slice = Slice.parse(JSON.parse(raw));
+  } catch {
+    // Persisted file is corrupt / not a Slice; treat as missing.
+    if (entry.required) {
+      throw new MissingRequiredManifestEntryError(entry, path);
+    }
+    return null;
+  }
+  // Revision-pin check — equality with `slice.dod_revision_pin` (logical
+  // marker, not content hash). See doc comment above for rationale.
+  if (slice.dod_revision_pin !== entry.revision_pin) {
+    if (entry.required) {
+      throw new StaleManifestEntryError(entry, slice.dod_revision_pin);
+    }
+    return null;
+  }
+  const projection: Record<string, unknown> = {
+    slice_id: slice.slice_id,
+    slice_kind: slice.slice_kind,
+    value_statement: slice.value_statement,
+    ac_ids: slice.ac_ids,
+    acceptance_tests: slice.acceptance_tests,
+    declared_scope: slice.declared_scope,
+    dependencies: slice.dependencies,
+    state: slice.state,
+    dod_revision_pin: slice.dod_revision_pin,
+    trunk_base_revision: slice.trunk_base_revision,
   };
   return JSON.stringify(projection, null, 2);
 }
