@@ -19,7 +19,18 @@ export interface FsStoreOptions {
   workdir: string;
   /** Whether to fsync the parent directory after rename. Default true. */
   fsyncDir?: boolean;
-  /** Max time to wait for cross-process lock acquisition. Default 5000ms. */
+  /**
+   * Max time to wait for cross-process lock acquisition. Default 30000ms.
+   *
+   * Scope (PR #94 P1-B): this single value applies to **every** withFileLock
+   * caller — ledger appendTransition, control-state writes, lease checkout,
+   * human-signal drain, etc. — because they all share `acquireLock` below.
+   * Increasing the default from the historical 5s to 30s (incident-2 fix)
+   * therefore lets *any* of those callers wait up to 30s for a stuck lock.
+   * Per-call overrides are not currently supported; if a future incident
+   * requires a tighter SLO for a specific lock, introduce a per-call timeout
+   * option rather than tuning this global down.
+   */
   lockTimeoutMs?: number;
   /** Lockdir age beyond which the lock is treated as stale. Default 60_000ms. */
   staleLockMs?: number;
@@ -46,7 +57,7 @@ export class FsStore implements StorePort {
   constructor(opts: FsStoreOptions) {
     this.workdir = resolve(opts.workdir);
     this.fsyncDir = opts.fsyncDir ?? true;
-    this.lockTimeoutMs = opts.lockTimeoutMs ?? 5_000;
+    this.lockTimeoutMs = opts.lockTimeoutMs ?? 30_000;
     this.staleLockMs = opts.staleLockMs ?? 60_000;
     this.raceWindowMs = opts.raceWindowMs ?? 1_000;
   }

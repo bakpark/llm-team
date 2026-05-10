@@ -146,7 +146,7 @@ describe("FileLedger", () => {
     expect(r2.row.audit_hash).not.toBe(r1.row.audit_hash);
   });
 
-  it("records a duplicate row per SOC-IDEMPOTENCY when key reappears", async () => {
+  it("incident-2 P0: duplicate idempotency_key is NOT persisted to disk", async () => {
     const store = new MemoryStore();
     const ledger = new FileLedger({ store });
     const r1 = await ledger.appendTransition(baseRow({}));
@@ -158,23 +158,186 @@ describe("FileLedger", () => {
     expect(r2.result).toBe("duplicate");
     expect(r2.row.result).toBe("duplicate");
     expect(r2.row.idempotency_key).toBe(r1.row.idempotency_key);
+    // Synthesized duplicate row's audit_hash_prev still points at the
+    // current head (r1) for caller diagnostics, but the row itself is
+    // never written.
     expect(r2.row.audit_hash_prev).toBe(r1.row.audit_hash);
     const body = (await store.readText(LEDGER_TRANSITIONS_PATH)) ?? "";
-    expect(body.split("\n").filter(Boolean).length).toBe(2);
+    expect(body.split("\n").filter(Boolean).length).toBe(1);
   });
 
-  it("subsequent applied rows chain off the duplicate row", async () => {
+  it("incident-2 P0: subsequent applied rows chain off the last APPLIED row, not the duplicate", async () => {
     const store = new MemoryStore();
     const ledger = new FileLedger({ store });
     const r1 = await ledger.appendTransition(baseRow({}));
     const r2 = await ledger.appendTransition(
       baseRow({ transition_id: TX_ID_2 }),
     );
+    expect(r2.result).toBe("duplicate");
     const r3 = await ledger.appendTransition(
       baseRow({ transition_id: TX_ID_3, idempotency_key: "k3" }),
     );
     expect(r3.result).toBe("applied");
-    expect(r3.row.audit_hash_prev).toBe(r2.row.audit_hash);
+    expect(r3.row.audit_hash_prev).toBe(r1.row.audit_hash);
+    // File has exactly r1 + r3 (duplicate r2 was not persisted).
+    const body = (await store.readText(LEDGER_TRANSITIONS_PATH)) ?? "";
+    expect(body.split("\n").filter(Boolean).length).toBe(2);
+  });
+
+  it("PR #94 P1-D: emits ledger.duplicate log event exactly once per duplicate append", async () => {
+    const store = new MemoryStore();
+    const logger = new CollectingLogger();
+    const ledger = new FileLedger({ store, logger });
+    const r1 = await ledger.appendTransition(baseRow({}));
+    expect(r1.result).toBe("applied");
+    const r2 = await ledger.appendTransition(
+      baseRow({ transition_id: TX_ID_2 }),
+    );
+    expect(r2.result).toBe("duplicate");
+    const dupEvents = logger.events.filter(
+      (e) => e.event === "ledger.duplicate",
+    );
+    expect(dupEvents.length).toBe(1);
+    expect(dupEvents[0]?.fields).toMatchObject({
+      idempotency_key: r1.row.idempotency_key,
+      result: "duplicate",
+    });
+  });
+
+  it("PR #94 P0-1: same-byte external content swap forces re-replay (tail fingerprint)", async () => {
+    const store = new MemoryStore();
+    const a = new FileLedger({ store });
+    // Prime a's cache with a single applied row.
+    const ra = await a.appendTransition(baseRow({}));
+    const bodyAfterA = (await store.readText(LEDGER_TRANSITIONS_PATH)) ?? "";
+    // External writer (sibling FileLedger b) replaces the ndjson with a
+    // *different* row whose serialized byte length matches ra's exactly.
+    // Without the tail fingerprint, a's cache would short-circuit on the
+    // (still-equal) lastReplayedSize and chain its next applied row off
+    // the now-stale cachedHead, corrupting the audit_hash chain.
+    const b = new FileLedger({ store });
+    // Build an alternate single-row body; pick fields so the serialized
+    // length matches bodyAfterA. transition_id and idempotency_key both
+    // have fixed lengths in baseRow, so we can simply re-prime b on a
+    // fresh store with a different idempotency_key/transition_id and
+    // swap b's body in for a's.
+    const altStore = new MemoryStore();
+    const bSeed = new FileLedger({ store: altStore });
+    // Alt idempotency_key is chosen to match the original key's byte length
+    // exactly so the serialized row's overall length is identical (the only
+    // other variable-length field is audit_hash[_prev] which is fixed at
+    // 64 hex chars). This is the worst-case input for the size-only cache:
+    // an external writer swap that is byte-equivalent in size.
+    const altKey = "intake|kind=human_seed&id=issue:9";
+    expect(altKey.length).toBe(
+      "intake|kind=human_seed&id=issue:1".length,
+    );
+    const rb = await bSeed.appendTransition(
+      baseRow({ transition_id: TX_ID_2, idempotency_key: altKey }),
+    );
+    const bodyAlt = (await altStore.readText(LEDGER_TRANSITIONS_PATH)) ?? "";
+    // Sanity: same byte length, different content (different audit_hash
+    // line means same-size swap is realistic).
+    expect(bodyAlt.length).toBe(bodyAfterA.length);
+    expect(bodyAlt).not.toBe(bodyAfterA);
+    await store.writeAtomic(LEDGER_TRANSITIONS_PATH, bodyAlt);
+    // a's next append must observe the swap: audit_hash_prev should be
+    // rb's audit_hash (the new tail), NOT ra's stale cachedHead.
+    void b;
+    const ra2 = await a.appendTransition(
+      baseRow({ transition_id: TX_ID_3, idempotency_key: "k3" }),
+    );
+    expect(ra2.result).toBe("applied");
+    expect(ra2.row.audit_hash_prev).toBe(rb.row.audit_hash);
+  });
+
+  it("PR #94 P0-2: concurrent runDaemonPrelude calls for the same role emit exactly one noop row", async () => {
+    // Singleflight regression: two callers from the same role race into
+    // the gate simultaneously; both observe non-RUNNING + miss memo;
+    // without the in-flight registry both would appendTransition. With
+    // the singleflight, the second call awaits the first's promise and
+    // returns its outcome.
+    const { FsStore } = await import("../../src/adapters/store/fs.js");
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const {
+      __resetDaemonPreludeMemo,
+      applyControlSignal,
+      runDaemonPrelude,
+    } = await import("../../src/application/control-state.js");
+    const { HumanSignalEnvelope } = await import(
+      "../../src/domain/schema/human-signal.js"
+    );
+    const { FixedClock } = await import("../../src/ports/clock.js");
+    __resetDaemonPreludeMemo();
+    const store = new FsStore({ workdir: mkdtempSync(join(tmpdir(), "p94-")) });
+    const clock = new FixedClock(Date.parse("2026-05-09T00:00:00.000Z"));
+    const ledger = new FileLedger({ store, auditHashSeed: "seed-94" });
+    await applyControlSignal(
+      store,
+      clock,
+      HumanSignalEnvelope.parse({
+        target_kind: "system",
+        target_id: "system",
+        actor: "operator",
+        created_at: "2026-05-09T00:00:00.000Z",
+        source: "fs_drop",
+        signal_id: "sig-pause",
+        signal_type: "pause",
+      }),
+    );
+    const deps = {
+      store,
+      clock,
+      ledger,
+      callerId: "test-caller",
+      targetId: "test-target",
+      role: "turn-worker",
+    };
+    const [a, b] = await Promise.all([
+      runDaemonPrelude(deps),
+      runDaemonPrelude(deps),
+    ]);
+    expect(a.action).toBe("paused");
+    expect(b.action).toBe("paused");
+    const body = (await store.readText(LEDGER_TRANSITIONS_PATH)) ?? "";
+    const lines = body.split("\n").filter((s) => s.length > 0);
+    expect(lines.length).toBe(1);
+  });
+
+  it("incident-2 P0: 1000 same-key duplicate appends grow the file exactly once (cache smoke)", async () => {
+    const store = new MemoryStore();
+    const ledger = new FileLedger({ store });
+    await ledger.appendTransition(baseRow({}));
+    for (let i = 0; i < 1000; i++) {
+      const out = await ledger.appendTransition(
+        baseRow({ transition_id: TX_ID_2 }),
+      );
+      expect(out.result).toBe("duplicate");
+    }
+    const body = (await store.readText(LEDGER_TRANSITIONS_PATH)) ?? "";
+    expect(body.split("\n").filter(Boolean).length).toBe(1);
+  });
+
+  it("incident-2 P0: external writer (sibling FileLedger) invalidates the cache on next append", async () => {
+    const store = new MemoryStore();
+    const a = new FileLedger({ store });
+    const b = new FileLedger({ store });
+    // Prime a's cache.
+    const ra = await a.appendTransition(baseRow({}));
+    // b writes through the same store while a still holds a stale cache.
+    const rb = await b.appendTransition(
+      baseRow({ transition_id: TX_ID_2, idempotency_key: "k2" }),
+    );
+    expect(rb.row.audit_hash_prev).toBe(ra.row.audit_hash);
+    // a's next append must observe b's row (file size diverged from
+    // a.lastReplayedSize → forced re-replay).
+    const ra2 = await a.appendTransition(
+      baseRow({ transition_id: TX_ID_3, idempotency_key: "k3" }),
+    );
+    expect(ra2.result).toBe("applied");
+    expect(ra2.row.audit_hash_prev).toBe(rb.row.audit_hash);
   });
 
   it("auditHashSeed alters the chain", async () => {
@@ -196,12 +359,12 @@ describe("FileLedger", () => {
     expect(await ledger2.lastAuditHash()).toBe(r1.row.audit_hash);
     const dup = await ledger2.appendTransition(baseRow({}));
     expect(dup.result).toBe("duplicate");
-    // Duplicate row chains forward — head advances.
-    expect(await ledger2.lastAuditHash()).toBe(dup.row.audit_hash);
+    // incident-2 P0: duplicate is not persisted, head does NOT advance.
+    expect(await ledger2.lastAuditHash()).toBe(r1.row.audit_hash);
     const r3 = await ledger2.appendTransition(
       baseRow({ transition_id: TX_ID_3, idempotency_key: "k3" }),
     );
-    expect(r3.row.audit_hash_prev).toBe(dup.row.audit_hash);
+    expect(r3.row.audit_hash_prev).toBe(r1.row.audit_hash);
   });
 
   it("multi-instance writers see the latest head via withFileLock (no fork)", async () => {
