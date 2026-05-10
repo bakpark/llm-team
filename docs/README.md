@@ -28,7 +28,6 @@
   - [`operations/onboarding.md`](operations/onboarding.md)
   - [`operations/production-runbook.md`](operations/production-runbook.md)
   - [`operations/production-target.md`](operations/production-target.md)
-- [`references/`](references/) — 참고용 (advisory) 종단 스냅샷·구조 안내. 권위 문서 아님, 신규 의존 금지. 진입은 [`references/README.md`](references/README.md).
 
 ## Draft / planning record — 제안·계획 기록 (참고)
 
