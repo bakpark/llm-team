@@ -1,7 +1,4 @@
-import { mkdtempSync } from "node:fs";
-import { mkdir, writeFile, readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
 import type { ContextManifest } from "../domain/schema/manifest.js";
 import type {
   AgentAuthoredEnvelope,
@@ -26,6 +23,11 @@ import { resolveManifestEntries } from "./manifest-resolve.js";
 import type { ContextBudget } from "../config/target-schema.js";
 import type { IdempotencyParts } from "./idempotency.js";
 import type { StorePort } from "../ports/store.js";
+import {
+  checkHeaderEcho as checkHeaderEchoFields,
+  writePromptTmp,
+  writePromptUnderWorkdir,
+} from "./agent-run-orchestrator.js";
 
 /**
  * Phase 2 agent-io pipeline (#AGC-PROMPT-SERIALIZATION + #ARC-CALL-SEMANTICS).
@@ -274,70 +276,35 @@ export async function callAgent(
   };
 }
 
-async function writePromptTmp(
-  sessionId: string,
-  turnIndex: number,
-  body: string,
-): Promise<string> {
-  const dir = mkdtempSync(join(tmpdir(), "llm-team-prompt-"));
-  const path = join(dir, `${sessionId}-${turnIndex}.md`);
-  await writeFile(path, body, "utf8");
-  return path;
-}
-
 /**
- * phase-0-stabilization C — write the composed prompt body to
- * `<workdirRoot>/prompts/<sessionId>/<turnIndex>.md` and return the absolute
- * path the LlmRunner consumes via `runInvoke.composeStdin → readFile`.
- *
- * Replaces `writePromptTmp` for callers that thread `workdirRoot` through
- * `AgentIoDeps`. The historical `mkdtempSync(tmpdir(), "llm-team-prompt-")`
- * behaviour leaked one tmp directory per turn (6,503 dirs accumulated on a
- * single self-host run) with no cleanup hook. Persisting under the workdir
- * gives a stable, predictable, operator-inspectable path for post-incident
- * replay, and a single tree to GC when the operator chooses.
- *
- * Idempotent on (sessionId, turnIndex): rewrite of an existing file is
- * tolerated because the runner re-reads the body on each invocation, but
- * the typical caller writes once before invoking the runner.
+ * Phase 0.5 — `writePromptTmp`, `writePromptUnderWorkdir`, and the
+ * field-level header-echo check now live in
+ * `./agent-run-orchestrator.ts` so the upcoming PR-first system can
+ * reuse the LLM-neutral helpers without dragging in envelope schema
+ * coupling. Behaviour is unchanged.
  */
-async function writePromptUnderWorkdir(
-  workdirRoot: string,
-  sessionId: string,
-  turnIndex: number,
-  body: string,
-): Promise<string> {
-  const path = join(workdirRoot, "prompts", sessionId, `${turnIndex}.md`);
-  await mkdir(dirname(path), { recursive: true });
-  // qwen review P1-2: pin the mode explicitly so the prompt body does not
-  // depend on the operator's umask. Mirrors `writeAtomic` (store/fs.ts)
-  // which also writes 0o644.
-  await writeFile(path, body, { encoding: "utf8", mode: 0o644 });
-  return path;
-}
-
 function checkHeaderEcho(
   envelope: AgentAuthoredEnvelope,
   input: AgentIoInput,
 ): string | null {
-  const mismatches: string[] = [];
-  const echo = (
-    field: string,
-    expected: string | number,
-    got: string | number,
-  ) => {
-    if (expected !== got) mismatches.push(`${field} expected=${expected} got=${got}`);
-  };
-  echo("session_id", input.sessionId, envelope.session_id);
-  echo("turn_index", input.turnIndex, envelope.turn_index);
-  echo("parent_loop", input.parentLoop, envelope.parent_loop);
-  echo("phase_or_purpose", input.phaseOrPurpose, envelope.phase_or_purpose);
-  echo("agent_profile_id", input.agentProfileId, envelope.agent_profile_id);
-  echo(
-    "agent_role_in_session",
-    input.agentRoleInSession,
-    envelope.agent_role_in_session,
+  return checkHeaderEchoFields(
+    {
+      session_id: input.sessionId,
+      turn_index: input.turnIndex,
+      parent_loop: input.parentLoop,
+      phase_or_purpose: input.phaseOrPurpose,
+      agent_profile_id: input.agentProfileId,
+      agent_role_in_session: input.agentRoleInSession,
+      manifest_id: input.manifest.manifest_id,
+    },
+    {
+      session_id: envelope.session_id,
+      turn_index: envelope.turn_index,
+      parent_loop: envelope.parent_loop,
+      phase_or_purpose: envelope.phase_or_purpose,
+      agent_profile_id: envelope.agent_profile_id,
+      agent_role_in_session: envelope.agent_role_in_session,
+      manifest_id: envelope.manifest_id,
+    },
   );
-  echo("manifest_id", input.manifest.manifest_id, envelope.manifest_id);
-  return mismatches.length > 0 ? mismatches.join("; ") : null;
 }
