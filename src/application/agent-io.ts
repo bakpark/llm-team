@@ -22,8 +22,10 @@ import {
 } from "./envelope.js";
 import type { ManifestBuilder } from "./manifest-builder.js";
 import { composePromptWithBudget } from "./prompt-compose.js";
+import { resolveManifestEntries } from "./manifest-resolve.js";
 import type { ContextBudget } from "../config/target-schema.js";
 import type { IdempotencyParts } from "./idempotency.js";
+import type { StorePort } from "../ports/store.js";
 
 /**
  * Phase 2 agent-io pipeline (#AGC-PROMPT-SERIALIZATION + #ARC-CALL-SEMANTICS).
@@ -90,6 +92,14 @@ export interface AgentIoInput {
 export interface AgentIoDeps {
   llmRunner: LlmRunnerPort;
   manifestBuilder: ManifestBuilder;
+  /**
+   * Optional StorePort — when supplied, `callAgent` resolves manifest-entry
+   * bodies via `resolveManifestEntries` and inlines them under `# Inputs` in
+   * the composed prompt (incident-1b Bug B). When omitted, the composer falls
+   * back to manifest-header-only inlining; required body entries surface a
+   * sentinel placeholder so the LLM is told the body is not present.
+   */
+  store?: StorePort;
 }
 
 export async function callAgent(
@@ -101,6 +111,27 @@ export async function callAgent(
   // AGC-INVALID `context_budget_truncation` outcome before the LLM runner is
   // invoked. The diagnosticsRef is empty here because no runner artefact
   // exists yet — callers persist the invalid envelope from the outcome.
+  //
+  // incident-1b Bug B: when a StorePort is wired into deps, resolve manifest
+  // entries (currently milestone bodies) so `# Inputs` is populated. Required
+  // entries that fail to resolve surface as a `prompt_compose` AGC-INVALID
+  // outcome; non-required failures are skipped silently.
+  let resolvedEntries;
+  if (deps.store != null) {
+    try {
+      resolvedEntries = await resolveManifestEntries(deps.store, input.manifest, {
+        strict: true,
+      });
+    } catch (e) {
+      return {
+        ok: false,
+        stage: "prompt_compose",
+        reason: "prompt_layout_violation",
+        detail: `manifest body resolution failed: ${(e as Error).message}`,
+        diagnosticsRef: "",
+      };
+    }
+  }
   const composeOut = composePromptWithBudget({
     agentProfileId: input.agentProfileId,
     agentRoleInSession: input.agentRoleInSession,
@@ -111,6 +142,7 @@ export async function callAgent(
     manifest: input.manifest,
     workspaceRevisionPin: input.workspaceRevisionPin,
     contextBudget: input.contextBudget,
+    resolvedEntries,
   });
   if (!composeOut.ok) {
     return {

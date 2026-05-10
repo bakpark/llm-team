@@ -430,4 +430,53 @@ describe("Phase 8a — composePromptWithBudget enforcement", () => {
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.cap).toBe(128_000);
   });
+
+  // PR #93 P1-B: dedicated coverage for `checkResolvedBodyBudget` 2x safety
+  // margin. Three cases: (a) under margin → ok, (b) exactly at margin → ok,
+  // (c) clearly over margin → context_budget_truncation.
+  describe("resolved-body 2x safety margin (PR #93 P1-B)", () => {
+    function inputWithResolved(tokenEstimate: number, bodyChars: number) {
+      return baseInput({
+        manifest: {
+          ...baseInput().manifest,
+          entries: [
+            {
+              object_kind: "milestone",
+              object_id: "01HZMS0000000000000000000A",
+              fetch_scope: "body",
+              revision_pin: "p1",
+              required: true,
+              purpose: "primary",
+              token_estimate: tokenEstimate,
+            },
+          ],
+        },
+        resolvedEntries: [
+          { manifest_entry_index: 0, body: "x".repeat(bodyChars) },
+        ],
+      });
+    }
+
+    it("accepts a resolved body well under token_estimate × 2", () => {
+      // token_estimate=100 → cap=200 tokens (~800 chars). Use 400 chars (~100 tokens).
+      const r = composePromptWithBudget(inputWithResolved(100, 400));
+      expect(r.ok).toBe(true);
+    });
+
+    it("accepts a resolved body exactly at token_estimate × 2", () => {
+      // token_estimate=100, cap=200 tokens. ceil(800/4)=200 exactly.
+      const r = composePromptWithBudget(inputWithResolved(100, 800));
+      expect(r.ok).toBe(true);
+    });
+
+    it("emits context_budget_truncation when resolved body clearly exceeds token_estimate × 2", () => {
+      // token_estimate=100, cap=200 tokens. ceil(2000/4)=500 → over.
+      const r = composePromptWithBudget(inputWithResolved(100, 2000));
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.reason).toBe("context_budget_truncation");
+        expect(r.detail).toMatch(/exceeds token_estimate × 2/);
+      }
+    });
+  });
 });

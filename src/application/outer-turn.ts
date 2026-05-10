@@ -409,7 +409,7 @@ export async function runOneOuterTurn(
       },
       runtimeMetadata: { milestone_id: milestone.milestone_id, phase },
     },
-    { llmRunner: deps.llmRunner, manifestBuilder },
+    { llmRunner: deps.llmRunner, manifestBuilder, store: deps.store },
   );
 
   if (!agentOut.ok) {

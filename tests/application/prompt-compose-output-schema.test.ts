@@ -348,3 +348,122 @@ describe("composePrompt — example envelope passes full validator pipeline", ()
     });
   }
 });
+
+/**
+ * incident-1b Bug C — `failure.type` is a closed enum and prior LLM runs
+ * invented `missing_required_input`. The prompt must enumerate the 5 valid
+ * values and `next_action_request.addressed_to` literal alternatives.
+ */
+describe("composePrompt — Output Schema enum exposure (incident-1b Bug C)", () => {
+  const FAILURE_TYPES = [
+    "need_context",
+    "invalid_output",
+    "no_progress",
+    "regression",
+    "scope_violation",
+  ];
+  const ADDRESSED_TO_VALUES = ["atlas", "forge", "sentinel", "scout", "caller"];
+
+  it("enumerates the 5 FailureType values verbatim", () => {
+    const prompt = composePrompt({
+      agentProfileId: "atlas",
+      agentRoleInSession: "lead",
+      parentLoop: "outer",
+      phaseOrPurpose: "Discovery",
+      sessionId: SESSION_ID,
+      turnIndex: 0,
+      manifest: buildManifest(),
+      workspaceRevisionPin: "deadbeef",
+    });
+    for (const v of FAILURE_TYPES) {
+      expect(prompt).toContain(`\`${v}\``);
+    }
+    // The agent-invented value from the live incident must NOT appear as a
+    // listed valid value.
+    expect(prompt).toMatch(/Do NOT invent other/);
+  });
+
+  it("enumerates next_action_request.addressed_to literal alternatives", () => {
+    const prompt = composePrompt({
+      agentProfileId: "atlas",
+      agentRoleInSession: "lead",
+      parentLoop: "outer",
+      phaseOrPurpose: "Discovery",
+      sessionId: SESSION_ID,
+      turnIndex: 0,
+      manifest: buildManifest(),
+      workspaceRevisionPin: "deadbeef",
+    });
+    for (const v of ADDRESSED_TO_VALUES) {
+      expect(prompt).toContain(`\`${v}\``);
+    }
+  });
+});
+
+/**
+ * incident-1b Bug B — `# Inputs` section renders verbatim resolved bodies, and
+ * a sentinel placeholder appears for required body entries that lack a
+ * resolved counterpart (no silent degradation).
+ */
+describe("composePrompt — Inputs section (incident-1b Bug B)", () => {
+  it("inlines resolved-entry bodies verbatim under `## Inputs`", () => {
+    const manifest = buildManifest();
+    const body = "milestone body content — operators want a CLI summary";
+    const prompt = composePrompt({
+      agentProfileId: "atlas",
+      agentRoleInSession: "lead",
+      parentLoop: "outer",
+      phaseOrPurpose: "Discovery",
+      sessionId: SESSION_ID,
+      turnIndex: 0,
+      manifest,
+      workspaceRevisionPin: "deadbeef",
+      resolvedEntries: [{ manifest_entry_index: 0, body }],
+    });
+    expect(prompt).toContain("## Inputs");
+    expect(prompt).toContain(body);
+    // Sentinel must NOT appear when the body is provided.
+    expect(prompt).not.toContain("BODY NOT INLINED");
+  });
+
+  it("emits the sentinel placeholder when a required body entry is not resolved", () => {
+    const manifest = buildManifest();
+    const prompt = composePrompt({
+      agentProfileId: "atlas",
+      agentRoleInSession: "lead",
+      parentLoop: "outer",
+      phaseOrPurpose: "Discovery",
+      sessionId: SESSION_ID,
+      turnIndex: 0,
+      manifest,
+      workspaceRevisionPin: "deadbeef",
+      resolvedEntries: [],
+    });
+    expect(prompt).toContain("## Inputs");
+    expect(prompt).toContain("BODY NOT INLINED");
+    expect(prompt).toMatch(/failure\.type=need_context/);
+  });
+
+  it("omits the Inputs section entirely when there are no resolved entries and no required-body entries", () => {
+    const manifest = ContextManifest.parse({
+      manifest_id: MANIFEST_ID,
+      session_id: SESSION_ID,
+      turn_index: 0,
+      purpose: "design",
+      target: { object_kind: "slice", object_id: SLICE_ID },
+      entries: [],
+      created_at: ISO,
+    });
+    const prompt = composePrompt({
+      agentProfileId: "atlas",
+      agentRoleInSession: "lead",
+      parentLoop: "outer",
+      phaseOrPurpose: "Discovery",
+      sessionId: SESSION_ID,
+      turnIndex: 0,
+      manifest,
+      workspaceRevisionPin: "deadbeef",
+    });
+    expect(prompt).not.toContain("## Inputs");
+  });
+});
