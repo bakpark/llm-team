@@ -27,6 +27,11 @@ import {
 } from "../config/target-schema.js";
 import { callAgent, type AgentIoOutcome } from "./agent-io.js";
 import {
+  loadExistingReviewSurfaceForLead,
+  type LeadInvoker,
+  type LeadInvokerOutcome,
+} from "./lead-invoker.js";
+import {
   classifyAgentIoStageFailure,
   countLrInvokeTimeoutsFromLedger,
   countPromptComposeFailuresFromLedger,
@@ -140,6 +145,30 @@ export type TurnWorkerOutcome =
       kind: "lease_unavailable";
       sliceId: string;
       detail: string;
+    }
+  | {
+      /**
+       * Phase 2 (cli-spicy-anchor.md): the worker was configured with
+       * `cfg.leadPath === "pr_first"` and a `deps.leadInvoker` was supplied,
+       * so the legacy envelope pipeline was bypassed in favour of
+       * `LeadInvoker.invoke`. The embedded outcome carries the PR-first
+       * succeeded / abandoned result. Default config keeps the legacy
+       * envelope path (zero regression).
+       */
+      kind: "lead_path_pr_first";
+      sliceId: string;
+      sessionId: string;
+      outcome: LeadInvokerOutcome;
+      /**
+       * PR #119 review P0a (qwen+gpt5.5): when the PR-first invocation
+       * succeeded AND post-commit verification passed, the worker mirrors
+       * the legacy path's caller-dispatch — creates a SliceMerge, flips the
+       * slice to SLICE_REVIEWING, and finalizes the session as CONVERGED.
+       * These fields are set only when that full transition ran.
+       */
+      verificationRunId?: string;
+      sliceMergeId?: string;
+      workspaceCommit?: string;
     };
 
 export interface TurnWorkerCfg {
@@ -164,6 +193,14 @@ export interface TurnWorkerCfg {
    * consecutive `lr_invoke/lr_exit_status: ... exitStatus=timeout` failures.
    */
   failurePolicy?: FailurePolicy;
+  /**
+   * Phase 2 (cli-spicy-anchor.md): when set to `"pr_first"` AND
+   * `deps.leadInvoker` is provided, the turn worker delegates the lead
+   * invocation to the PR-first orchestrator instead of running the legacy
+   * envelope path. Default is `"envelope"` (legacy) so existing tests and
+   * production paths are unaffected.
+   */
+  leadPath?: "envelope" | "pr_first";
 }
 
 export interface TurnWorkerDeps {
@@ -192,7 +229,18 @@ export interface TurnWorkerDeps {
    * `mkdtempSync(tmpdir(), ...)` path (preserves test backward compat).
    */
   workdirRoot?: string;
+  /**
+   * Phase 2 PR-first lead orchestrator (cli-spicy-anchor.md §1, §8). Wired
+   * only when `cfg.leadPath === "pr_first"` — see TurnWorkerCfg. When unset,
+   * the legacy envelope path runs unchanged (zero regression).
+   */
+  leadInvoker?: LeadInvoker;
 }
+
+export type TurnWorkerLeadPathOutcome = {
+  kind: "lead_path_pr_first";
+  outcome: LeadInvokerOutcome;
+};
 
 export async function runOneInnerTurn(
   deps: TurnWorkerDeps,
@@ -277,6 +325,194 @@ async function runOneInnerTurnInner(
   turnIndex: number,
   deps: TurnWorkerDeps,
 ): Promise<TurnWorkerOutcome> {
+
+  // Phase 2 lead-path branch (cli-spicy-anchor.md §1, §8). Activates only
+  // when both `cfg.leadPath === "pr_first"` and `deps.leadInvoker` are
+  // supplied — default keeps the legacy envelope path (zero regression).
+  if (deps.cfg.leadPath === "pr_first" && deps.leadInvoker != null) {
+    const drafts: ManifestEntryDraft[] = [
+      {
+        object_kind: "slice",
+        object_id: slice.slice_id,
+        fetch_scope: "body",
+        required: true,
+        purpose: "primary input",
+      },
+      {
+        object_kind: "code_tree",
+        object_id: slice.slice_id,
+        fetch_scope: "tree",
+        required: false,
+        purpose: "self-fetch",
+      },
+    ];
+    const prep = await deps.workspace.prepareInnerWorkspace({
+      sliceId: slice.slice_id,
+      trunkBaseRevision: slice.trunk_base_revision,
+    });
+    const pinResolver = new SliceLocalPinResolver(slice, prep.headBefore);
+    const manifestBuilder = new ManifestBuilder(pinResolver, deps.clock);
+    const manifest = await manifestBuilder.build({
+      session_id: session.session_id,
+      turn_index: turnIndex,
+      purpose: "tdd_build",
+      target: { object_kind: "slice", object_id: slice.slice_id },
+      drafts,
+    });
+    await deps.store.writeAtomic(
+      layout.manifest(manifest.manifest_id),
+      JSON.stringify(manifest, null, 2),
+    );
+    // PR #119 review P1a (gpt5.5): load existing ReviewSurface from
+    // slice.review_surface_id so a reviewer's `request_changes` re-engages
+    // the same PR instead of always opening a new one.
+    const existingSurface = await loadExistingReviewSurfaceForLead(
+      { parentKind: "slice", reviewSurfaceId: slice.review_surface_id },
+      { store: deps.store },
+    );
+    const leadOutcome = await deps.leadInvoker.invoke({
+      agentProfileId: "forge",
+      agentRoleInSession: "lead",
+      parentLoop: "inner",
+      phaseOrPurpose: "tdd_build",
+      sessionId: session.session_id,
+      turnIndex,
+      sliceId: slice.slice_id,
+      trunkBaseRevision: slice.trunk_base_revision,
+      branch: `slice/${slice.slice_id}`,
+      parentKind: "slice",
+      parentId: slice.slice_id,
+      parentPhase: null,
+      existingSurface,
+      manifest,
+      manifestBuilder,
+      envelopeIdempotency: {
+        scope: "per_turn",
+        parts: {
+          session_id: session.session_id,
+          turn_index: turnIndex,
+          agent_profile_id: "forge",
+          manifest_id: manifest.manifest_id,
+          input_revision_pins: manifest.entries.map((e) => e.revision_pin),
+        },
+      },
+      runtimeMetadata: { workspace_pin_before: prep.headBefore },
+      prTitle: `slice ${slice.slice_id} build`,
+      latestVerificationRunId: null,
+    });
+    // PR #119 review P0a (qwen+gpt5.5): mirror the legacy path's
+    // SessionTurn persistence + state-transition dispatch when the PR-first
+    // invocation succeeded. Without these steps the slice stays in
+    // SLICE_BUILDING, the session never advances `current_turn_index`, and
+    // the inner ready-object picker re-picks the same turn forever.
+    if (leadOutcome.kind !== "succeeded") {
+      return {
+        kind: "lead_path_pr_first",
+        sliceId: slice.slice_id,
+        sessionId: session.session_id,
+        outcome: leadOutcome,
+      };
+    }
+
+    // Step 5 — SessionTurn persist (CAS via withFileLock + exists check),
+    // with the additive Phase 1 refs (output_receipt_ref / output_intent_ref).
+    const callerRoutingDecision = computeCallerRoutingDecision(
+      leadOutcome.envelope,
+    );
+    const { session: sessionAfterTurn } = await persistSessionTurn(
+      {
+        session,
+        envelope: leadOutcome.envelope,
+        callerRoutingDecision,
+        workspaceCommit: leadOutcome.commitSha,
+        verificationRunId: null,
+        newWorkspaceRevisionPin: leadOutcome.commitSha,
+        outputReceiptRef: leadOutcome.receiptPath,
+        outputIntentRef: leadOutcome.intentPath,
+      },
+      { store: deps.store, clock: deps.clock },
+    );
+
+    // Post-commit verification — the lead-invoker does not run tests, so
+    // the caller verifies before promoting the slice. Verification failure
+    // keeps the slice in SLICE_BUILDING; the next pickup re-engages the
+    // lead with the existing surface (§9 follow-up commit recovery).
+    const verificationRun = await runInnerVerification(
+      {
+        targetId: deps.cfg.targetId,
+        targetRevision: leadOutcome.commitSha,
+        testCommands: deps.cfg.testCommands(prep.agentCwd),
+        environmentFingerprint: deps.cfg.environmentFingerprint,
+        coversAcIds: slice.ac_ids,
+      },
+      {
+        verification: deps.verification,
+        store: deps.store,
+        clock: deps.clock,
+      },
+    );
+
+    if (verificationRun.result !== "pass") {
+      return {
+        kind: "lead_path_pr_first",
+        sliceId: slice.slice_id,
+        sessionId: session.session_id,
+        outcome: leadOutcome,
+        verificationRunId: verificationRun.verification_run_id,
+        workspaceCommit: leadOutcome.commitSha,
+      };
+    }
+
+    // Step 6b — phase-2 caller-dispatch (mirrors the legacy ordering):
+    //   1. SliceMerge SM_READY_FOR_REVIEW
+    //   2. Slice → SLICE_REVIEWING + clear current_session_id (+ link to
+    //      the active ReviewSurface)
+    //   3. Session → CONVERGED
+    const sliceMerge = await openSliceMergeReadyForReview(
+      {
+        slice,
+        session: sessionAfterTurn,
+        preMergeRevision: leadOutcome.commitSha,
+        verificationRunId: verificationRun.verification_run_id,
+      },
+      deps,
+    );
+    const slicePath = layout.slice(slice.slice_id);
+    await deps.store.withFileLock(slicePath, async () => {
+      const reviewingSlice = Slice.parse({
+        ...slice,
+        state: "SLICE_REVIEWING",
+        current_session_id: null,
+        review_surface_id: leadOutcome.reviewSurface.review_surface_id,
+        updated_at: deps.clock.isoNow(),
+      });
+      await deps.store.writeAtomic(
+        slicePath,
+        JSON.stringify(reviewingSlice, null, 2),
+      );
+    });
+    const finalized = DialogueSession.parse({
+      ...sessionAfterTurn,
+      state: "CONVERGED",
+      final_verdict: "tests_green",
+      finalization_decision: "required_evidence",
+      updated_at: deps.clock.isoNow(),
+    });
+    await deps.store.writeAtomic(
+      layout.sessionMetadata(finalized.session_id),
+      JSON.stringify(finalized, null, 2),
+    );
+
+    return {
+      kind: "lead_path_pr_first",
+      sliceId: slice.slice_id,
+      sessionId: session.session_id,
+      outcome: leadOutcome,
+      verificationRunId: verificationRun.verification_run_id,
+      sliceMergeId: sliceMerge.slice_merge_id,
+      workspaceCommit: leadOutcome.commitSha,
+    };
+  }
 
   // Step 3 — Workspace prep
   const prep = await deps.workspace.prepareInnerWorkspace({

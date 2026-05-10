@@ -36,6 +36,13 @@ export interface PersistTurnInput {
    * Typically the same as workspaceCommit when present, otherwise unchanged.
    */
   newWorkspaceRevisionPin?: string | null;
+  /**
+   * Phase 1 (cli-spicy-anchor.md §5): additive pointers — when supplied the
+   * persisted SessionTurn records `output_receipt_ref` / `output_intent_ref`.
+   * Legacy callers omit both and the fields stay absent.
+   */
+  outputReceiptRef?: string;
+  outputIntentRef?: string;
 }
 
 export interface PersistTurnDeps {
@@ -74,6 +81,12 @@ export async function persistSessionTurn(
         caller_routing_decision: input.callerRoutingDecision,
         workspace_commit: input.workspaceCommit,
         verification_result_ref: input.verificationRunId,
+        ...(input.outputReceiptRef != null
+          ? { output_receipt_ref: input.outputReceiptRef }
+          : {}),
+        ...(input.outputIntentRef != null
+          ? { output_intent_ref: input.outputIntentRef }
+          : {}),
         recorded_at: deps.clock.isoNow(),
       });
       await deps.store.writeAtomic(turnPath, JSON.stringify(turn, null, 2));

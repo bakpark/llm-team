@@ -41,6 +41,17 @@ export interface FakeWorkspaceOptions {
    * working without explicit allowlisting.
    */
   knownRefs?: ReadonlySet<string>;
+  /**
+   * PR #119 review P0b (gpt5.5): how `push()` mutates the in-memory remote
+   * head registry. Default `"seed_remote_head"` mirrors a successful real
+   * push: after `push({ sliceId, remote, branch })` the entry at
+   * `<remote>/<branch>` becomes the current local head, so the lead-invoker
+   * `getRemoteHeadSha` probe matches without explicit `seedRemoteHead`.
+   * `"no_op"` keeps the legacy "no-network" behaviour — push is a no-op,
+   * `getRemoteHeadSha` still reflects whatever the test seeded — used by the
+   * crash-recovery test that needs the probe to mismatch.
+   */
+  pushBehavior?: "seed_remote_head" | "no_op";
 }
 
 const DEFAULT_FAKE_TRUNK_HEAD = "0".repeat(40);
@@ -50,6 +61,7 @@ export class FakeWorkspace implements WorkspacePort {
   private readonly rebaseConflictSlices: ReadonlySet<string>;
   private readonly trunkHead: string;
   private readonly knownRefs: Set<string>;
+  private readonly pushBehavior: "seed_remote_head" | "no_op";
 
   constructor(
     private readonly rootDir: string,
@@ -59,6 +71,7 @@ export class FakeWorkspace implements WorkspacePort {
     this.trunkHead = options.trunkHead ?? DEFAULT_FAKE_TRUNK_HEAD;
     this.knownRefs = new Set(options.knownRefs ?? []);
     this.knownRefs.add(this.trunkHead);
+    this.pushBehavior = options.pushBehavior ?? "seed_remote_head";
   }
 
   async prepareInnerWorkspace(input: {
@@ -190,6 +203,30 @@ export class FakeWorkspace implements WorkspacePort {
     branch: string;
   }): Promise<string | null> {
     return this.remoteHeads.get(`${input.remote}/${input.branch}`) ?? null;
+  }
+
+  /**
+   * PR #119 review P0b (gpt5.5): real-push surface. Default
+   * (`pushBehavior=seed_remote_head`) writes the current local head to the
+   * remote registry so `getRemoteHeadSha` matches without explicit
+   * `seedRemoteHead` calls in the test setup. `no_op` mode preserves the
+   * legacy fake behaviour for the crash-recovery test.
+   */
+  pushCount = 0;
+  async push(input: {
+    sliceId: string;
+    remote: string;
+    branch: string;
+  }): Promise<void> {
+    this.pushCount += 1;
+    if (this.pushBehavior === "no_op") return;
+    const cur = this.state.get(input.sliceId);
+    if (cur == null) {
+      throw new Error(
+        `push on un-prepared workspace for slice_id=${input.sliceId}`,
+      );
+    }
+    this.remoteHeads.set(`${input.remote}/${input.branch}`, cur.head);
   }
 
   async resetHard(input: { sliceId: string; sha: string }): Promise<void> {
