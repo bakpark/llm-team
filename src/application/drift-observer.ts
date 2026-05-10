@@ -34,6 +34,7 @@ import {
   type Milestone as MilestoneT,
 } from "../domain/schema/milestone.js";
 import type { ExternalRef } from "../domain/schema/external-ref.js";
+import { LedgerRow } from "../domain/schema/ledger.js";
 import { newMonotonicId } from "../domain/ids.js";
 import type { ClockPort } from "../ports/clock.js";
 import type { StorePort } from "../ports/store.js";
@@ -41,7 +42,10 @@ import type { GitHostPort } from "../ports/git-host.js";
 import type { IssueTrackerPort } from "../ports/issue-tracker.js";
 import { idempotencyKey } from "./idempotency.js";
 import type { LedgerAppender } from "./ledger.js";
-import { layout } from "./persistence-layout.js";
+import {
+  LEDGER_TRANSITIONS_PATH,
+  layout,
+} from "./persistence-layout.js";
 
 export interface DriftObserverDeps {
   store: StorePort;
@@ -485,4 +489,187 @@ async function flipSliceMergeRefToConflict(
     result_detail: `drift_${reason}`,
     timestamp: deps.clock.isoNow(),
   });
+}
+
+// --------------------------------------------------------------------------
+// Phase 3 — dropped review-signal triple dedup (cli-spicy-anchor.md §6).
+//
+// PR-watcher 5-gate (Phase 4 PR-6) calls into this helper when a native PR
+// review is observed but at least one gate (signature / round / round-current
+// / surface_ref / contribution) failed. Each (external_review_id, drop_reason,
+// review_surface_id) triple must produce exactly one `review_signal_dropped`
+// ledger row — repeated observations are absorbed via:
+//
+//   1) An in-memory `Set<string>` cache keyed by the triple hash. Bounded
+//      by process lifetime (Open Q15 — "1회전 unbounded"). On daemon restart
+//      the ledger scan re-establishes the cache.
+//   2) Ledger authority: `scanLedgerForDroppedSignal(triple)` reads
+//      `ledger/transitions.ndjson` for any prior
+//      `review_signal_dropped` row matching the same triple.
+//
+// Distinct triples (different `drop_reason` or different
+// `external_review_id`) produce distinct rows. The helper is exported so
+// Phase 4's pr-watcher can call into it directly.
+// --------------------------------------------------------------------------
+
+export interface DroppedReviewSignalInput {
+  /** Provider-local review id (immutable handle for the observed review). */
+  externalReviewId: string;
+  /**
+   * Free-form rejection reason — typically a 5-gate label (e.g.
+   * `signature_invalid`, `round_mismatch`, `surface_ref_mismatch`,
+   * `contribution_unknown`). Distinct reasons for the same review are
+   * recorded as separate rows.
+   */
+  dropReason: string;
+  /** ReviewSurface this drop applies to. */
+  reviewSurfaceId: string;
+}
+
+export interface DroppedReviewSignalDeps {
+  store: StorePort;
+  clock: ClockPort;
+  ledger: LedgerAppender;
+  callerId: string;
+  targetId: string;
+  /**
+   * Cache shared across helper invocations within the same process. The
+   * caller (pr-watcher) instantiates a single `DroppedReviewSignalCache`
+   * at startup and threads it through. Daemon restart re-establishes the
+   * cache via ledger scan.
+   */
+  cache: DroppedReviewSignalCache;
+}
+
+export class DroppedReviewSignalCache {
+  private readonly seen = new Set<string>();
+  has(triple: DroppedReviewSignalInput): boolean {
+    return this.seen.has(tripleKey(triple));
+  }
+  remember(triple: DroppedReviewSignalInput): void {
+    this.seen.add(tripleKey(triple));
+  }
+  /** Test introspection. */
+  size(): number {
+    return this.seen.size;
+  }
+}
+
+export type RecordDroppedReviewSignalResult =
+  | { result: "applied" }
+  | { result: "duplicate"; reason: "cache_hit" | "ledger_hit" };
+
+/**
+ * Append a `review_signal_dropped` ledger row for the given triple, once.
+ *
+ * Idempotency layers (cli-spicy-anchor.md §6):
+ *   - Layer 1: in-memory cache. Fast happy path for the hot loop.
+ *   - Layer 2: ledger scan. Survives daemon restart by re-establishing
+ *     authority from the persisted ledger.
+ *   - Layer 3: deterministic `idempotency_key` derived from the triple so
+ *     the ledger's append-time `applied_keys` cache catches any race.
+ */
+export async function recordDroppedReviewSignal(
+  input: DroppedReviewSignalInput,
+  deps: DroppedReviewSignalDeps,
+): Promise<RecordDroppedReviewSignalResult> {
+  if (deps.cache.has(input)) {
+    return { result: "duplicate", reason: "cache_hit" };
+  }
+  if (await scanLedgerForDroppedSignal(input, deps.store)) {
+    deps.cache.remember(input);
+    return { result: "duplicate", reason: "ledger_hit" };
+  }
+  const now = deps.clock.isoNow();
+  const key = idempotencyKey({
+    scope: "external_observation",
+    parts: {
+      kind: "review_signal_dropped",
+      external_review_id: input.externalReviewId,
+      drop_reason: input.dropReason,
+      review_surface_id: input.reviewSurfaceId,
+    },
+  });
+  await deps.ledger.appendTransition({
+    transition_id: newMonotonicId(deps.clock.now()),
+    target_id: deps.targetId,
+    object_id: input.reviewSurfaceId,
+    object_kind: "system",
+    from_state: null,
+    to_state: "review_signal_dropped",
+    loop_kind: null,
+    phase: null,
+    slice_id: null,
+    slice_kind: null,
+    dod_revision: null,
+    session_id: null,
+    turn_index: null,
+    slot_kind: null,
+    agent_profile_id: null,
+    contribution_kind: null,
+    action_kind: "review_signal_dropped",
+    final_verdict: null,
+    caller_id: deps.callerId,
+    manifest_id: null,
+    input_revision_pins: [],
+    output_hash: null,
+    verification_run_id: null,
+    metric_run_id: null,
+    idempotency_key: key,
+    lease_token: null,
+    lease_kind: null,
+    result: "noop",
+    result_detail: input.dropReason,
+    timestamp: now,
+    surface_ref: input.reviewSurfaceId,
+    external_review_id: input.externalReviewId,
+    drop_reason: input.dropReason,
+  });
+  deps.cache.remember(input);
+  return { result: "applied" };
+}
+
+/**
+ * Ledger authority — true when any prior `review_signal_dropped` row
+ * exists for the exact triple. The scan walks the ledger transitions
+ * file once; for production volumes the in-memory cache absorbs >99%
+ * of hits so the scan only runs on the first observation per process.
+ */
+async function scanLedgerForDroppedSignal(
+  triple: DroppedReviewSignalInput,
+  store: StorePort,
+): Promise<boolean> {
+  const body = await store.readText(LEDGER_TRANSITIONS_PATH);
+  if (body == null || body.length === 0) return false;
+  for (const line of body.split("\n")) {
+    if (line.length === 0) continue;
+    let row: unknown;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    let parsed: LedgerRow;
+    try {
+      parsed = LedgerRow.parse(row);
+    } catch {
+      continue;
+    }
+    if (parsed.action_kind !== "review_signal_dropped") continue;
+    if (parsed.external_review_id !== triple.externalReviewId) continue;
+    if (parsed.drop_reason !== triple.dropReason) continue;
+    if (parsed.surface_ref !== triple.reviewSurfaceId) continue;
+    return true;
+  }
+  return false;
+}
+
+function tripleKey(triple: DroppedReviewSignalInput): string {
+  // Use `\x1f` (unit separator) to avoid accidental collisions between
+  // adjacent fields that happen to contain the same delimiter.
+  return [
+    triple.externalReviewId,
+    triple.dropReason,
+    triple.reviewSurfaceId,
+  ].join("\x1f");
 }

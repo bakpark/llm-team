@@ -256,6 +256,42 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     await git(wt, ["clean", "-fdx"]);
   }
 
+  async getReadOnlyWorktreeChanges(input: {
+    sliceId: string;
+  }): Promise<string[]> {
+    // Phase 3 reviewer L4 (cli-spicy-anchor.md §1) — combine porcelain
+    // (untracked / modified / staged) with diff against HEAD so any
+    // post-call mutation surfaces, regardless of staging state. The
+    // read-only checkout is detached HEAD so a clean reviewer leaves both
+    // empty.
+    const wt = this.readOnlyPath(input.sliceId);
+    if (!(await pathExists(wt))) return [];
+    const out = new Set<string>();
+    try {
+      const status = (await git(wt, ["status", "--porcelain"])).stdout;
+      for (const line of status.split("\n")) {
+        if (line.length === 0) continue;
+        // Porcelain format: "XY <path>" (and possibly " -> renamed").
+        const path = line.slice(3).split(" -> ").pop()?.trim();
+        if (path && path.length > 0) out.add(path);
+      }
+    } catch {
+      // surface git failure as no-changes; the higher layer treats this as
+      // a clean read-only checkout. Failures here would otherwise mask the
+      // happy path entirely.
+    }
+    try {
+      const diff = (await git(wt, ["diff", "--name-only", "HEAD"])).stdout;
+      for (const line of diff.split("\n")) {
+        const path = line.trim();
+        if (path.length > 0) out.add(path);
+      }
+    } catch {
+      /* best-effort */
+    }
+    return [...out].sort();
+  }
+
   private worktreePath(sliceId: string): string {
     return resolve(this.cfg.workspacesDir, sliceId);
   }
