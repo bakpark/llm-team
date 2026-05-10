@@ -457,6 +457,247 @@ describe("Phase 3 middle review cycle", () => {
     expect(prompt).toContain("\"target_revision\"");
   });
 
+  // ------------------------------------------------------------------
+  // incident-12: dialogue coordinator must honor evaluateTermination
+  // TIMEOUT / ABANDONED reasons. Previously the coordinator silently
+  // dropped non-converged decisions (`return { dispatch: null }`),
+  // leaving the session SESSION_OPEN. The next pickup re-ran the same
+  // session and looped forever once max_turns was first crossed.
+  // ------------------------------------------------------------------
+  it("incident-12: timeout with prior request_changes → reset_slice_for_rebuild + session TIMEOUT", async () => {
+    const workdir = mkdtempSync(join(tmpdir(), "middle-timeout-rc-"));
+    const wsRoot = mkdtempSync(join(tmpdir(), "ws-"));
+    seedFixture(workdir);
+    const store = new FsStore({ workdir });
+    const clock = new SystemClock();
+    const logger = new NdjsonLogger({ store, clock, relPath: LOG_DAEMON_PATH });
+    const ledger = new FileLedger({ store, logger });
+    const workspace = new FakeWorkspace(wsRoot);
+
+    const adapter = new StampingFakeAdapter(envelopeFixture("request_changes"));
+    const llmRunner = new AdapterRunnerPort(adapter);
+
+    const out = await runOneMiddleReviewTurn({
+      store,
+      clock,
+      llmRunner,
+      workspace,
+      verification: new FakeVerification(clock, { test: { result: "pass" } }),
+      ledger,
+      callerId: "test-caller",
+      targetId: TARGET_ID,
+      environmentFingerprint: "vitest",
+      reverifyTestCommands: (cwd) => [{ argv: ["true"], cwd }],
+      // maxReviewTurns=1 so a single request_changes turn pushes the
+      // session over the cap (turnCount=1 >= max_turns=1) and
+      // evaluateTermination returns reason=timeout.
+      maxReviewTurns: 1,
+    });
+
+    expect(out.kind).toBe("turn_persisted");
+    if (out.kind !== "turn_persisted") return;
+    expect(out.decision.converged).toBe(false);
+    if (out.decision.converged) return;
+    expect(out.decision.reason).toBe("timeout");
+    expect(out.dispatch?.kind).toBe("applied");
+
+    // Session is TIMEOUT with the carried-over request_changes verdict.
+    const session = readJson(
+      workdir,
+      layout.sessionMetadata(out.sessionId),
+      (raw) => DialogueSession.parse(raw),
+    );
+    expect(session.state).toBe("TIMEOUT");
+    expect(session.final_verdict).toBe("request_changes");
+
+    // Slice routed back to SLICE_BUILDING (forge re-iteration), not BLOCKED.
+    const slice = readJson(workdir, layout.slice(SLICE_ID), (raw) =>
+      Slice.parse(raw),
+    );
+    expect(slice.state).toBe("SLICE_BUILDING");
+    expect(slice.current_session_id).toBeNull();
+
+    const sm = readJson(workdir, layout.sliceMerge(SLICE_MERGE_ID), (raw) =>
+      SliceMerge.parse(raw),
+    );
+    expect(sm.state).toBe("SM_CLOSED");
+
+    const rows = readLedgerRows(workdir);
+    expect(
+      rows.find(
+        (r) => r.object_kind === "dialogue_session" && r.to_state === "TIMEOUT",
+      ),
+    ).toBeDefined();
+    expect(
+      rows.find(
+        (r) => r.object_kind === "slice" && r.to_state === "SLICE_BUILDING",
+      ),
+    ).toBeDefined();
+    expect(
+      rows.find(
+        (r) => r.object_kind === "slice_merge" && r.to_state === "SM_CLOSED",
+      ),
+    ).toBeDefined();
+  });
+
+  it("incident-12: timeout with no prior request_changes → close_slice_merge_blocked + SLICE_BLOCKED", async () => {
+    // Sentinel emits an envelope with a non-RC verdict (`approve`-shaped but
+    // without the verification turning evidence_only true… actually the
+    // simplest way to exercise the no-RC path is to seed a session that
+    // hits max_turns=0). Instead we use a custom envelope whose verdict is
+    // not request_changes; the existing approve path would converge before
+    // hitting timeout because finalization_AND_evidence is satisfied.
+    // Here we feed an `approve` envelope but set verification.result=fail
+    // so the evidence half doesn't satisfy and the session continues —
+    // except evaluateTermination's max_turns hard cap fires first.
+    const workdir = mkdtempSync(join(tmpdir(), "middle-timeout-norc-"));
+    const wsRoot = mkdtempSync(join(tmpdir(), "ws-"));
+    seedFixture(workdir);
+    // Override the seeded VerificationRun result to "fail" so the
+    // verification_green evidence is unsatisfied; the lead's `approve`
+    // verdict alone can't converge under finalization_AND_evidence.
+    const vrPath = join(workdir, layout.verification(VERIFICATION_RUN_ID));
+    writeFileSync(
+      vrPath,
+      JSON.stringify({
+        verification_run_id: VERIFICATION_RUN_ID,
+        target_id: TARGET_ID,
+        target_revision: "inner-commit-1",
+        commands_or_checks: ["true"],
+        environment_fingerprint: "vitest",
+        started_at: ISO,
+        finished_at: ISO,
+        result: "fail",
+        failed_tests: [],
+        log_ref: null,
+      }),
+      "utf8",
+    );
+    const store = new FsStore({ workdir });
+    const clock = new SystemClock();
+    const logger = new NdjsonLogger({ store, clock, relPath: LOG_DAEMON_PATH });
+    const ledger = new FileLedger({ store, logger });
+    const workspace = new FakeWorkspace(wsRoot);
+
+    const adapter = new StampingFakeAdapter(envelopeFixture("approve"));
+    const llmRunner = new AdapterRunnerPort(adapter);
+
+    const out = await runOneMiddleReviewTurn({
+      store,
+      clock,
+      llmRunner,
+      workspace,
+      verification: new FakeVerification(clock, { test: { result: "pass" } }),
+      ledger,
+      callerId: "test-caller",
+      targetId: TARGET_ID,
+      environmentFingerprint: "vitest",
+      reverifyTestCommands: (cwd) => [{ argv: ["true"], cwd }],
+      maxReviewTurns: 1,
+    });
+
+    expect(out.kind).toBe("turn_persisted");
+    if (out.kind !== "turn_persisted") return;
+    expect(out.decision.converged).toBe(false);
+    if (out.decision.converged) return;
+    expect(out.decision.reason).toBe("timeout");
+
+    const session = readJson(
+      workdir,
+      layout.sessionMetadata(out.sessionId),
+      (raw) => DialogueSession.parse(raw),
+    );
+    expect(session.state).toBe("TIMEOUT");
+    // No prior RC → no carry-over verdict.
+    expect(session.final_verdict).toBeNull();
+
+    const slice = readJson(workdir, layout.slice(SLICE_ID), (raw) =>
+      Slice.parse(raw),
+    );
+    expect(slice.state).toBe("SLICE_BLOCKED");
+
+    const sm = readJson(workdir, layout.sliceMerge(SLICE_MERGE_ID), (raw) =>
+      SliceMerge.parse(raw),
+    );
+    expect(sm.state).toBe("SM_CLOSED");
+  });
+
+  it("incident-12 regression: within max_turns + reason=continue → dispatch null preserved", async () => {
+    // Pre-fix the coordinator returned `dispatch: null` for the
+    // continue branch; that behavior must remain unchanged so the next
+    // pickup can re-run the same SESSION_OPEN session.
+    const workdir = mkdtempSync(join(tmpdir(), "middle-continue-"));
+    const wsRoot = mkdtempSync(join(tmpdir(), "ws-"));
+    seedFixture(workdir);
+    // Same evidence-fail trick to keep the session non-converged on the
+    // first turn; with maxReviewTurns=5 and only 1 turn persisted, the
+    // evaluator returns `continue` (not timeout).
+    const vrPath = join(workdir, layout.verification(VERIFICATION_RUN_ID));
+    writeFileSync(
+      vrPath,
+      JSON.stringify({
+        verification_run_id: VERIFICATION_RUN_ID,
+        target_id: TARGET_ID,
+        target_revision: "inner-commit-1",
+        commands_or_checks: ["true"],
+        environment_fingerprint: "vitest",
+        started_at: ISO,
+        finished_at: ISO,
+        result: "fail",
+        failed_tests: [],
+        log_ref: null,
+      }),
+      "utf8",
+    );
+    const store = new FsStore({ workdir });
+    const clock = new SystemClock();
+    const logger = new NdjsonLogger({ store, clock, relPath: LOG_DAEMON_PATH });
+    const ledger = new FileLedger({ store, logger });
+    const workspace = new FakeWorkspace(wsRoot);
+
+    const adapter = new StampingFakeAdapter(envelopeFixture("approve"));
+    const llmRunner = new AdapterRunnerPort(adapter);
+
+    const out = await runOneMiddleReviewTurn({
+      store,
+      clock,
+      llmRunner,
+      workspace,
+      verification: new FakeVerification(clock, { test: { result: "pass" } }),
+      ledger,
+      callerId: "test-caller",
+      targetId: TARGET_ID,
+      environmentFingerprint: "vitest",
+      reverifyTestCommands: (cwd) => [{ argv: ["true"], cwd }],
+      maxReviewTurns: 5,
+    });
+
+    expect(out.kind).toBe("turn_persisted");
+    if (out.kind !== "turn_persisted") return;
+    expect(out.decision.converged).toBe(false);
+    if (out.decision.converged) return;
+    expect(out.decision.reason).toBe("continue");
+    // dispatch must remain null on continue (no terminal effect).
+    expect(out.dispatch).toBeNull();
+
+    const session = readJson(
+      workdir,
+      layout.sessionMetadata(out.sessionId),
+      (raw) => DialogueSession.parse(raw),
+    );
+    expect(session.state).toBe("SESSION_OPEN");
+
+    const slice = readJson(workdir, layout.slice(SLICE_ID), (raw) =>
+      Slice.parse(raw),
+    );
+    expect(slice.state).toBe("SLICE_REVIEWING");
+
+    const sm = readJson(workdir, layout.sliceMerge(SLICE_MERGE_ID), (raw) =>
+      SliceMerge.parse(raw),
+    );
+    expect(sm.state).toBe("SM_READY_FOR_REVIEW");
+  });
+
   it("returns noop when no SM_READY_FOR_REVIEW exists", async () => {
     const workdir = mkdtempSync(join(tmpdir(), "middle-noop-"));
     const wsRoot = mkdtempSync(join(tmpdir(), "ws-"));

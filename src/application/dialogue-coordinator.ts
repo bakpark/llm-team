@@ -463,6 +463,25 @@ async function runMiddleReviewTurnInner(
   });
 
   if (!decision.converged) {
+    // incident-12: previously this branch silently dropped TIMEOUT /
+    // ABANDONED decisions and returned `dispatch: null`, leaving the session
+    // SESSION_OPEN. The next pickup re-ran the same session, and once
+    // `evaluateTermination` started returning timeout (turnCount >=
+    // max_turns) every subsequent turn produced an identical sentinel
+    // request_changes envelope, looping indefinitely. Honor timeout /
+    // abandoned terminal reasons here and drive them through dispatch +
+    // session-finalize, mirroring the converged branch below.
+    if (decision.reason === "timeout" || decision.reason === "abandoned") {
+      return finalizeNonConvergedReview(
+        slice,
+        sliceMerge,
+        sessionAfterTurn,
+        decision,
+        allTurns,
+        turnIndex,
+        deps,
+      );
+    }
     return {
       kind: "turn_persisted",
       sessionId: sessionAfterTurn.session_id,
@@ -991,6 +1010,187 @@ async function resumeIntegration(
   return {
     kind: "turn_persisted",
     sessionId: session.session_id,
+    sliceId: slice.slice_id,
+    sliceMergeId: sliceMerge.slice_merge_id,
+    decision,
+    dispatch,
+  };
+}
+
+/**
+ * incident-12: middle review session terminated as TIMEOUT or ABANDONED.
+ *
+ * Mirrors the CONVERGED branch above (dispatch FIRST, persist terminal
+ * session state LAST) so a mid-dispatch crash leaves SM/Slice at the target
+ * state and the orphan SESSION_OPEN row is reaped by the phase-4 sweep.
+ *
+ * Final-verdict carry-over: when prior turns recorded a `request_changes`
+ * verdict the session was destined to converge as `request_changes` (per
+ * `any_request_changes_blocks`); honor that intent and dispatch
+ * `reset_slice_for_rebuild` so the forge gets another build budget. With no
+ * prior RC, dispatch the existing `close_slice_merge_blocked` path
+ * (SLICE_BLOCKED).
+ */
+async function finalizeNonConvergedReview(
+  slice: SliceT,
+  sliceMerge: SliceMergeT,
+  session: DialogueSessionT,
+  decision:
+    | { converged: false; reason: "timeout" }
+    | {
+        converged: false;
+        reason: "abandoned";
+        abandoned_reason: "no_progress" | "regression" | "scope_violation";
+      },
+  allTurns: readonly TurnSummary[],
+  turnIndex: number,
+  deps: CoordinatorDeps,
+): Promise<RunMiddleReviewOutcome> {
+  const sessionState = decision.reason === "timeout" ? "TIMEOUT" : "ABANDONED";
+  const anyRC = allTurns.some((t) => t.verdict?.result === "request_changes");
+  const finalVerdict = anyRC ? "request_changes" : null;
+
+  const dispatchDeps: DispatchDeps = {
+    store: deps.store,
+    clock: deps.clock,
+    ledger: deps.ledger,
+    workspace: deps.workspace,
+    verification: deps.verification,
+    callerId: deps.callerId,
+    targetId: deps.targetId,
+  };
+  const dispatch = await dispatchOutcome(
+    {
+      parent_loop: "middle",
+      phase_or_purpose: "review",
+      session_state: sessionState,
+      final_verdict: finalVerdict,
+      slice,
+      sliceMerge,
+      sessionId: session.session_id,
+      verificationRunId: sliceMerge.verification_run_id,
+      trunkRevision: slice.trunk_base_revision,
+      testCommandsForReverify: deps.reverifyTestCommands,
+      environmentFingerprint: deps.environmentFingerprint,
+    },
+    dispatchDeps,
+  );
+
+  if (dispatch.kind === "no_match") {
+    await deps.ledger.appendTransition({
+      transition_id: newMonotonicId(deps.clock.now()),
+      target_id: deps.targetId,
+      object_id: session.session_id,
+      object_kind: "dialogue_session",
+      from_state: "SESSION_OPEN",
+      to_state: "SESSION_OPEN",
+      loop_kind: "middle",
+      phase: null,
+      slice_id: slice.slice_id,
+      slice_kind: slice.slice_kind,
+      dod_revision: slice.dod_revision_pin,
+      session_id: session.session_id,
+      turn_index: turnIndex,
+      slot_kind: "delivery",
+      agent_profile_id: "sentinel",
+      contribution_kind: null,
+      action_kind: "session_finalize",
+      final_verdict: finalVerdict,
+      caller_id: deps.callerId,
+      manifest_id: null,
+      input_revision_pins: [],
+      output_hash: null,
+      verification_run_id: sliceMerge.verification_run_id,
+      metric_run_id: null,
+      idempotency_key: idempotencyKey({
+        scope: "external_observation",
+        parts: {
+          kind: "dispatch_no_match",
+          session_id: session.session_id,
+          session_state: sessionState,
+          final_verdict: finalVerdict,
+        },
+      }),
+      lease_token: null,
+      lease_kind: null,
+      result: "error",
+      result_detail: dispatch.detail.slice(0, 200),
+      timestamp: deps.clock.isoNow(),
+    });
+    return {
+      kind: "dispatch_no_match",
+      sessionId: session.session_id,
+      sliceId: slice.slice_id,
+      sliceMergeId: sliceMerge.slice_merge_id,
+      detail: dispatch.detail,
+    };
+  }
+
+  // Persist terminal session state LAST (atomicity — see CONVERGED comment).
+  // Idempotent: if the session was already persisted as TIMEOUT/ABANDONED on a
+  // prior crashed run, pickReadyMiddleReview won't return it (the SM is
+  // already SM_CLOSED), so this branch only fires the first time.
+  const finalizedSession = DialogueSession.parse({
+    ...session,
+    state: sessionState,
+    final_verdict: finalVerdict,
+    finalization_decision: null,
+    updated_at: deps.clock.isoNow(),
+  });
+  await deps.store.writeAtomic(
+    layout.sessionMetadata(finalizedSession.session_id),
+    JSON.stringify(finalizedSession, null, 2),
+  );
+  await deps.ledger.appendTransition({
+    transition_id: newMonotonicId(deps.clock.now()),
+    target_id: deps.targetId,
+    object_id: finalizedSession.session_id,
+    object_kind: "dialogue_session",
+    from_state: "SESSION_OPEN",
+    to_state: sessionState,
+    loop_kind: "middle",
+    phase: null,
+    slice_id: slice.slice_id,
+    slice_kind: slice.slice_kind,
+    dod_revision: slice.dod_revision_pin,
+    session_id: finalizedSession.session_id,
+    turn_index: turnIndex,
+    slot_kind: "delivery",
+    agent_profile_id: "sentinel",
+    contribution_kind: null,
+    action_kind: "session_finalize",
+    final_verdict: finalVerdict,
+    caller_id: deps.callerId,
+    manifest_id: null,
+    input_revision_pins: [],
+    output_hash: null,
+    verification_run_id: sliceMerge.verification_run_id,
+    metric_run_id: null,
+    idempotency_key: idempotencyKey({
+      scope: "per_session_outcome",
+      parts: {
+        session_id: finalizedSession.session_id,
+        // Carry the carry-over verdict (request_changes) when present;
+        // otherwise the terminal session state is the dispatch key.
+        final_verdict: finalVerdict ?? sessionState,
+        finalization_decision:
+          decision.reason === "abandoned"
+            ? `abandoned:${decision.abandoned_reason}`
+            : "timeout",
+        workspace_revision_pin_at_convergence:
+          sliceMerge.pre_merge_workspace_revision,
+      },
+    }),
+    lease_token: null,
+    lease_kind: null,
+    result: "applied",
+    result_detail: null,
+    timestamp: deps.clock.isoNow(),
+  });
+
+  return {
+    kind: "turn_persisted",
+    sessionId: finalizedSession.session_id,
     sliceId: slice.slice_id,
     sliceMergeId: sliceMerge.slice_merge_id,
     decision,

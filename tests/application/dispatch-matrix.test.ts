@@ -56,6 +56,34 @@ describe("DISPATCH_MATRIX", () => {
     }
   });
 
+  it("incident-12: middle review TIMEOUT/ABANDONED with prior request_changes → reset_slice_for_rebuild", () => {
+    for (const state of ["TIMEOUT", "ABANDONED"] as const) {
+      const entry = lookupDispatch({
+        parent_loop: "middle",
+        phase_or_purpose: "review",
+        session_state: state,
+        final_verdict: "request_changes",
+      });
+      expect(entry, state).not.toBeNull();
+      expect(entry?.effects.map((e) => e.kind)).toContain(
+        "reset_slice_for_rebuild",
+      );
+    }
+    // The verdict-null fallback (no prior RC) still routes to
+    // close_slice_merge_blocked → SLICE_BLOCKED.
+    for (const state of ["TIMEOUT", "ABANDONED"] as const) {
+      const entry = lookupDispatch({
+        parent_loop: "middle",
+        phase_or_purpose: "review",
+        session_state: state,
+        final_verdict: null,
+      });
+      expect(entry?.effects.map((e) => e.kind)).toContain(
+        "close_slice_merge_blocked",
+      );
+    }
+  });
+
   it("returns null for unknown tuples", () => {
     // inner tdd_build doesn't accept spec_accept verdict.
     expect(

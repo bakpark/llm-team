@@ -117,6 +117,27 @@ export const DISPATCH_MATRIX: readonly DispatchEntry[] = [
     final_verdict: null,
     effects: [{ kind: "close_slice_merge_blocked" }],
   },
+  // incident-12: middle review TIMEOUT / ABANDONED with prior request_changes
+  // verdicts → SM_CLOSED + SLICE_BUILDING (forge re-iteration). Without these
+  // rows, max_turns hits but the dispatch silently dropped the decision and
+  // the same review session was re-picked indefinitely (sentinel rationale
+  // unchanged each turn). The coordinator carries the accumulated
+  // request_changes verdict into the dispatch key when prior turns blocked
+  // the session via `any_request_changes_blocks`.
+  {
+    parent_loop: "middle",
+    phase_or_purpose: "review",
+    session_state: "TIMEOUT",
+    final_verdict: "request_changes",
+    effects: [{ kind: "reset_slice_for_rebuild" }],
+  },
+  {
+    parent_loop: "middle",
+    phase_or_purpose: "review",
+    session_state: "ABANDONED",
+    final_verdict: "request_changes",
+    effects: [{ kind: "reset_slice_for_rebuild" }],
+  },
   // ---- Phase 5b.1 outer-loop entries ----
   // Outer Discovery (purpose="design").
   {
