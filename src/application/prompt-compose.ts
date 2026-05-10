@@ -31,6 +31,25 @@ import { estimateTokensFromHeader } from "./manifest-builder.js";
  * phase 5 prompt builders will expand them with knowledge artefacts.
  */
 
+/**
+ * Forbidden top-level container keys at the AGC-OUTPUT envelope root. Shared
+ * between `renderOutputSchema` (prompt directive) and the regression test so
+ * both reference the same source of truth.
+ */
+export const OUTPUT_SCHEMA_FORBIDDEN_KEYS = [
+  "header",
+  "target",
+  "agc_output_version",
+  "next_action_hint",
+  "input_status",
+  "spec_proposal",
+  "task_plan",
+  "slice_decomposition",
+  "patch",
+  "milestone_package",
+  "proposal_artifact",
+] as const;
+
 export interface ComposePromptInput {
   agentProfileId: AgentProfileId;
   agentRoleInSession: AgentRoleInSession;
@@ -76,14 +95,239 @@ export function composePrompt(input: ComposePromptInput): string {
   ]
     .filter((s) => s.length > 0)
     .join("\n");
-  const outputSchema = [
+  const outputSchema = renderOutputSchema(input);
+  return [fm, "", context, "", instruction, "", outputSchema, ""].join("\n");
+}
+
+/**
+ * AGC-OUTPUT envelope is a FLAT, .strict() Zod object — see
+ * `src/domain/schema/envelope.ts` (`AgentAuthoredEnvelope`). The earlier prose
+ * version of this section ("Required header echo: …") was misread by LLMs as
+ * "wrap those keys in a `header` object", producing nested envelopes that
+ * failed schema_violation. This renderer enumerates every required top-level
+ * field by name, forbids common container keys, and ships a minimal valid
+ * example envelope tailored to the (parent_loop, phase, role) being prompted.
+ */
+function renderOutputSchema(input: ComposePromptInput): string {
+  const example = buildExampleEnvelope(input);
+  const exampleJson = JSON.stringify(example, null, 2);
+  return [
     "# Output Schema",
     "",
-    "Emit a single ```json fenced block with the AGC-OUTPUT envelope.",
-    "Required header echo: session_id, turn_index, parent_loop,",
-    "phase_or_purpose, agent_profile_id, agent_role_in_session, manifest_id.",
+    "Emit a single ```json fenced block whose root is the AGC-OUTPUT envelope.",
+    "The envelope is a FLAT object — every field below is a TOP-LEVEL key.",
+    "Do NOT wrap fields under a `header`, `target`, or any other container.",
+    "",
+    "Required top-level fields (always present):",
+    "- `session_id` (ULID)",
+    "- `turn_index` (integer ≥ 0)",
+    "- `parent_loop` (\"outer\" | \"middle\" | \"inner\")",
+    "- `phase_or_purpose` (string)",
+    "- `agent_profile_id` (\"atlas\" | \"forge\" | \"sentinel\" | \"scout\")",
+    "- `agent_role_in_session` (\"lead\" | \"reviewer\" | \"observer\")",
+    "- `contribution_kind` (\"lead_draft\" | \"review_verdict\" | \"human_approval\" | \"session_outcome\" | \"proposal\")",
+    "- `output_kind` (\"spec_proposal\" | \"task_plan\" | \"slice_decomposition\" | \"patch\" | \"verdict\" | \"milestone_package\" | \"proposal_artifact\" | \"failure\")",
+    "- `object_id` (ULID — primary target: slice / milestone / SliceMerge id)",
+    "- `manifest_id` (ULID — echo the manifest_id from the manifest above)",
+    "- `input_revision_pins` (array of strings — at minimum `[workspace_revision_pin]`)",
+    "- `summary` (non-empty string — human-readable narrative of what you produced)",
+    "",
+    "Conditionally required top-level fields — set to null only when the",
+    "loop/output_kind permits it (post-enrichment validator enforces these):",
+    "- `slice_id` (ULID): REQUIRED when `parent_loop` ∈ {middle, inner};",
+    "  may be null only for `parent_loop=outer`.",
+    "- `slice_kind` (\"feature\" | \"internal\"): REQUIRED when `parent_loop` ∈",
+    "  {middle, inner}; may be null only for `parent_loop=outer`.",
+    "- `tdd_phase` (\"red_green\" | \"refactor\"): REQUIRED when",
+    "  `parent_loop=inner`; null otherwise.",
+    "- `verdict` ({ result, rationale }): REQUIRED when `output_kind=verdict`",
+    "  or `output_kind=milestone_package`; null otherwise.",
+    "- `failure` ({ type, rationale }): REQUIRED when `output_kind=failure`;",
+    "  null otherwise. The loop-conditional fields above still apply.",
+    "",
+    "Optional top-level fields (use null when not applicable — never omit a key):",
+    "- `parent_review_verdict_id` (ULID | null)",
+    "- `artifacts` (record<string, unknown> | null — encode structured details such as",
+    "  problem framing, scenarios, scope_boundary, etc. INSIDE this bag, not at root)",
+    "- `next_action_request` ({ addressed_to, intent, evidence_request[], proposal_artifact_ref? } | null)",
+    "",
+    `Forbidden keys at the root: ${OUTPUT_SCHEMA_FORBIDDEN_KEYS.map((k) => "`" + k + "`").join(", ")}.`,
+    "Encode artifact details inside the `artifacts` record and the human",
+    "narrative inside `summary`.",
+    "",
+    "When you need a follow-up turn from another agent, populate",
+    "`next_action_request` as `{ addressed_to: <agent_profile_id|\"caller\">,",
+    "intent: <short string>, evidence_request: [{ kind, scope }, …],",
+    "proposal_artifact_ref: <string|null> }`. Otherwise set it to `null`.",
+    "",
+    "Minimal valid example for the current (parent_loop, phase, role) — copy",
+    "the SHAPE, not the values:",
+    "",
+    "```json",
+    exampleJson,
+    "```",
   ].join("\n");
-  return [fm, "", context, "", instruction, "", outputSchema, ""].join("\n");
+}
+
+/**
+ * Build a minimal envelope that satisfies `AgentAuthoredEnvelope.parse(...)`
+ * for the (parent_loop, phase_or_purpose, agent_role_in_session) being
+ * prompted. The example is meant for prompt-time guidance; values are
+ * placeholders and must not be copied verbatim by the LLM.
+ *
+ * The shape returned mirrors the real envelope exactly — no extra keys, no
+ * grouping. The accompanying regression test parses this through the Zod
+ * schema so future drift surfaces immediately.
+ */
+function buildExampleEnvelope(input: ComposePromptInput): Record<string, unknown> {
+  const PLACEHOLDER_OBJECT_ID = "01HZX0000000000000000000EX";
+  const PLACEHOLDER_SLICE_ID = "01HZS00000000000000000000A";
+  const role = input.agentRoleInSession;
+  const loop = input.parentLoop;
+  const phase = input.phaseOrPurpose;
+
+  // For middle/inner loops, slice_id + slice_kind are required by the
+  // post-enrichment validator. Pre-fill placeholders so the example shape
+  // survives `parseAgentAuthored -> enrichEnvelope -> validateEnvelope`.
+  const sliceConditional =
+    loop === "middle" || loop === "inner"
+      ? { slice_id: PLACEHOLDER_SLICE_ID, slice_kind: "internal" }
+      : { slice_id: null, slice_kind: null };
+
+  const base: Record<string, unknown> = {
+    session_id: input.sessionId,
+    turn_index: input.turnIndex,
+    parent_loop: loop,
+    phase_or_purpose: phase,
+    slice_id: sliceConditional.slice_id,
+    slice_kind: sliceConditional.slice_kind,
+    tdd_phase: null,
+    agent_profile_id: input.agentProfileId === "human" ? "atlas" : input.agentProfileId,
+    agent_role_in_session: role,
+    contribution_kind: "lead_draft",
+    parent_review_verdict_id: null,
+    output_kind: "spec_proposal",
+    object_id: PLACEHOLDER_OBJECT_ID,
+    manifest_id: input.manifest.manifest_id,
+    input_revision_pins: [input.workspaceRevisionPin],
+    summary: "<one-paragraph human-readable narrative of this turn's output>",
+    artifacts: null,
+    verdict: null,
+    next_action_request: null,
+    failure: null,
+  };
+
+  // outer reviewer verdicts (Discovery / Specification / Planning).
+  if (
+    loop === "outer" &&
+    role !== "lead" &&
+    role !== "observer" &&
+    (phase === "Discovery" || phase === "Specification" || phase === "Planning")
+  ) {
+    base.output_kind = "verdict";
+    base.contribution_kind = "review_verdict";
+    base.verdict = {
+      result: phase === "Planning" ? "request_changes" : "request_changes",
+      rationale: "<concrete reason — cite the spec section or AC-ID>",
+    };
+    base.summary =
+      "Reviewer verdict on the proposed Spec/Plan: request_changes / accept / reject.";
+    return base;
+  }
+
+  if (loop === "outer" && role === "lead") {
+    if (phase === "Discovery" || phase === "Specification") {
+      base.output_kind = "spec_proposal";
+      base.contribution_kind = "lead_draft";
+      base.artifacts = {
+        problem_framing: "<what user-facing problem this milestone solves>",
+        user_value: "<who benefits and how>",
+        scope_boundary: {
+          in_scope: ["<bullet>"],
+          out_of_scope: ["<bullet>"],
+        },
+      };
+      base.summary =
+        "Spec CP draft: <1–3 sentences summarising problem, user value, and scope>";
+      return base;
+    }
+    if (phase === "Planning") {
+      base.output_kind = "slice_decomposition";
+      base.contribution_kind = "lead_draft";
+      base.artifacts = {
+        slices: [
+          {
+            slice_id: PLACEHOLDER_SLICE_ID,
+            slice_kind: "internal",
+            value_statement: "<what user/internal value this slice delivers>",
+            ac_ids: ["<AC-ID>"],
+            acceptance_tests: [{ path: "<path>", name: "<name>" }],
+            declared_scope: ["<path>"],
+            dependencies: [],
+          },
+        ],
+      };
+      base.summary =
+        "Slice DAG: <count> slices decomposing the approved spec; acyclic.";
+      return base;
+    }
+    if (phase === "Validation") {
+      base.output_kind = "milestone_package";
+      base.contribution_kind = "lead_draft";
+      base.verdict = {
+        result: "PASS",
+        rationale: "<aggregate evidence summary across slices and AC-IDs>",
+      };
+      base.artifacts = {
+        per_slice_evidence: [
+          { slice_id: PLACEHOLDER_SLICE_ID, status: "<verification outcome>" },
+        ],
+      };
+      base.summary =
+        "Validation milestone_package: PASS / FAIL / STALE based on AC coverage.";
+      return base;
+    }
+  }
+
+  if (loop === "middle" && phase === "review") {
+    base.output_kind = "verdict";
+    base.contribution_kind = "review_verdict";
+    base.verdict = {
+      result: "approve",
+      rationale: "<concrete reason — cite the slice AC-ID or test outcome>",
+    };
+    base.summary =
+      "Middle review verdict: approve / request_changes for the slice patch.";
+    return base;
+  }
+
+  if (loop === "middle" && phase === "merge") {
+    // middle.merge has no AGC-CONTRIBUTION-OUTPUTS row for agents — observers
+    // only, and Caller-side merge envelopes go through `session_outcome`.
+    // Provide a generic lead_draft skeleton with placeholder slice fields so
+    // the example shape still parses.
+    base.output_kind = "spec_proposal";
+    base.contribution_kind = "lead_draft";
+    base.summary =
+      "Middle merge observer note: <what merge state was observed>";
+    return base;
+  }
+
+  if (loop === "inner" && phase === "tdd_build") {
+    base.output_kind = "patch";
+    base.contribution_kind = "lead_draft";
+    base.tdd_phase = "red_green";
+    base.artifacts = {
+      patch_description: "<what files changed and why>",
+      tests_added: ["<test name>"],
+    };
+    base.summary =
+      "Inner TDD step (red_green or refactor): <what was implemented or refactored>";
+    return base;
+  }
+
+  // Default fallback — generic lead_draft skeleton.
+  return base;
 }
 
 function instructionBody(input: ComposePromptInput): string {
@@ -221,11 +465,15 @@ const FETCH_SCOPE_DROP_PRIORITY: Record<FetchScope, number> = {
 const ENTRY_FRAMING_TOKENS = 8;
 
 /**
- * Fixed prompt scaffolding (frontmatter + section headers + output schema
- * boilerplate). Empirically the assembled body without entries hovers near
- * 240 chars → ~60 tokens; we round up generously.
+ * Fixed prompt scaffolding (frontmatter + section headers + role-specific
+ * instruction body + Output Schema directives + minimal-valid example
+ * envelope). After the AGC-OUTPUT envelope contract was inlined the
+ * empirical scaffold across all (parent_loop, phase_or_purpose, role)
+ * combinations measured 920–1150 tokens (chars/4) on an empty manifest;
+ * 1200 is the conservative round-up so `composePromptWithBudget` no longer
+ * undercounts and risks bypassing `token_hard_cap`.
  */
-const PROMPT_SCAFFOLD_TOKENS = 96;
+const PROMPT_SCAFFOLD_TOKENS = 1200;
 
 export interface ComposePromptWithBudgetInput extends ComposePromptInput {
   /** Operator override map — when omitted the architecture default applies. */
