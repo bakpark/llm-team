@@ -199,6 +199,24 @@ export async function runOneOuterTurn(
     // placeholder string "outer-trunk-base". The placeholder leaked through
     // session.workspace_revision_pin → atlas envelopes → slice DAG and
     // crashed turn-worker on `git worktree add ... outer-trunk-base`.
+    //
+    // PR #106 review (P1, consensus): if the caller does not supply a
+    // WorkspacePort and the milestone has not yet pinned a spec revision,
+    // return a structured noop outcome instead of throwing. Throwing here
+    // bypasses RunOneOuterTurnOutcome / ledger entirely and aborts the
+    // caller, regressing existing harnesses that omit `workspace` for
+    // milestones whose spec_revision_pin is null.
+    if (
+      (milestone.spec_revision_pin == null ||
+        milestone.spec_revision_pin.length === 0) &&
+      deps.workspace == null
+    ) {
+      return {
+        kind: "noop",
+        detail:
+          "outer-turn: cannot open session — milestone.spec_revision_pin is null and no WorkspacePort was supplied (incident-8)",
+      };
+    }
     const workspaceRevisionPin = await resolveOuterWorkspaceRevisionPin(
       milestone.spec_revision_pin,
       deps.workspace,

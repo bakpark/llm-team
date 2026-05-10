@@ -143,11 +143,31 @@ export class GitWorktreeWorkspace implements WorkspacePort {
     // <ref> resolves to a real commit object. Any non-zero exit (including
     // the "fatal: invalid reference" case that crashed turn-worker) is
     // surfaced as `false` so the caller can refuse to persist the slice.
+    //
+    // PR #106 review (P1): split invalid-ref (expected, silent false) from
+    // fatal failures (git binary missing / permission / disk). Fatal cases
+    // still return false so the caller can refuse to persist, but emit a
+    // console.warn so the silent failure doesn't mask infra problems in
+    // production. Do not throw — caller (caller-dispatch-outer
+    // persist_slice_dag_and_promote) treats false as
+    // noop_planning_request_changes which is the correct recovery path.
     if (typeof ref !== "string" || ref.length === 0) return false;
     try {
       await git(this.cfg.repoRoot, ["rev-parse", "--verify", `${ref}^{commit}`]);
       return true;
-    } catch {
+    } catch (err) {
+      const msg = (err as Error).message ?? "";
+      const looksInvalidRef =
+        msg.includes("Needed a single revision") ||
+        msg.includes("unknown revision") ||
+        msg.includes("ambiguous argument") ||
+        msg.includes("bad revision") ||
+        msg.includes("fatal: Not a valid object name");
+      if (!looksInvalidRef) {
+        console.warn(
+          `git-worktree.verifyRef: non-invalid-ref failure for ref=${ref}: ${msg.split("\n")[0] ?? msg}`,
+        );
+      }
       return false;
     }
   }
