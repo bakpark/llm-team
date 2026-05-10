@@ -531,7 +531,9 @@ describe("callAgent — manifest body inline (incident-1b Bug B)", () => {
     };
     const turnRaw = JSON.stringify(priorTurn);
     await store.writeAtomic(layout.sessionTurn(SESSION_ID, 1), turnRaw);
-    const turnPin = `len=${turnRaw.length}:${turnRaw.slice(0, 32).replace(/\s+/g, "")}`;
+    // PR #96 P0-1: full-body sha256 hex (replaces previous `len=N:<first 32>` form).
+    const { createHash } = await import("node:crypto");
+    const turnPin = createHash("sha256").update(turnRaw).digest("hex");
 
     const manifest = ContextManifest.parse({
       manifest_id: MANIFEST_ID,

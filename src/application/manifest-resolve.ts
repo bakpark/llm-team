@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ContextManifest, ManifestEntry } from "../domain/schema/manifest.js";
 import type { StorePort } from "../ports/store.js";
 import { Milestone } from "../domain/schema/milestone.js";
@@ -17,16 +18,28 @@ import { layout } from "./persistence-layout.js";
  * list of `ResolvedEntry` records that the prompt composer renders verbatim
  * under a new `# Inputs` section.
  *
- * Scope (incident-1b minimal):
+ * Scope (incident-1b minimum + incident-5):
  *   - `milestone` + `body` — load `milestones/<id>.json`, render title + intake
  *     source body (when the intake source is a `feature_request` we fetch the
  *     `feature_requests/<id>.json` body). Optionally append `milestones/<id>/spec.md`
  *     when present.
+ *   - `session_turn` + `body` — incident-5: load
+ *     `sessions/<session_id>/turns/<turn_index>.json` and project the
+ *     agent-relevant subset under `# Inputs` so prior reviewer rationales
+ *     reach the next lead/reviewer (breaks the
+ *     `request_changes ↔ need_context` Discovery loop).
  *   - Other (object_kind, fetch_scope) combinations throw an explicit
  *     "unsupported" error. The caller decides:
  *       - `required=true` → surface the error (caller turns into AGC-INVALID),
  *       - `required=false` → skip silently (entry omitted from `# Inputs`,
  *         prompt still renders so the agent can decide).
+ *
+ * TODO(incident-6+): slice / slice_merge / dialogue_session / verification_run
+ * resolvers — separate cycle. turn-worker (inner loop) and
+ * dialogue-coordinator (middle loop) currently DO NOT wire `StorePort` into
+ * `resolveManifestEntries`; only outer-turn does. Inner/middle loops still
+ * inline their own (slice, body) reads via composePrompt's legacy path until
+ * those resolvers exist here.
  *
  * Caller is `agent-io.callAgent` via the new optional `store` dep.
  */
@@ -180,8 +193,11 @@ async function resolveMilestoneBody(
  * resolves).
  *
  * Revision pin matches OuterPinResolver's session_turn fingerprint:
- * `len=<bodyLength>:<first 32 non-whitespace chars>`. Mismatches surface
- * StaleManifestEntryError for required entries (mirrors milestone body).
+ * full-body `sha256(raw)` hex (PR #96 P0-1 — replaces the original
+ * `len=<n>:<first 32 chars>` form, which silently passed when post-prefix
+ * fields like summary/verdict.rationale/failure/next_action_request changed
+ * without altering body length). Mismatches surface StaleManifestEntryError
+ * for required entries (mirrors milestone body).
  */
 async function resolveSessionTurnBody(
   store: StorePort,
@@ -214,7 +230,11 @@ async function resolveSessionTurnBody(
   }
   // Revision-pin check — must agree with OuterPinResolver.session_turn
   // fingerprint format. Stale ⇒ throw for required, skip for non-required.
-  const expectedPin = `len=${raw.length}:${raw.slice(0, 32).replace(/\s+/g, "")}`;
+  // PR #96 P0-1: full-body sha256 hex. The previous `len=N:<first 32 chars>`
+  // form missed mutations in summary / verdict.rationale / failure /
+  // next_action_request when the new body happened to be the same length,
+  // letting a stale-context turn pass the gate.
+  const expectedPin = createHash("sha256").update(raw).digest("hex");
   if (expectedPin !== entry.revision_pin) {
     if (entry.required) {
       throw new StaleManifestEntryError(entry, expectedPin);

@@ -4,6 +4,7 @@
  * section. This test fixes the supported (object_kind, fetch_scope) surface
  * to (`milestone`, `body`) and locks the failure modes for unsupported entries.
  */
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { MemoryStore } from "../../src/adapters/store/memory.js";
 import { resolveManifestEntries } from "../../src/application/manifest-resolve.js";
@@ -240,7 +241,9 @@ describe("resolveManifestEntries — session_turn body (incident-5)", () => {
   }
 
   function pinFor(raw: string): string {
-    return `len=${raw.length}:${raw.slice(0, 32).replace(/\s+/g, "")}`;
+    // PR #96 P0-1: full-body sha256 hex (replaces the previous
+    // `len=N:<first 32 chars>` fingerprint).
+    return createHash("sha256").update(raw).digest("hex");
   }
 
   async function seedPrimaryMilestone(store: MemoryStore) {
@@ -375,6 +378,93 @@ describe("resolveManifestEntries — session_turn body (incident-5)", () => {
       revision_pin: "len=999:bogus",
       required: true,
       purpose: "stale prior turn",
+    });
+    await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
+      /revision_pin mismatch/,
+    );
+  });
+
+  it("PR #96 P1-A: projects only the agent-relevant subset (no input_manifest_id / runtime_metadata / idempotency_key leak)", async () => {
+    const store = new MemoryStore();
+    await seedPrimaryMilestone(store);
+    const turnRaw = seedTurn(1, "reviewer rationale text");
+    await store.writeAtomic(layout.sessionTurn(TURN_SESSION_ID, 1), turnRaw);
+    const manifest = manifestWithSessionTurn({
+      object_kind: "session_turn",
+      object_id: TURN_SESSION_ID,
+      turn_index: 1,
+      fetch_scope: "body",
+      revision_pin: pinFor(turnRaw),
+      required: true,
+      purpose: "prior turn 1 (reviewer)",
+    });
+    const resolved = await resolveManifestEntries(store, manifest);
+    const turnEntry = resolved.find((r) => r.manifest_entry_index === 1)!;
+    const body = turnEntry.body;
+    // Selected (must be present).
+    for (const key of [
+      "session_id",
+      "turn_index",
+      "agent_profile_id",
+      "agent_role_in_session",
+      "output_kind",
+      "contribution_kind",
+      "summary",
+      "verdict",
+      "failure",
+      "next_action_request",
+    ]) {
+      expect(body, `selected field ${key} missing`).toContain(`"${key}"`);
+    }
+    // Excluded (must NOT be present — the resolver projects an
+    // agent-relevant subset, not the verbatim envelope/turn record).
+    for (const key of [
+      "input_manifest_id",
+      "input_turn_log_snapshot_ref",
+      "runtime_metadata",
+      "idempotency_key",
+      "input_revision_pins",
+      "caller_routing_decision",
+      "workspace_commit",
+      "verification_result_ref",
+      "recorded_at",
+      "output_envelope",
+      "parent_loop",
+      "phase_or_purpose",
+      "object_id",
+      "manifest_id",
+      "artifacts",
+      "parent_review_verdict_id",
+      "tdd_phase",
+    ]) {
+      expect(body, `excluded field ${key} leaked`).not.toContain(`"${key}"`);
+    }
+  });
+
+  it("PR #96 P0-1 regression: equal-length post-prefix mutation (verdict.rationale) trips StaleManifestEntryError", async () => {
+    // Build two raws with identical length but a single-char difference deep
+    // in the body (verdict.rationale). The previous `len=N:<first 32 chars>`
+    // pin format would not distinguish them when the prefix is unchanged.
+    const store = new MemoryStore();
+    await seedPrimaryMilestone(store);
+    const baseRaw = seedTurn(1, "reviewer flagged scope drift");
+    // Replace one character in `rationale` (preserves length).
+    const mutatedRaw = baseRaw.replace(
+      "needs scope sharpening",
+      "needs scope sharpeninG",
+    );
+    expect(mutatedRaw.length).toBe(baseRaw.length);
+    expect(mutatedRaw).not.toBe(baseRaw);
+    // Pin computed from baseRaw, but stored body is mutatedRaw.
+    await store.writeAtomic(layout.sessionTurn(TURN_SESSION_ID, 1), mutatedRaw);
+    const manifest = manifestWithSessionTurn({
+      object_kind: "session_turn",
+      object_id: TURN_SESSION_ID,
+      turn_index: 1,
+      fetch_scope: "body",
+      revision_pin: pinFor(baseRaw),
+      required: true,
+      purpose: "prior turn 1 (reviewer) (request_changes)",
     });
     await expect(resolveManifestEntries(store, manifest)).rejects.toThrow(
       /revision_pin mismatch/,
