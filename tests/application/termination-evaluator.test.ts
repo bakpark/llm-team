@@ -196,11 +196,49 @@ describe("evaluateTermination", () => {
 
 describe("evaluateTermination · Phase 4 pr_reviews union", () => {
   it("PR-first request_changes followed by approve in the next round → converges on approve (same-PR continuation)", () => {
-    // Lead committed in round 0 (passed verification); reviewer requested
-    // changes via PR review (round 0); lead committed again in round 1;
-    // reviewer approved via PR review (round 1). The same-PR continuation
-    // appends the round-1 approve after the round-0 request_changes so
-    // `lastBy(reviewer)` returns approve.
+    // PR #123 P1-1 fix: prior-round PR reviews must NOT keep
+    // `any_request_changes_blocks` stuck after a follow-up commit + approve
+    // on the same surface. With `current_review_round=1` the evaluator
+    // considers only the round-1 approve; the round-0 RC remains in the
+    // persisted history but does not contribute to the decision.
+    const turns: TurnSummary[] = [
+      {
+        agent_role_in_session: "lead",
+        verdict: { result: "tests_green", rationale: null },
+        verification: passVerification(),
+      },
+    ];
+    const out = evaluateTermination({
+      termination: middleTermination,
+      turns,
+      max_turns: 10,
+      current_review_round: 1,
+      pr_reviews: [
+        {
+          agent_role_in_session: "reviewer",
+          verdict: { result: "request_changes", rationale: null },
+          agent_profile_id: "sentinel",
+          review_round: 0,
+        },
+        {
+          agent_role_in_session: "reviewer",
+          verdict: { result: "approve", rationale: null },
+          agent_profile_id: "sentinel",
+          review_round: 1,
+        },
+      ],
+    });
+    expect(out).toEqual({
+      converged: true,
+      final_verdict: "approve",
+      finalization_decision: "composite",
+    });
+  });
+
+  it("PR-first round-N PR reviews are kept; prior-round reviews dropped from evaluator input (default = max round)", () => {
+    // No `current_review_round` supplied → evaluator picks the highest
+    // round present in pr_reviews. Round-0 request_changes must NOT block
+    // when round-1 approve exists.
     const turns: TurnSummary[] = [
       {
         agent_role_in_session: "lead",
@@ -227,11 +265,43 @@ describe("evaluateTermination · Phase 4 pr_reviews union", () => {
         },
       ],
     });
-    // any_request_changes_blocks: any prior request_changes blocks the
-    // outcome with `request_changes`. Phase 4 same-PR continuation: PR
-    // reviews from a prior round survive in the turn pool. The expected
-    // behaviour is consistent with the legacy any_request_changes_blocks
-    // semantic (any RC blocks → final = request_changes).
+    expect(out).toEqual({
+      converged: true,
+      final_verdict: "approve",
+      finalization_decision: "composite",
+    });
+  });
+
+  it("PR-first current_review_round explicitly pinned to round 0 → round-0 request_changes blocks even when round-1 approve is also present", () => {
+    // Symmetry check for P1-1: when the caller pins to an earlier round,
+    // the evaluator must honour it and ignore later-round signals.
+    const turns: TurnSummary[] = [
+      {
+        agent_role_in_session: "lead",
+        verdict: { result: "tests_green", rationale: null },
+        verification: passVerification(),
+      },
+    ];
+    const out = evaluateTermination({
+      termination: middleTermination,
+      turns,
+      max_turns: 10,
+      current_review_round: 0,
+      pr_reviews: [
+        {
+          agent_role_in_session: "reviewer",
+          verdict: { result: "request_changes", rationale: null },
+          agent_profile_id: "sentinel",
+          review_round: 0,
+        },
+        {
+          agent_role_in_session: "reviewer",
+          verdict: { result: "approve", rationale: null },
+          agent_profile_id: "sentinel",
+          review_round: 1,
+        },
+      ],
+    });
     expect(out).toEqual({
       converged: true,
       final_verdict: "request_changes",

@@ -85,9 +85,28 @@ export interface PrFirstDispatchMilestoneInput {
   parentPhase: ReviewSurfaceParentPhase;
 }
 
+/**
+ * Phase 4 (PR #123 P1-2) — spec_doc parent_kind entry point.
+ *
+ * `cli-spicy-anchor.md` §10 currently absorbs spec_doc into the milestone
+ * matrix ("1차는 milestone 흡수, spec_doc 별 객체 미사용 — Open Q #8").
+ * Until that decision is reversed, dispatching a spec_doc surface is an
+ * **unsupported** terminal that must not silently drop. The dispatcher
+ * appends a fail-loud `review_signal_dropped` ledger row with
+ * `drop_reason="spec_doc_not_yet_supported"` and returns an explicit
+ * `spec_doc_unsupported` result so the caller can surface the gap.
+ */
+export interface PrFirstDispatchSpecDocInput {
+  parent_kind: "spec_doc";
+  reviewSurface: ReviewSurfaceT;
+  sessionId: string;
+  verdict: PrFirstVerdict;
+}
+
 export type PrFirstDispatchInput =
   | PrFirstDispatchSliceInput
-  | PrFirstDispatchMilestoneInput;
+  | PrFirstDispatchMilestoneInput
+  | PrFirstDispatchSpecDocInput;
 
 export interface PrFirstDispatchCfg {
   callerId: string;
@@ -126,6 +145,11 @@ export type PrFirstDispatchResult =
       kind: "milestone_request_changes";
       reviewSurface: ReviewSurfaceT;
       milestone: MilestoneT;
+    }
+  | {
+      kind: "spec_doc_unsupported";
+      reviewSurface: ReviewSurfaceT;
+      drop_reason: "spec_doc_not_yet_supported";
     };
 
 // --------------------------------------------------------------------------
@@ -142,7 +166,10 @@ export class PrFirstDispatcher {
     if (input.parent_kind === "slice") {
       return await this.dispatchSlice(input);
     }
-    return await this.dispatchMilestone(input);
+    if (input.parent_kind === "milestone") {
+      return await this.dispatchMilestone(input);
+    }
+    return await this.dispatchSpecDoc(input);
   }
 
   // ----------------------------------------------------------------
@@ -235,6 +262,73 @@ export class PrFirstDispatcher {
       case "Validation":
         return await this.handleValidationApprove(input);
     }
+  }
+
+  // ----------------------------------------------------------------
+  // spec_doc — explicit fail-loud no-op (Phase 4 P1-2)
+  // ----------------------------------------------------------------
+
+  /**
+   * spec_doc dispatch is intentionally not yet wired (`cli-spicy-anchor.md`
+   * §10 absorbs spec_doc into the milestone matrix). Instead of silently
+   * swallowing a review that survived the 5-gate on a spec_doc surface,
+   * we append a `review_signal_dropped` ledger row and return an explicit
+   * `spec_doc_unsupported` result. This preserves the audit trail and
+   * makes the gap visible to upstream phases (Phase 5 PR-first activation
+   * will either wire a real handler or treat the dropped row as an
+   * actionable alert).
+   */
+  private async dispatchSpecDoc(
+    input: PrFirstDispatchSpecDocInput,
+  ): Promise<PrFirstDispatchResult> {
+    const drop_reason = "spec_doc_not_yet_supported" as const;
+    await this.deps.ledger.appendTransition({
+      transition_id: newMonotonicId(this.deps.clock.now()),
+      target_id: this.cfg.targetId,
+      object_id: input.reviewSurface.review_surface_id,
+      object_kind: "system",
+      from_state: null,
+      to_state: "dropped",
+      loop_kind: null,
+      phase: null,
+      slice_id: null,
+      slice_kind: null,
+      dod_revision: null,
+      session_id: input.sessionId,
+      turn_index: null,
+      slot_kind: null,
+      agent_profile_id: null,
+      contribution_kind: null,
+      action_kind: "review_signal_dropped",
+      final_verdict: input.verdict,
+      caller_id: this.cfg.callerId,
+      manifest_id: null,
+      input_revision_pins: [],
+      output_hash: null,
+      verification_run_id: null,
+      metric_run_id: null,
+      idempotency_key: idempotencyKey({
+        scope: "external_observation",
+        parts: {
+          kind: "prfirst_spec_doc_unsupported",
+          review_surface_id: input.reviewSurface.review_surface_id,
+          review_round: input.reviewSurface.review_round,
+          verdict: input.verdict,
+        },
+      }),
+      lease_token: null,
+      lease_kind: null,
+      result: "noop",
+      result_detail: `drop_reason=${drop_reason}`,
+      surface_ref: input.reviewSurface.review_surface_id,
+      drop_reason,
+      timestamp: this.deps.clock.isoNow(),
+    });
+    return {
+      kind: "spec_doc_unsupported",
+      reviewSurface: input.reviewSurface,
+      drop_reason,
+    };
   }
 
   private async handleDiscoveryApprove(

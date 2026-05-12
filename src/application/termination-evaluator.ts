@@ -84,6 +84,17 @@ export interface TerminationInputs {
    * review when both sources are present.
    */
   pr_reviews?: readonly PrReviewSummary[];
+  /**
+   * Phase 4 (PR #123 P1-1): the ReviewSurface.review_round to evaluate.
+   * When supplied, only `pr_reviews` whose `review_round` matches are fed
+   * into the finalization rule — prior rounds remain in the persisted
+   * record as history but cannot block convergence on the current round.
+   *
+   * When omitted, the evaluator filters to the highest `review_round`
+   * present in `pr_reviews` (latest-round semantics). Empty / absent
+   * `pr_reviews` leave the legacy turn-only path unchanged.
+   */
+  current_review_round?: number;
   /** Hard cap: SOC-SESSION-LIFECYCLE TIMEOUT trigger. */
   max_turns: number;
   /**
@@ -136,7 +147,15 @@ export function evaluateTermination(
   // reviews append AFTER legacy turns so `lastBy(reviewer)` prefers the
   // freshest signal (same-PR continuation: round1 request_changes followed
   // by round2 approve → convergence on approve).
-  const turns = mergeTurnsAndPrReviews(input.turns, input.pr_reviews);
+  //
+  // PR #123 P1-1 fix: filter PR reviews by review_round before merging so
+  // a prior round's request_changes cannot permanently block a follow-up
+  // approve on the same surface. See `mergeTurnsAndPrReviews` for details.
+  const turns = mergeTurnsAndPrReviews(
+    input.turns,
+    input.pr_reviews,
+    input.current_review_round,
+  );
   const turnCount = turns.length;
 
   // Hard caps before convergence rules so a stuck session always exits.
@@ -426,13 +445,30 @@ function lastBy<T>(
  * carries the latest verification reference). The synthetic entries are
  * appended *after* the persisted turns so `lastBy(reviewer)` prefers the
  * most recent PR review on the same surface (same-PR continuation).
+ *
+ * PR #123 P1-1 fix: PR reviews are filtered by `review_round` before
+ * materialisation. When `currentReviewRound` is provided, only reviews
+ * for that exact round contribute to the finalization decision. When
+ * absent, the highest round present in `reviews` wins (latest-round
+ * semantics). Prior-round reviews are intentionally dropped from the
+ * evaluator's input so an old `request_changes` cannot keep
+ * `any_request_changes_blocks` stuck after a follow-up commit + approve.
+ * History is still preserved by the persisted PR review records — the
+ * evaluator is pure and consumes only the current round's signal.
  */
 function mergeTurnsAndPrReviews(
   turns: readonly TurnSummary[],
   reviews: readonly PrReviewSummary[] | undefined,
+  currentReviewRound: number | undefined,
 ): readonly TurnSummary[] {
   if (reviews == null || reviews.length === 0) return turns;
-  const synthetic: TurnSummary[] = reviews.map((r) => ({
+  const targetRound =
+    currentReviewRound != null
+      ? currentReviewRound
+      : reviews.reduce((max, r) => (r.review_round > max ? r.review_round : max), reviews[0]!.review_round);
+  const filtered = reviews.filter((r) => r.review_round === targetRound);
+  if (filtered.length === 0) return turns;
+  const synthetic: TurnSummary[] = filtered.map((r) => ({
     agent_role_in_session: r.agent_role_in_session,
     verdict: r.verdict,
     verification: null,

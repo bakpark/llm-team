@@ -295,6 +295,95 @@ describe("caller-dispatch-prfirst · milestone phases", () => {
     expect(sf.lifecycle_state).toBe("open");
   });
 
+  it("spec_doc parent_kind → explicit spec_doc_unsupported result + review_signal_dropped ledger row (PR #123 P1-2)", async () => {
+    // Phase 4 P1-2 fix: a spec_doc surface that survives the 5-gate must
+    // produce an explicit no-op + audit row, never silently swallow.
+    // `cli-spicy-anchor.md` §10 currently absorbs spec_doc into milestone,
+    // so the dispatcher emits `review_signal_dropped` with
+    // drop_reason=spec_doc_not_yet_supported.
+    const store = new MemoryStore();
+    const clock = new FixedClock(FIXED_MS);
+    const ledger = new FileLedger({ store });
+    const gitHost = new FsMirrorGitHost(store);
+    const outbox = new Outbox({ store, ledger });
+    const wsRoot = mkdtempSync(join(tmpdir(), "pf-spec-"));
+    const workspace = new FakeWorkspace(wsRoot);
+
+    const prRef = await gitHost.openPullRequest({
+      title: "spec doc pr",
+      body: "stub",
+      headBranch: "spec/SD-1",
+      baseBranch: "main",
+      draft: false,
+      labels: [],
+    });
+    const surface = ReviewSurface.parse({
+      review_surface_id: "01HZSR0000000000000000000B",
+      parent_kind: "spec_doc",
+      parent_id: "01HZSD0000000000000000000A",
+      parent_phase: null,
+      pr_ref: {
+        provider: "fs_mirror",
+        id: prRef.id,
+        node_id: null,
+        url: `fs-mirror://${prRef.id}`,
+      },
+      branch: "spec/SD-1",
+      base_ref: "main",
+      head_sha: "sd-head",
+      review_round: 0,
+      lifecycle_state: "open",
+      review_state: "pending_review",
+      build_state: "not_applicable",
+      latest_verification_run_id: null,
+      last_synced_external_revision: null,
+      created_at: ISO,
+      updated_at: ISO,
+    });
+
+    const dispatcher = new PrFirstDispatcher(
+      { callerId: CALLER, targetId: TARGET },
+      {
+        store,
+        clock,
+        gitHost,
+        ledger,
+        outbox,
+        workspace,
+        verification: { run: async () => { throw new Error("unused"); } } as never,
+      },
+    );
+
+    const result = await dispatcher.dispatch({
+      parent_kind: "spec_doc",
+      reviewSurface: surface,
+      sessionId: "01HZSE0000000000000000000A",
+      verdict: "approve",
+    });
+    expect(result.kind).toBe("spec_doc_unsupported");
+    if (result.kind === "spec_doc_unsupported") {
+      expect(result.drop_reason).toBe("spec_doc_not_yet_supported");
+      // PR is NOT merged and surface is NOT mutated.
+      const fetched = await gitHost.fetchPullRequest({
+        provider: "fs_mirror",
+        id: prRef.id,
+      });
+      expect(fetched?.state).toBe("open");
+    }
+    // Ledger row for the dropped signal is present.
+    const rows = ((await store.readText(LEDGER_TRANSITIONS_PATH)) ?? "")
+      .split("\n")
+      .filter((s) => s.length > 0)
+      .map((s) => LedgerRow.parse(JSON.parse(s)));
+    const dropped = rows.find(
+      (r) => r.action_kind === "review_signal_dropped",
+    );
+    expect(dropped).toBeDefined();
+    expect(dropped?.drop_reason).toBe("spec_doc_not_yet_supported");
+    expect(dropped?.surface_ref).toBe(surface.review_surface_id);
+    expect(dropped?.result).toBe("noop");
+  });
+
   it("merge_op crash recovery — re-dispatch after partial completion is idempotent (PR stays merged)", async () => {
     const env = await buildMilestoneEnv({
       parentPhase: "Specification",
