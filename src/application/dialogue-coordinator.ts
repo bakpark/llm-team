@@ -758,15 +758,27 @@ async function runPrFirstMiddleReview(
     { store: deps.store },
   );
   if (reviewSurface == null) {
+    // PR #121 review P1-A (gpt5.5): finalize the session before returning so
+    // `pickReadyMiddleReview` does not re-select this SESSION_OPEN session
+    // every daemon iteration once `SliceMerge.review_session_id` is bound.
+    const detail =
+      "PR-first reviewer path requires an existing ReviewSurface " +
+      `but slice.review_surface_id is missing (slice_id=${slice.slice_id})`;
+    await abandonMiddleSessionForReviewerOutcome(
+      slice,
+      session,
+      turnIndex,
+      "missing_review_surface",
+      detail,
+      deps,
+    );
     return {
       kind: "invalid_envelope",
       sessionId: session.session_id,
       sliceId: slice.slice_id,
       stage: "prompt_compose",
       reason: "prompt_layout_violation",
-      detail:
-        "PR-first reviewer path requires an existing ReviewSurface " +
-        `but slice.review_surface_id is missing (slice_id=${slice.slice_id})`,
+      detail,
     };
   }
 
@@ -886,6 +898,21 @@ async function runPrFirstMiddleReview(
       timestamp: deps.clock.isoNow(),
       surface_ref: reviewSurface.review_surface_id,
     });
+    // PR #121 review P1-A (gpt5.5): without transitioning the DialogueSession
+    // to ABANDONED, `pickReadyMiddleReview` re-selects the same SESSION_OPEN
+    // session on the next daemon iteration and re-invokes the reviewer —
+    // potentially posting duplicate reviews on the same PR. Mirror
+    // `abandonMiddleSessionForPromptCompose` so parse retry-cap, L4 violation,
+    // outbox_failed, agent_call_failed, and reviewer_intent_invalid all
+    // converge on a terminal session state with a `session_finalize` ledger row.
+    await abandonMiddleSessionForReviewerOutcome(
+      slice,
+      session,
+      turnIndex,
+      reviewerOutcome.reason,
+      `${reviewerOutcome.reason}: ${reviewerOutcome.detail.slice(0, 200)}`,
+      deps,
+    );
     return {
       kind: "reviewer_path_pr_first",
       sessionId: session.session_id,
@@ -2024,6 +2051,76 @@ async function abandonMiddleSessionForPromptCompose(
     lease_kind: null,
     result: "applied",
     result_detail: reason,
+    timestamp: deps.clock.isoNow(),
+  });
+}
+
+/**
+ * PR #121 review P1-A (gpt5.5): mirror of `abandonMiddleSessionForPromptCompose`
+ * for PR-first reviewer abandons (parse retry-cap reached, L4 capability
+ * violation, outbox_failed, agent_call_failed, reviewer_intent_invalid,
+ * missing ReviewSurface). Without this transition, `pickReadyMiddleReview`
+ * keeps re-selecting the SESSION_OPEN session on each daemon iteration and
+ * the reviewer is re-invoked, potentially posting duplicate reviews.
+ */
+async function abandonMiddleSessionForReviewerOutcome(
+  slice: SliceT,
+  session: DialogueSessionT,
+  turnIndex: number,
+  reasonTag: string,
+  detail: string,
+  deps: CoordinatorDeps,
+): Promise<void> {
+  const finalized = DialogueSession.parse({
+    ...session,
+    state: "ABANDONED",
+    final_verdict: null,
+    abandoned_reason: "no_progress",
+    finalization_decision: null,
+    updated_at: deps.clock.isoNow(),
+  });
+  await deps.store.writeAtomic(
+    layout.sessionMetadata(finalized.session_id),
+    JSON.stringify(finalized, null, 2),
+  );
+  await deps.ledger.appendTransition({
+    transition_id: newMonotonicId(deps.clock.now()),
+    target_id: deps.targetId,
+    object_id: finalized.session_id,
+    object_kind: "dialogue_session",
+    from_state: "SESSION_OPEN",
+    to_state: "ABANDONED",
+    loop_kind: "middle",
+    phase: null,
+    slice_id: slice.slice_id,
+    slice_kind: slice.slice_kind,
+    dod_revision: slice.dod_revision_pin,
+    session_id: finalized.session_id,
+    turn_index: turnIndex,
+    slot_kind: "delivery",
+    agent_profile_id: "sentinel",
+    contribution_kind: null,
+    action_kind: "session_finalize",
+    final_verdict: null,
+    caller_id: deps.callerId,
+    manifest_id: null,
+    input_revision_pins: [],
+    output_hash: null,
+    verification_run_id: null,
+    metric_run_id: null,
+    idempotency_key: idempotencyKey({
+      scope: "per_session_outcome",
+      parts: {
+        session_id: finalized.session_id,
+        final_verdict: "ABANDONED",
+        finalization_decision: `abandoned:pr_first_reviewer:${reasonTag}`,
+        workspace_revision_pin_at_convergence: finalized.workspace_revision_pin,
+      },
+    }),
+    lease_token: null,
+    lease_kind: null,
+    result: "applied",
+    result_detail: detail,
     timestamp: deps.clock.isoNow(),
   });
 }

@@ -499,5 +499,26 @@ describe("dialogue-coordinator · reviewer_path=pr_first (Phase 3)", () => {
     expect(out.kind).toBe("invalid_envelope");
     if (out.kind !== "invalid_envelope") return;
     expect(out.detail).toContain("review_surface_id");
+
+    // PR #121 review P1-A regression guard: the missing-surface guard must
+    // finalize the DialogueSession to ABANDONED + emit a session_finalize
+    // ledger row so `pickReadyMiddleReview` does not re-select this
+    // SESSION_OPEN session on the next daemon iteration.
+    const sessionPath = layout.sessionMetadata(out.sessionId);
+    const sessionAfter = JSON.parse(
+      readFileSync(join(workdir, sessionPath), "utf8"),
+    ) as { state: string; abandoned_reason: string | null };
+    expect(sessionAfter.state).toBe("ABANDONED");
+    expect(sessionAfter.abandoned_reason).toBe("no_progress");
+    const rows = readLedgerRows(workdir);
+    expect(
+      rows.find(
+        (r) =>
+          r.object_kind === "dialogue_session" &&
+          r.action_kind === "session_finalize" &&
+          r.to_state === "ABANDONED" &&
+          r.session_id === out.sessionId,
+      ),
+    ).toBeDefined();
   });
 });
