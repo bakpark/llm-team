@@ -224,7 +224,15 @@ export class PrWatcher {
     }
 
     // Gate ② — full-tuple correlation with AgentRunReceipt + outbox row.
-    const correlation = await this.correlateTuple(surface, parsed.fields);
+    // PR-123 P0-2 (gpt5.5): bind the live `review.externalReviewId` so the
+    // canonical id participates in the 10-field tuple. Without this, the
+    // gate cannot detect a posted row whose `external_review_id` belongs to
+    // a different review than the one currently being classified.
+    const correlation = await this.correlateTuple(
+      surface,
+      parsed.fields,
+      review.externalReviewId,
+    );
     if (correlation == null) {
       await this.drop(surface, review, "tuple_mismatch");
       return {
@@ -312,6 +320,7 @@ export class PrWatcher {
   private async correlateTuple(
     surface: ReviewSurfaceT,
     fields: ReviewCanonicalFields,
+    reviewExternalId: string,
   ): Promise<{ receipt: AgentRunReceiptT } | null> {
     // ReviewSurface bind: parent_kind / parent_id / parent_phase must all match.
     if (
@@ -337,11 +346,22 @@ export class PrWatcher {
     if (receipt.agent_profile_id !== fields.agent_profile_id) return null;
     if (receipt.session_id !== fields.session_id) return null;
     if (receipt.turn_index !== turnIndex) return null;
+    // PR-123 P0-2: when the receipt records `external_review_id`, it MUST
+    // match the live review's id. (Receipt may be null when the host write
+    // raced ahead of receipt persist — the recovery-coordinator backfill
+    // path writes the id; a real reviewer-invoker pass always sets it.)
+    if (
+      receipt.external_review_id != null &&
+      receipt.external_review_id !== reviewExternalId
+    ) {
+      return null;
+    }
 
     // outbox submit_review_op posted row authority.
     const outboxOk = await this.scanOutboxPosted(
       fields.idempotency_key,
       surface.review_surface_id,
+      reviewExternalId,
     );
     if (!outboxOk) return null;
 
@@ -351,6 +371,7 @@ export class PrWatcher {
   private async scanOutboxPosted(
     idempotencyKey: string,
     surfaceRef: string,
+    reviewExternalId: string,
   ): Promise<boolean> {
     const body = await this.deps.store.readText(LEDGER_TRANSITIONS_PATH);
     if (body == null || body.length === 0) return false;
@@ -366,8 +387,15 @@ export class PrWatcher {
       if (parsed.action_kind !== "outbox_posted") continue;
       if (parsed.op_kind !== "submit_review_op") continue;
       if (parsed.idempotency_key !== target) continue;
-      if (parsed.surface_ref != null && parsed.surface_ref !== surfaceRef)
-        continue;
+      // PR-123 P0-2: gate ② now requires `surface_ref` to be present on the
+      // posted row (no silent fall-through for legacy rows that omit it) and
+      // to equal the active surface. Posted row's `external_review_id` must
+      // equal the live review id — this is the field whose absence let
+      // forged or stale machine blocks slip through.
+      if (parsed.surface_ref == null) continue;
+      if (parsed.surface_ref !== surfaceRef) continue;
+      if (parsed.external_review_id == null) continue;
+      if (parsed.external_review_id !== reviewExternalId) continue;
       return true;
     }
     return false;

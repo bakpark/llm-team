@@ -406,4 +406,88 @@ describe("recovery-coordinator · scan + backfill", () => {
     }
     void gitHost;
   });
+
+  // ----------------------------------------------------------------------
+  // PR-123 review P0-1 regression — gpt5.5 noted that real invoker outbox
+  // rows previously left receipt-tuple fields null, so the coordinator
+  // bailed with `no_receipt_slot`. Earlier tests above side-loaded a hand-
+  // built `outbox_pending` row to bypass that gap. This regression goes
+  // through the real `Outbox.begin` API (now extended with the receipt
+  // tuple) and asserts the coordinator can backfill from that row alone.
+  // ----------------------------------------------------------------------
+  it(
+    "PR-123 P0-1 regression: real Outbox.begin row carries receipt tuple → coordinator backfills without side-loaded ledger row",
+    async () => {
+      const { store, clock, ledger, gitHost, outbox } = makeBase();
+      const idemKey = "K-REAL-OUTBOX";
+      const prRef = await gitHost.openPullRequest({
+        title: "t",
+        body: "x",
+        headBranch: `slice/${SLICE_ID}`,
+        baseBranch: "main",
+        draft: false,
+        labels: [],
+      });
+      // Real Outbox.begin — receipt tuple flows through into the pending
+      // ledger row. No direct `ledger.appendTransition` for this case.
+      await outbox.begin({
+        opKind: "submit_review_op",
+        idempotencyKey: idemKey,
+        callerId: CALLER,
+        targetId: TARGET,
+        objectId: SURFACE_ID,
+        manifestId: null,
+        surfaceRef: SURFACE_ID,
+        sessionId: SESSION_ID,
+        turnIndex: TURN_INDEX,
+        agentProfileId: AGENT_PROFILE,
+        loopKind: "middle",
+      });
+      // Provider write (the host call that completed before the crash).
+      await gitHost.submitPullRequestReview({
+        prRef,
+        intent: "approve",
+        body: `ok\n<!-- llm-team:review-machine\nidempotency_key: ${idemKey}\n-->`,
+        idempotencyKey: idemKey,
+      });
+      // Crash here — no outbox.complete, no receipt blob.
+
+      // Confirm the pending row really carries the tuple via the ledger.
+      const ledgerBody =
+        (await store.readText(LEDGER_TRANSITIONS_PATH)) ?? "";
+      const pendingRow = ledgerBody
+        .split("\n")
+        .filter((s) => s.length > 0)
+        .map((s) => LedgerRow.parse(JSON.parse(s)))
+        .find((r) => r.action_kind === "outbox_pending");
+      expect(pendingRow?.session_id).toBe(SESSION_ID);
+      expect(pendingRow?.turn_index).toBe(TURN_INDEX);
+      expect(pendingRow?.agent_profile_id).toBe(AGENT_PROFILE);
+      expect(pendingRow?.loop_kind).toBe("middle");
+
+      const buildProbe: ProbeBuilder = async (candidate) => {
+        if (candidate.opKind !== "submit_review_op") return null;
+        return { opKind: "submit_review_op", gitHost, prRef };
+      };
+      const coordinator = new RecoveryCoordinator(
+        { callerId: CALLER, targetId: TARGET },
+        { store, clock, ledger, outbox, buildProbe },
+      );
+      const sweep = await coordinator.runOnce();
+      const recovered = sweep.items.find(
+        (i) => i.kind === "recovered_backfilled",
+      );
+      expect(recovered).toBeDefined();
+      // Receipt blob written by backfill — 5-gate ② full-tuple ready.
+      const body =
+        (await store.readText(
+          layout.agentRunReceipt(SESSION_ID, TURN_INDEX),
+        )) ?? "";
+      expect(body.length).toBeGreaterThan(0);
+      const receipt = AgentRunReceipt.parse(JSON.parse(body));
+      expect(receipt.idempotency_key).toBe(idemKey);
+      expect(receipt.agent_role_in_session).toBe("reviewer");
+      expect(receipt.external_review_id).not.toBeNull();
+    },
+  );
 });

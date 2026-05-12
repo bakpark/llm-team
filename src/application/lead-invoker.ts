@@ -336,6 +336,11 @@ export class LeadInvoker {
       targetId: this.cfg.targetId,
       objectId,
       manifestId: input.manifest.manifest_id,
+      // PR-123 P0-1: receipt tuple → outbox_pending row → recovery backfill.
+      sessionId: input.sessionId,
+      turnIndex: input.turnIndex,
+      agentProfileId: input.agentProfileId,
+      loopKind: input.parentLoop,
     });
     let commitSha: string;
     try {
@@ -387,6 +392,10 @@ export class LeadInvoker {
       targetId: this.cfg.targetId,
       objectId,
       manifestId: input.manifest.manifest_id,
+      sessionId: input.sessionId,
+      turnIndex: input.turnIndex,
+      agentProfileId: input.agentProfileId,
+      loopKind: input.parentLoop,
     });
     try {
       await this.deps.workspace.push({
@@ -472,6 +481,10 @@ export class LeadInvoker {
       targetId: this.cfg.targetId,
       objectId,
       manifestId: input.manifest.manifest_id,
+      sessionId: input.sessionId,
+      turnIndex: input.turnIndex,
+      agentProfileId: input.agentProfileId,
+      loopKind: input.parentLoop,
     });
     let prRef: ExternalRefHandle;
     try {

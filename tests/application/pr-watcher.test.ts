@@ -420,6 +420,52 @@ describe("pr-watcher · 5-gate filter", () => {
     }
   });
 
+  // --------------------------------------------------------------------
+  // PR-123 review P0-2 regression — gpt5.5 noted that `classify()` did not
+  // pass `review.externalReviewId` into `correlateTuple()`, so a posted
+  // ledger row whose `external_review_id` belonged to a *different* review
+  // could still satisfy gate ②. The fix: the live review's
+  // externalReviewId must equal both the receipt's recorded id (when
+  // present) and the outbox `submit_review_op` posted row's id, and the
+  // posted row's `surface_ref` must be non-null and equal the surface.
+  // --------------------------------------------------------------------
+  it(
+    "PR-123 P0-2 regression: posted ledger row's external_review_id mismatches live review → tuple_mismatch",
+    async () => {
+      const env = await buildEnv();
+      const idemKey = "K-EID-MISMATCH";
+      const fields: ReviewCanonicalFields = {
+        review_surface_id: SURFACE_ID,
+        parent_kind: "slice",
+        parent_id: SLICE_ID,
+        parent_phase: "n/a",
+        review_round: "0",
+        session_id: SESSION_ID,
+        turn_index: String(TURN_INDEX),
+        agent_profile_id: AGENT_PROFILE,
+        idempotency_key: idemKey,
+      };
+      const body = buildCanonicalReviewBody(fields);
+      const submitted = await env.gitHost.submitPullRequestReview({
+        prRef: env.prRef,
+        intent: "approve",
+        body,
+        idempotencyKey: idemKey,
+      });
+      // Seed receipt + outbox posted row, but the posted row's
+      // `external_review_id` records a stale/forged value — NOT the live
+      // review id. Before P0-2 this passed gate ② silently.
+      await seedReceiptAndOutbox(env, idemKey, "STALE-OR-FORGED-REVIEW-ID");
+      const r = await env.watcher.pollReviewSurface(env.surface);
+      expect(r.reviews[0]?.kind).toBe("dropped");
+      if (r.reviews[0]?.kind === "dropped") {
+        expect(r.reviews[0].dropReason).toBe("tuple_mismatch");
+      }
+      // Live review id still unequal to seeded id — gate ② must reject.
+      expect(submitted.externalReviewId).not.toBe("STALE-OR-FORGED-REVIEW-ID");
+    },
+  );
+
   it("request_changes verdict surfaces through `applied.verdict`", async () => {
     const env = await buildEnv();
     const idemKey = "K-RC";

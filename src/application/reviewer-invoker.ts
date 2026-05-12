@@ -301,6 +301,11 @@ export class ReviewerInvoker {
       objectId: surfaceId,
       manifestId: input.manifest.manifest_id,
       surfaceRef: surfaceId,
+      // PR-123 P0-1: receipt tuple → outbox_pending → recovery backfill.
+      sessionId: input.sessionId,
+      turnIndex: input.turnIndex,
+      agentProfileId: input.agentProfileId,
+      loopKind: input.parentLoop,
     });
     let externalReviewId: string;
     try {
