@@ -243,6 +243,22 @@ export class FakeWorkspace implements WorkspacePort {
     this.cleanForceCount += 1;
   }
 
+  /**
+   * Phase 3 reviewer L4 probe (cli-spicy-anchor.md §1). Tests configure the
+   * synthetic "changes" the read-only checkout would surface via
+   * `seedReadOnlyWorktreeChanges`. Default is empty — read-only is the
+   * happy path.
+   */
+  private readonly readOnlyChanges = new Map<string, string[]>();
+  seedReadOnlyWorktreeChanges(sliceId: string, paths: readonly string[]): void {
+    this.readOnlyChanges.set(sliceId, [...paths]);
+  }
+  async getReadOnlyWorktreeChanges(input: {
+    sliceId: string;
+  }): Promise<string[]> {
+    return [...(this.readOnlyChanges.get(input.sliceId) ?? [])];
+  }
+
   async rebaseOntoTrunk(input: {
     sliceId: string;
     trunkRevision: string;

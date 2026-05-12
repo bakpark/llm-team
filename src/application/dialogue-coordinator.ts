@@ -66,6 +66,11 @@ import {
   type TerminationDecision,
   type TurnSummary,
 } from "./termination-evaluator.js";
+import {
+  loadReviewSurfaceForReviewer,
+  type ReviewerInvoker,
+  type ReviewerInvokerOutcome,
+} from "./reviewer-invoker.js";
 
 export interface MiddleReviewPickup {
   slice: SliceT;
@@ -112,6 +117,18 @@ export interface CoordinatorDeps {
    * Optional for backward compatibility with existing tests.
    */
   workdirRoot?: string;
+  /**
+   * Phase 3 (cli-spicy-anchor.md §1, §8): when set to `"pr_first"` AND
+   * `reviewerInvoker` is provided, the coordinator delegates the reviewer
+   * invocation to the PR-first orchestrator. Default `"envelope"` keeps the
+   * legacy `callAgent` path (zero regression — PR sequence table PR-5).
+   */
+  reviewerPath?: "envelope" | "pr_first";
+  /**
+   * Phase 3 PR-first reviewer orchestrator. Wired only when `reviewerPath
+   * === "pr_first"`. When unset, the legacy envelope path runs unchanged.
+   */
+  reviewerInvoker?: ReviewerInvoker;
 }
 
 export type RunMiddleReviewOutcome =
@@ -157,6 +174,30 @@ export type RunMiddleReviewOutcome =
       sessionId: string;
       sliceId: string;
       detail: string;
+    }
+  | {
+      /**
+       * Phase 3 PR-first reviewer path (cli-spicy-anchor.md §1, §8): the
+       * coordinator delegated the reviewer invocation to `ReviewerInvoker`
+       * (Phase 2 lead-path PR-119 parallel). The embedded outcome carries
+       * the PR-first succeeded / abandoned result.
+       *
+       * On `succeeded`, the coordinator already mirrors the legacy path:
+       *   - SessionTurn persisted (output_receipt_ref / output_intent_ref
+       *     additive)
+       *   - `current_turn_index` advanced
+       *   - termination evaluated + caller-dispatch fired + session
+       *     CONVERGED / TIMEOUT / ABANDONED finalized as appropriate.
+       * These `decision` / `dispatch` fields mirror the legacy
+       * `turn_persisted` shape so callers can treat the outcomes uniformly.
+       */
+      kind: "reviewer_path_pr_first";
+      sessionId: string;
+      sliceId: string;
+      sliceMergeId: string;
+      outcome: ReviewerInvokerOutcome;
+      decision: TerminationDecision | null;
+      dispatch: DispatchResult | null;
     };
 
 /**
@@ -255,6 +296,19 @@ async function runMiddleReviewTurnInner(
   // per_merge ledger key) and skip a redundant sentinel turn.
   if (sliceMerge.state === "SM_APPROVED" && slice.state === "SLICE_INTEGRATING") {
     return await resumeIntegration(slice, sliceMerge, session, deps);
+  }
+
+  // Phase 3 PR-first reviewer branch (cli-spicy-anchor.md §1, §8). Activates
+  // only when both `deps.reviewerPath === "pr_first"` and `deps.reviewerInvoker`
+  // are supplied — default keeps the legacy envelope path (zero regression).
+  if (deps.reviewerPath === "pr_first" && deps.reviewerInvoker != null) {
+    return await runPrFirstMiddleReview(
+      slice,
+      sliceMerge,
+      session,
+      turnIndex,
+      deps,
+    );
   }
 
   // Read-only checkout (worktree-pr-lifecycle.md §3) — reviewer never writes.
@@ -659,6 +713,480 @@ async function runMiddleReviewTurnInner(
     decision,
     dispatch,
   };
+}
+
+/**
+ * Phase 3 PR-first middle review (cli-spicy-anchor.md §1, §8 — PR sequence
+ * PR-5). Delegates the reviewer invocation to `ReviewerInvoker`, then
+ * mirrors the legacy path's SessionTurn persistence + termination
+ * evaluation + caller-dispatch + session finalization. The lessons from
+ * PR-119 are encoded here:
+ *
+ *   - P0a (qwen+gpt5.5): SessionTurn IS persisted in the PR-first path too,
+ *     `current_turn_index` IS advanced, and a CONVERGED / TIMEOUT /
+ *     ABANDONED finalization is fired through `dispatchOutcome` so the
+ *     daemon doesn't re-pick the same session.
+ *   - P1a (gpt5.5): `existingSurface` is loaded via the
+ *     `SliceMerge.review_session_id`-adjacent path (slice's
+ *     `review_surface_id`), never `null`.
+ *   - P0b (gpt5.5): WorkspacePort.push is NOT called here — reviewer is
+ *     read-only — but the outbox `submit_review_op` step IS routed through
+ *     the same outbox 2-phase as the lead path so crash recovery uses
+ *     `findReviewByMachineKey`.
+ *
+ * Abandoned outcomes from `ReviewerInvoker.invoke` (parse cap reached, L4
+ * violation, outbox failure) emit a session_progress `invalid` ledger row
+ * and return without advancing the session — the daemon's recovery sweep
+ * or operator decides next, mirroring the legacy `invalid_envelope` path.
+ */
+async function runPrFirstMiddleReview(
+  slice: SliceT,
+  sliceMerge: SliceMergeT,
+  session: DialogueSessionT,
+  turnIndex: number,
+  deps: CoordinatorDeps,
+): Promise<RunMiddleReviewOutcome> {
+  const reviewerInvoker = deps.reviewerInvoker;
+  if (reviewerInvoker == null) {
+    throw new Error("runPrFirstMiddleReview invoked without reviewerInvoker");
+  }
+  // PR #119 review P1a (gpt5.5): load the active ReviewSurface so the
+  // reviewer engages the same PR the lead opened. Without this, the
+  // reviewer would have no PR handle and abandon on every middle review.
+  const reviewSurface = await loadReviewSurfaceForReviewer(
+    slice.review_surface_id,
+    { store: deps.store },
+  );
+  if (reviewSurface == null) {
+    // PR #121 review P1-A (gpt5.5): finalize the session before returning so
+    // `pickReadyMiddleReview` does not re-select this SESSION_OPEN session
+    // every daemon iteration once `SliceMerge.review_session_id` is bound.
+    const detail =
+      "PR-first reviewer path requires an existing ReviewSurface " +
+      `but slice.review_surface_id is missing (slice_id=${slice.slice_id})`;
+    await abandonMiddleSessionForReviewerOutcome(
+      slice,
+      session,
+      turnIndex,
+      "missing_review_surface",
+      detail,
+      deps,
+    );
+    return {
+      kind: "invalid_envelope",
+      sessionId: session.session_id,
+      sliceId: slice.slice_id,
+      stage: "prompt_compose",
+      reason: "prompt_layout_violation",
+      detail,
+    };
+  }
+
+  // Manifest mirrors the legacy review manifest: slice body + slice_merge +
+  // verification (read inputs).
+  const drafts: ManifestEntryDraft[] = [
+    {
+      object_kind: "slice",
+      object_id: slice.slice_id,
+      fetch_scope: "body",
+      required: true,
+      purpose: "primary input",
+    },
+    {
+      object_kind: "slice_merge",
+      object_id: sliceMerge.slice_merge_id,
+      fetch_scope: "body",
+      required: true,
+      purpose: "review subject",
+    },
+  ];
+  if (sliceMerge.verification_run_id) {
+    drafts.push({
+      object_kind: "verification_run",
+      object_id: sliceMerge.verification_run_id,
+      fetch_scope: "body",
+      required: true,
+      purpose: "evidence",
+    });
+  }
+  const pinResolver = new MiddleReviewPinResolver(slice, sliceMerge);
+  const manifestBuilder = new ManifestBuilder(pinResolver, deps.clock);
+  const manifest = await manifestBuilder.build({
+    session_id: session.session_id,
+    turn_index: turnIndex,
+    purpose: "review",
+    target: { object_kind: "slice_merge", object_id: sliceMerge.slice_merge_id },
+    drafts,
+  });
+  await deps.store.writeAtomic(
+    layout.manifest(manifest.manifest_id),
+    JSON.stringify(manifest, null, 2),
+  );
+
+  const reviewerOutcome = await reviewerInvoker.invoke({
+    agentProfileId: "sentinel",
+    agentRoleInSession: "lead",
+    parentLoop: "middle",
+    phaseOrPurpose: "review",
+    sessionId: session.session_id,
+    turnIndex,
+    sliceId: slice.slice_id,
+    workspaceRevision:
+      sliceMerge.pre_merge_workspace_revision ?? slice.trunk_base_revision,
+    reviewSurface,
+    manifest,
+    manifestBuilder,
+    envelopeIdempotency: {
+      scope: "per_turn",
+      parts: {
+        session_id: session.session_id,
+        turn_index: turnIndex,
+        agent_profile_id: "sentinel",
+        manifest_id: manifest.manifest_id,
+        input_revision_pins: manifest.entries.map((e) => e.revision_pin),
+      },
+    },
+    runtimeMetadata: {
+      slice_merge_id: sliceMerge.slice_merge_id,
+      pre_merge_workspace_revision:
+        sliceMerge.pre_merge_workspace_revision ?? "",
+    },
+  });
+
+  if (reviewerOutcome.kind !== "succeeded") {
+    // Record an `invalid` session_progress ledger row so operations can
+    // distinguish PR-first abandonments from legacy AGC-INVALID — without
+    // advancing the session. The daemon's recovery sweep handles cleanup.
+    await deps.ledger.appendTransition({
+      transition_id: newMonotonicId(deps.clock.now()),
+      target_id: deps.targetId,
+      object_id: session.session_id,
+      object_kind: "session_turn",
+      from_state: null,
+      to_state: `turn_index=${turnIndex}`,
+      loop_kind: "middle",
+      phase: null,
+      slice_id: slice.slice_id,
+      slice_kind: slice.slice_kind,
+      dod_revision: slice.dod_revision_pin,
+      session_id: session.session_id,
+      turn_index: turnIndex,
+      slot_kind: "delivery",
+      agent_profile_id: "sentinel",
+      contribution_kind: null,
+      action_kind: "session_progress",
+      final_verdict: null,
+      caller_id: deps.callerId,
+      manifest_id: manifest.manifest_id,
+      input_revision_pins: manifest.entries.map((e) => e.revision_pin),
+      output_hash: null,
+      verification_run_id: sliceMerge.verification_run_id,
+      metric_run_id: null,
+      idempotency_key: idempotencyKey({
+        scope: "external_observation",
+        parts: {
+          kind: "pr_first_reviewer_abandoned",
+          session_id: session.session_id,
+          turn_index: turnIndex,
+          reason: reviewerOutcome.reason,
+        },
+      }),
+      lease_token: null,
+      lease_kind: null,
+      result: "invalid",
+      result_detail: `${reviewerOutcome.reason}: ${reviewerOutcome.detail.slice(0, 200)}`,
+      timestamp: deps.clock.isoNow(),
+      surface_ref: reviewSurface.review_surface_id,
+    });
+    // PR #121 review P1-A (gpt5.5): without transitioning the DialogueSession
+    // to ABANDONED, `pickReadyMiddleReview` re-selects the same SESSION_OPEN
+    // session on the next daemon iteration and re-invokes the reviewer —
+    // potentially posting duplicate reviews on the same PR. Mirror
+    // `abandonMiddleSessionForPromptCompose` so parse retry-cap, L4 violation,
+    // outbox_failed, agent_call_failed, and reviewer_intent_invalid all
+    // converge on a terminal session state with a `session_finalize` ledger row.
+    await abandonMiddleSessionForReviewerOutcome(
+      slice,
+      session,
+      turnIndex,
+      reviewerOutcome.reason,
+      `${reviewerOutcome.reason}: ${reviewerOutcome.detail.slice(0, 200)}`,
+      deps,
+    );
+    return {
+      kind: "reviewer_path_pr_first",
+      sessionId: session.session_id,
+      sliceId: slice.slice_id,
+      sliceMergeId: sliceMerge.slice_merge_id,
+      outcome: reviewerOutcome,
+      decision: null,
+      dispatch: null,
+    };
+  }
+
+  // PR #119 review P0a (qwen+gpt5.5): persist SessionTurn + advance
+  // current_turn_index from the reviewer's canonical envelope.
+  const callerRoutingDecision = decideRouting(reviewerOutcome.envelope);
+  const { session: sessionAfterTurn } = await persistSessionTurn(
+    {
+      session,
+      envelope: reviewerOutcome.envelope,
+      callerRoutingDecision,
+      workspaceCommit: null,
+      verificationRunId: sliceMerge.verification_run_id,
+      newWorkspaceRevisionPin: null,
+      outputReceiptRef: reviewerOutcome.receiptPath,
+      outputIntentRef: reviewerOutcome.intentPath,
+    },
+    { store: deps.store, clock: deps.clock },
+  );
+
+  await deps.ledger.appendTransition({
+    transition_id: newMonotonicId(deps.clock.now()),
+    target_id: deps.targetId,
+    object_id: session.session_id,
+    object_kind: "session_turn",
+    from_state: null,
+    to_state: `turn_index=${turnIndex}`,
+    loop_kind: "middle",
+    phase: null,
+    slice_id: slice.slice_id,
+    slice_kind: slice.slice_kind,
+    dod_revision: slice.dod_revision_pin,
+    session_id: session.session_id,
+    turn_index: turnIndex,
+    slot_kind: "delivery",
+    agent_profile_id: "sentinel",
+    contribution_kind: reviewerOutcome.envelope.contribution_kind,
+    action_kind: "session_progress",
+    final_verdict: null,
+    caller_id: deps.callerId,
+    manifest_id: manifest.manifest_id,
+    input_revision_pins: manifest.entries.map((e) => e.revision_pin),
+    output_hash: null,
+    verification_run_id: sliceMerge.verification_run_id,
+    metric_run_id: null,
+    idempotency_key: reviewerOutcome.envelope.idempotency_key,
+    lease_token: null,
+    lease_kind: null,
+    result: "applied",
+    result_detail: `review=${reviewerOutcome.externalReviewId}`,
+    timestamp: deps.clock.isoNow(),
+    surface_ref: reviewSurface.review_surface_id,
+    external_review_id: reviewerOutcome.externalReviewId,
+  });
+
+  // Termination evaluation — same shape as legacy path.
+  const allTurns = await loadAllTurnSummaries(
+    sessionAfterTurn.session_id,
+    sessionAfterTurn.current_turn_index,
+    sliceMerge.verification_run_id,
+    deps,
+  );
+  const decision = evaluateTermination({
+    termination: sessionAfterTurn.session_termination,
+    turns: allTurns,
+    max_turns: sessionAfterTurn.max_turns,
+  });
+
+  if (!decision.converged) {
+    // incident-12 mirror: surface terminal TIMEOUT / ABANDONED reasons
+    // through dispatch + session-finalize so the daemon doesn't loop.
+    if (decision.reason === "timeout" || decision.reason === "abandoned") {
+      const finalized = await finalizeNonConvergedReview(
+        slice,
+        sliceMerge,
+        sessionAfterTurn,
+        decision,
+        allTurns,
+        turnIndex,
+        deps,
+      );
+      return wrapPrFirst(reviewerOutcome, slice, sliceMerge, finalized);
+    }
+    return {
+      kind: "reviewer_path_pr_first",
+      sessionId: sessionAfterTurn.session_id,
+      sliceId: slice.slice_id,
+      sliceMergeId: sliceMerge.slice_merge_id,
+      outcome: reviewerOutcome,
+      decision,
+      dispatch: null,
+    };
+  }
+
+  // P0-3 fix (PR #62) mirror: dispatch FIRST, persist CONVERGED LAST.
+  const dispatchDeps: DispatchDeps = {
+    store: deps.store,
+    clock: deps.clock,
+    ledger: deps.ledger,
+    workspace: deps.workspace,
+    verification: deps.verification,
+    callerId: deps.callerId,
+    targetId: deps.targetId,
+  };
+  const dispatch = await dispatchOutcome(
+    {
+      parent_loop: "middle",
+      phase_or_purpose: "review",
+      session_state: "CONVERGED",
+      final_verdict: decision.final_verdict,
+      slice,
+      sliceMerge,
+      sessionId: sessionAfterTurn.session_id,
+      verificationRunId: sliceMerge.verification_run_id,
+      trunkRevision: slice.trunk_base_revision,
+      testCommandsForReverify: deps.reverifyTestCommands,
+      environmentFingerprint: deps.environmentFingerprint,
+    },
+    dispatchDeps,
+  );
+
+  if (dispatch.kind === "no_match") {
+    await deps.ledger.appendTransition({
+      transition_id: newMonotonicId(deps.clock.now()),
+      target_id: deps.targetId,
+      object_id: sessionAfterTurn.session_id,
+      object_kind: "dialogue_session",
+      from_state: "SESSION_OPEN",
+      to_state: "SESSION_OPEN",
+      loop_kind: "middle",
+      phase: null,
+      slice_id: slice.slice_id,
+      slice_kind: slice.slice_kind,
+      dod_revision: slice.dod_revision_pin,
+      session_id: sessionAfterTurn.session_id,
+      turn_index: turnIndex,
+      slot_kind: "delivery",
+      agent_profile_id: "sentinel",
+      contribution_kind: null,
+      action_kind: "session_finalize",
+      final_verdict: decision.final_verdict,
+      caller_id: deps.callerId,
+      manifest_id: null,
+      input_revision_pins: [],
+      output_hash: null,
+      verification_run_id: sliceMerge.verification_run_id,
+      metric_run_id: null,
+      idempotency_key: idempotencyKey({
+        scope: "external_observation",
+        parts: {
+          kind: "dispatch_no_match",
+          session_id: sessionAfterTurn.session_id,
+          final_verdict: decision.final_verdict,
+        },
+      }),
+      lease_token: null,
+      lease_kind: null,
+      result: "error",
+      result_detail: dispatch.detail.slice(0, 200),
+      timestamp: deps.clock.isoNow(),
+    });
+    return {
+      kind: "reviewer_path_pr_first",
+      sessionId: sessionAfterTurn.session_id,
+      sliceId: slice.slice_id,
+      sliceMergeId: sliceMerge.slice_merge_id,
+      outcome: reviewerOutcome,
+      decision,
+      dispatch: null,
+    };
+  }
+
+  const finalized = DialogueSession.parse({
+    ...sessionAfterTurn,
+    state: "CONVERGED",
+    final_verdict: decision.final_verdict,
+    finalization_decision: decision.finalization_decision,
+    updated_at: deps.clock.isoNow(),
+  });
+  await deps.store.writeAtomic(
+    layout.sessionMetadata(finalized.session_id),
+    JSON.stringify(finalized, null, 2),
+  );
+  await deps.ledger.appendTransition({
+    transition_id: newMonotonicId(deps.clock.now()),
+    target_id: deps.targetId,
+    object_id: finalized.session_id,
+    object_kind: "dialogue_session",
+    from_state: "SESSION_OPEN",
+    to_state: "CONVERGED",
+    loop_kind: "middle",
+    phase: null,
+    slice_id: slice.slice_id,
+    slice_kind: slice.slice_kind,
+    dod_revision: slice.dod_revision_pin,
+    session_id: finalized.session_id,
+    turn_index: turnIndex,
+    slot_kind: "delivery",
+    agent_profile_id: "sentinel",
+    contribution_kind: null,
+    action_kind: "session_finalize",
+    final_verdict: decision.final_verdict,
+    caller_id: deps.callerId,
+    manifest_id: null,
+    input_revision_pins: [],
+    output_hash: null,
+    verification_run_id: sliceMerge.verification_run_id,
+    metric_run_id: null,
+    idempotency_key: idempotencyKey({
+      scope: "per_session_outcome",
+      parts: {
+        session_id: finalized.session_id,
+        final_verdict: decision.final_verdict,
+        finalization_decision: decision.finalization_decision,
+        workspace_revision_pin_at_convergence:
+          sliceMerge.pre_merge_workspace_revision,
+      },
+    }),
+    lease_token: null,
+    lease_kind: null,
+    result: "applied",
+    result_detail: null,
+    timestamp: deps.clock.isoNow(),
+  });
+  return {
+    kind: "reviewer_path_pr_first",
+    sessionId: finalized.session_id,
+    sliceId: slice.slice_id,
+    sliceMergeId: sliceMerge.slice_merge_id,
+    outcome: reviewerOutcome,
+    decision,
+    dispatch,
+  };
+}
+
+function wrapPrFirst(
+  outcome: ReviewerInvokerOutcome,
+  slice: SliceT,
+  sliceMerge: SliceMergeT,
+  legacy: RunMiddleReviewOutcome,
+): RunMiddleReviewOutcome {
+  // Re-wrap the legacy finalization outcome (turn_persisted / dispatch_no_match)
+  // into the PR-first outcome shape so callers can route uniformly.
+  if (legacy.kind === "turn_persisted") {
+    return {
+      kind: "reviewer_path_pr_first",
+      sessionId: legacy.sessionId,
+      sliceId: slice.slice_id,
+      sliceMergeId: sliceMerge.slice_merge_id,
+      outcome,
+      decision: legacy.decision,
+      dispatch: legacy.dispatch,
+    };
+  }
+  if (legacy.kind === "dispatch_no_match") {
+    return {
+      kind: "reviewer_path_pr_first",
+      sessionId: legacy.sessionId,
+      sliceId: slice.slice_id,
+      sliceMergeId: sliceMerge.slice_merge_id,
+      outcome,
+      decision: null,
+      dispatch: null,
+    };
+  }
+  return legacy;
 }
 
 export async function pickReadyMiddleReview(
@@ -1523,6 +2051,76 @@ async function abandonMiddleSessionForPromptCompose(
     lease_kind: null,
     result: "applied",
     result_detail: reason,
+    timestamp: deps.clock.isoNow(),
+  });
+}
+
+/**
+ * PR #121 review P1-A (gpt5.5): mirror of `abandonMiddleSessionForPromptCompose`
+ * for PR-first reviewer abandons (parse retry-cap reached, L4 capability
+ * violation, outbox_failed, agent_call_failed, reviewer_intent_invalid,
+ * missing ReviewSurface). Without this transition, `pickReadyMiddleReview`
+ * keeps re-selecting the SESSION_OPEN session on each daemon iteration and
+ * the reviewer is re-invoked, potentially posting duplicate reviews.
+ */
+async function abandonMiddleSessionForReviewerOutcome(
+  slice: SliceT,
+  session: DialogueSessionT,
+  turnIndex: number,
+  reasonTag: string,
+  detail: string,
+  deps: CoordinatorDeps,
+): Promise<void> {
+  const finalized = DialogueSession.parse({
+    ...session,
+    state: "ABANDONED",
+    final_verdict: null,
+    abandoned_reason: "no_progress",
+    finalization_decision: null,
+    updated_at: deps.clock.isoNow(),
+  });
+  await deps.store.writeAtomic(
+    layout.sessionMetadata(finalized.session_id),
+    JSON.stringify(finalized, null, 2),
+  );
+  await deps.ledger.appendTransition({
+    transition_id: newMonotonicId(deps.clock.now()),
+    target_id: deps.targetId,
+    object_id: finalized.session_id,
+    object_kind: "dialogue_session",
+    from_state: "SESSION_OPEN",
+    to_state: "ABANDONED",
+    loop_kind: "middle",
+    phase: null,
+    slice_id: slice.slice_id,
+    slice_kind: slice.slice_kind,
+    dod_revision: slice.dod_revision_pin,
+    session_id: finalized.session_id,
+    turn_index: turnIndex,
+    slot_kind: "delivery",
+    agent_profile_id: "sentinel",
+    contribution_kind: null,
+    action_kind: "session_finalize",
+    final_verdict: null,
+    caller_id: deps.callerId,
+    manifest_id: null,
+    input_revision_pins: [],
+    output_hash: null,
+    verification_run_id: null,
+    metric_run_id: null,
+    idempotency_key: idempotencyKey({
+      scope: "per_session_outcome",
+      parts: {
+        session_id: finalized.session_id,
+        final_verdict: "ABANDONED",
+        finalization_decision: `abandoned:pr_first_reviewer:${reasonTag}`,
+        workspace_revision_pin_at_convergence: finalized.workspace_revision_pin,
+      },
+    }),
+    lease_token: null,
+    lease_kind: null,
+    result: "applied",
+    result_detail: detail,
     timestamp: deps.clock.isoNow(),
   });
 }

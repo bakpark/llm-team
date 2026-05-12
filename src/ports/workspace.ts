@@ -140,4 +140,17 @@ export interface WorkspacePort {
    * dirty-worktree retry recovery (cli-spicy-anchor.md §8 retry cap).
    */
   cleanForce(input: { sliceId: string }): Promise<void>;
+
+  /**
+   * Phase 3 (cli-spicy-anchor.md §1 L4 reviewer post-call check): probe the
+   * read-only checkout for any tracked changes after the reviewer agent
+   * exits. Returns repo-relative paths surfaced by `git status --porcelain`
+   * + `git diff --name-only` against the pinned revision. An empty array
+   * means the reviewer was strictly read-only.
+   *
+   * Adapters may return an empty array when they cannot model the read-only
+   * checkout's filesystem state (e.g. in-memory fakes); the reviewer-invoker
+   * still validates the result via `checkPostCallDiffAllowlist`.
+   */
+  getReadOnlyWorktreeChanges(input: { sliceId: string }): Promise<string[]>;
 }
