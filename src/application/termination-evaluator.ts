@@ -47,10 +47,43 @@ export interface TurnSummary {
   agent_profile_id?: string;
 }
 
+/**
+ * Phase 4 (cli-spicy-anchor.md §6 + Phase 4 PR-6) — PR-first review source.
+ *
+ * A native PR review that survived the pr-watcher 5-gate. The evaluator
+ * treats it as functionally equivalent to a legacy reviewer turn:
+ *
+ *   - `verdict.result` is the canonical {approve, request_changes, comment}
+ *     mapping.
+ *   - `agent_role_in_session` is `reviewer` (the only role the 5-gate ④b
+ *     check allows for non-lead PR reviews).
+ *
+ * The union with `turns` happens inside `evaluateTermination` — callers
+ * supply either or both. Same-PR continuation rounds therefore see a single
+ * merged ordered sequence whose finalization / evidence rules behave as
+ * before.
+ */
+export interface PrReviewSummary {
+  agent_role_in_session: "lead" | "reviewer";
+  verdict: Verdict;
+  agent_profile_id: string;
+  /** ReviewSurface review_round at the time the review was posted. */
+  review_round: number;
+}
+
 export interface TerminationInputs {
   termination: SessionTermination;
   /** All turns persisted so far, oldest → newest. */
   turns: readonly TurnSummary[];
+  /**
+   * Phase 4 (PR-6): native PR reviews that passed the pr-watcher 5-gate.
+   * Optional — when omitted the legacy turn-only evaluator runs unchanged
+   * (zero regression). When supplied, each review is materialised into a
+   * synthetic TurnSummary and appended *after* the legacy turns so the
+   * finalization rule's "lastBy" semantics naturally prefer the latest PR
+   * review when both sources are present.
+   */
+  pr_reviews?: readonly PrReviewSummary[];
   /** Hard cap: SOC-SESSION-LIFECYCLE TIMEOUT trigger. */
   max_turns: number;
   /**
@@ -99,7 +132,12 @@ export type TerminationDecision =
 export function evaluateTermination(
   input: TerminationInputs,
 ): TerminationDecision {
-  const turnCount = input.turns.length;
+  // Phase 4 (PR-6): union of legacy turns + 5-gate-pass PR reviews. PR
+  // reviews append AFTER legacy turns so `lastBy(reviewer)` prefers the
+  // freshest signal (same-PR continuation: round1 request_changes followed
+  // by round2 approve → convergence on approve).
+  const turns = mergeTurnsAndPrReviews(input.turns, input.pr_reviews);
+  const turnCount = turns.length;
 
   // Hard caps before convergence rules so a stuck session always exits.
   if (turnCount >= input.max_turns)
@@ -138,13 +176,13 @@ export function evaluateTermination(
 
   const finalizationOk = checkFinalization(
     input.termination.finalization_rule,
-    input.turns,
+    turns,
     input.termination.quorum_min_approvals,
     input.participants,
   );
   const evidenceOk = checkEvidence(
     input.termination.required_evidence,
-    input.turns,
+    turns,
   );
 
   switch (input.termination.composite_rule) {
@@ -152,7 +190,7 @@ export function evaluateTermination(
       if (evidenceOk.ok)
         return {
           converged: true,
-          final_verdict: evidenceOk.derivedVerdict ?? deriveLeadVerdict(input.turns),
+          final_verdict: evidenceOk.derivedVerdict ?? deriveLeadVerdict(turns),
           finalization_decision: "required_evidence",
         };
       return { converged: false, reason: "continue" };
@@ -378,6 +416,29 @@ function lastBy<T>(
     if (predicate(v)) return v;
   }
   return null;
+}
+
+/**
+ * Phase 4 (PR-6) — merge legacy SessionTurn summaries with native PR
+ * reviews that passed the pr-watcher 5-gate. PR reviews are materialised
+ * into synthetic TurnSummary entries (verification=null is correct — the
+ * review itself does not re-run verification; the SliceMerge / ReviewSurface
+ * carries the latest verification reference). The synthetic entries are
+ * appended *after* the persisted turns so `lastBy(reviewer)` prefers the
+ * most recent PR review on the same surface (same-PR continuation).
+ */
+function mergeTurnsAndPrReviews(
+  turns: readonly TurnSummary[],
+  reviews: readonly PrReviewSummary[] | undefined,
+): readonly TurnSummary[] {
+  if (reviews == null || reviews.length === 0) return turns;
+  const synthetic: TurnSummary[] = reviews.map((r) => ({
+    agent_role_in_session: r.agent_role_in_session,
+    verdict: r.verdict,
+    verification: null,
+    agent_profile_id: r.agent_profile_id,
+  }));
+  return [...turns, ...synthetic];
 }
 
 // avoid unused-import warnings while keeping the type re-exported in JSDoc
