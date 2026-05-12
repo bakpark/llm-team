@@ -336,6 +336,11 @@ export class LeadInvoker {
       targetId: this.cfg.targetId,
       objectId,
       manifestId: input.manifest.manifest_id,
+      // PR-123 P0-1: receipt tuple → outbox_pending row → recovery backfill.
+      sessionId: input.sessionId,
+      turnIndex: input.turnIndex,
+      agentProfileId: input.agentProfileId,
+      loopKind: input.parentLoop,
     });
     let commitSha: string;
     try {
@@ -387,6 +392,10 @@ export class LeadInvoker {
       targetId: this.cfg.targetId,
       objectId,
       manifestId: input.manifest.manifest_id,
+      sessionId: input.sessionId,
+      turnIndex: input.turnIndex,
+      agentProfileId: input.agentProfileId,
+      loopKind: input.parentLoop,
     });
     try {
       await this.deps.workspace.push({
@@ -472,6 +481,10 @@ export class LeadInvoker {
       targetId: this.cfg.targetId,
       objectId,
       manifestId: input.manifest.manifest_id,
+      sessionId: input.sessionId,
+      turnIndex: input.turnIndex,
+      agentProfileId: input.agentProfileId,
+      loopKind: input.parentLoop,
     });
     let prRef: ExternalRefHandle;
     try {
@@ -801,4 +814,121 @@ function handleFromSurface(surface: ReviewSurfaceT): ExternalRefHandle {
     id: surface.pr_ref.id,
     url: surface.pr_ref.url,
   };
+}
+
+// --------------------------------------------------------------------------
+// Phase 4 (#122 P1-B) — receipt backfill exported helper.
+//
+// `recovery-coordinator` invokes this after `outbox.recover` succeeds for a
+// lead-side op (commit_op / push_op / pr_open_op / pr_update_op). The outbox
+// already emitted the ledger rows that make 5-gate ② full-tuple correlation
+// consistent for caller-side reads; the missing piece is the
+// `intents/<session>-<turn>.receipt.json` blob — without it the next PR-watcher
+// pass sees `tuple_mismatch` because gate ② cannot find the receipt.
+//
+// The helper writes a minimal `AgentRunReceipt` (exit_status=ok,
+// diagnostics_ref="recovery_backfill") so subsequent reads do not have to
+// distinguish backfilled from live receipts. The caller-supplied
+// `(sessionId, turnIndex, agentProfileId, parentLoop, role)` tuple identifies
+// the receipt slot; subsequent fields are written from the probe payload.
+//
+// A `recover` ledger row is appended for audit so an operator can list every
+// receipt that was reconstructed without a live agent run.
+// --------------------------------------------------------------------------
+
+export interface BackfillLeadReceiptInput {
+  sessionId: string;
+  turnIndex: number;
+  parentLoop: ParentLoop;
+  agentProfileId: LlmAgentProfileId;
+  agentRoleInSession: AgentRole;
+  idempotencyKey: string;
+  /** Provider-local commit sha / pr id / push sha — opaque to the helper. */
+  externalId: string;
+  /** Optional pr id to record on the receipt's `external_pr_id`. */
+  externalPrId?: string | null;
+  /** Optional commit sha — distinct from externalId for pr_open_op recovery. */
+  commitSha?: string | null;
+  surfaceRef?: string | null;
+}
+
+export interface BackfillLeadReceiptDeps {
+  store: StorePort;
+  clock: ClockPort;
+  ledger: LedgerAppender;
+  callerId: string;
+  targetId: string;
+}
+
+export async function backfillLeadReceiptFromRecovery(
+  input: BackfillLeadReceiptInput,
+  deps: BackfillLeadReceiptDeps,
+): Promise<{ result: "applied" | "duplicate"; receiptPath: string }> {
+  const receiptPath = layout.agentRunReceipt(input.sessionId, input.turnIndex);
+  const existing = await deps.store.readText(receiptPath);
+  if (existing != null && existing.length > 0) {
+    // The live invoker already persisted the receipt — recovery is a no-op
+    // for the file but we still append a `recover` ledger row so duplicate
+    // recoveries are auditable.
+    await appendLeadBackfillLedger(input, deps, "duplicate");
+    return { result: "duplicate", receiptPath };
+  }
+  const now = deps.clock.isoNow();
+  const receipt: AgentRunReceiptT = AgentRunReceipt.parse({
+    session_id: input.sessionId,
+    turn_index: input.turnIndex,
+    parent_loop: input.parentLoop,
+    agent_profile_id: input.agentProfileId,
+    agent_role_in_session: input.agentRoleInSession,
+    idempotency_key: input.idempotencyKey,
+    diagnostics_ref: "recovery_backfill",
+    external_review_id: null,
+    external_pr_id: input.externalPrId ?? null,
+    commit_sha: input.commitSha ?? null,
+    exit_status: "ok",
+    recorded_at: now,
+  });
+  await deps.store.writeAtomic(receiptPath, JSON.stringify(receipt, null, 2));
+  await appendLeadBackfillLedger(input, deps, "applied");
+  return { result: "applied", receiptPath };
+}
+
+async function appendLeadBackfillLedger(
+  input: BackfillLeadReceiptInput,
+  deps: BackfillLeadReceiptDeps,
+  result: "applied" | "duplicate",
+): Promise<void> {
+  await deps.ledger.appendTransition({
+    transition_id: newId(deps.clock.now()),
+    target_id: deps.targetId,
+    object_id: input.sessionId,
+    object_kind: "session_turn",
+    from_state: null,
+    to_state: "receipt_backfilled",
+    loop_kind: input.parentLoop,
+    phase: null,
+    slice_id: null,
+    slice_kind: null,
+    dod_revision: null,
+    session_id: input.sessionId,
+    turn_index: input.turnIndex,
+    slot_kind: null,
+    agent_profile_id: input.agentProfileId,
+    contribution_kind: null,
+    action_kind: "recover",
+    final_verdict: null,
+    caller_id: deps.callerId,
+    manifest_id: null,
+    input_revision_pins: [],
+    output_hash: null,
+    verification_run_id: null,
+    metric_run_id: null,
+    idempotency_key: `lead_invoker/recovery_backfill/${input.idempotencyKey}`,
+    lease_token: null,
+    lease_kind: null,
+    result: result === "applied" ? "recovered" : "duplicate",
+    result_detail: input.externalId,
+    timestamp: deps.clock.isoNow(),
+    ...(input.surfaceRef ? { surface_ref: input.surfaceRef } : {}),
+  });
 }

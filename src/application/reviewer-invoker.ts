@@ -301,6 +301,11 @@ export class ReviewerInvoker {
       objectId: surfaceId,
       manifestId: input.manifest.manifest_id,
       surfaceRef: surfaceId,
+      // PR-123 P0-1: receipt tuple → outbox_pending → recovery backfill.
+      sessionId: input.sessionId,
+      turnIndex: input.turnIndex,
+      agentProfileId: input.agentProfileId,
+      loopKind: input.parentLoop,
     });
     let externalReviewId: string;
     try {
@@ -521,4 +526,105 @@ function handleFromSurface(surface: ReviewSurfaceT): ExternalRefHandle {
     id: surface.pr_ref.id,
     url: surface.pr_ref.url,
   };
+}
+
+// --------------------------------------------------------------------------
+// Phase 4 (#122 P1-B) — reviewer receipt backfill exported helper.
+//
+// Mirrors `backfillLeadReceiptFromRecovery`. `recovery-coordinator` invokes
+// this after `outbox.recover` succeeds for a reviewer-side op
+// (submit_review_op / dismiss_review_op). The persisted receipt restores
+// gate ② full-tuple correlation in the PR-watcher 5-gate.
+// --------------------------------------------------------------------------
+
+export interface BackfillReviewerReceiptInput {
+  sessionId: string;
+  turnIndex: number;
+  parentLoop: ParentLoop;
+  agentProfileId: LlmAgentProfileId;
+  agentRoleInSession: AgentRole;
+  idempotencyKey: string;
+  /** Provider-local review id captured via `findReviewByMachineKey`. */
+  externalReviewId: string;
+  externalPrId?: string | null;
+  surfaceRef?: string | null;
+}
+
+export interface BackfillReviewerReceiptDeps {
+  store: StorePort;
+  clock: ClockPort;
+  ledger: LedgerAppender;
+  callerId: string;
+  targetId: string;
+}
+
+export async function backfillReviewerReceiptFromRecovery(
+  input: BackfillReviewerReceiptInput,
+  deps: BackfillReviewerReceiptDeps,
+): Promise<{ result: "applied" | "duplicate"; receiptPath: string }> {
+  const receiptPath = layout.agentRunReceipt(input.sessionId, input.turnIndex);
+  const existing = await deps.store.readText(receiptPath);
+  if (existing != null && existing.length > 0) {
+    await appendReviewerBackfillLedger(input, deps, "duplicate");
+    return { result: "duplicate", receiptPath };
+  }
+  const now = deps.clock.isoNow();
+  const receipt: AgentRunReceiptT = AgentRunReceipt.parse({
+    session_id: input.sessionId,
+    turn_index: input.turnIndex,
+    parent_loop: input.parentLoop,
+    agent_profile_id: input.agentProfileId,
+    agent_role_in_session: input.agentRoleInSession,
+    idempotency_key: input.idempotencyKey,
+    diagnostics_ref: "recovery_backfill",
+    external_review_id: input.externalReviewId,
+    external_pr_id: input.externalPrId ?? null,
+    commit_sha: null,
+    exit_status: "ok",
+    recorded_at: now,
+  });
+  await deps.store.writeAtomic(receiptPath, JSON.stringify(receipt, null, 2));
+  await appendReviewerBackfillLedger(input, deps, "applied");
+  return { result: "applied", receiptPath };
+}
+
+async function appendReviewerBackfillLedger(
+  input: BackfillReviewerReceiptInput,
+  deps: BackfillReviewerReceiptDeps,
+  result: "applied" | "duplicate",
+): Promise<void> {
+  await deps.ledger.appendTransition({
+    transition_id: newId(deps.clock.now()),
+    target_id: deps.targetId,
+    object_id: input.sessionId,
+    object_kind: "session_turn",
+    from_state: null,
+    to_state: "receipt_backfilled",
+    loop_kind: input.parentLoop,
+    phase: null,
+    slice_id: null,
+    slice_kind: null,
+    dod_revision: null,
+    session_id: input.sessionId,
+    turn_index: input.turnIndex,
+    slot_kind: null,
+    agent_profile_id: input.agentProfileId,
+    contribution_kind: null,
+    action_kind: "recover",
+    final_verdict: null,
+    caller_id: deps.callerId,
+    manifest_id: null,
+    input_revision_pins: [],
+    output_hash: null,
+    verification_run_id: null,
+    metric_run_id: null,
+    idempotency_key: `reviewer_invoker/recovery_backfill/${input.idempotencyKey}`,
+    lease_token: null,
+    lease_kind: null,
+    result: result === "applied" ? "recovered" : "duplicate",
+    result_detail: input.externalReviewId,
+    timestamp: deps.clock.isoNow(),
+    ...(input.surfaceRef ? { surface_ref: input.surfaceRef } : {}),
+    external_review_id: input.externalReviewId,
+  });
 }

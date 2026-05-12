@@ -54,6 +54,20 @@ export interface OutboxBeginInput {
   objectId: string;
   manifestId: string | null;
   surfaceRef?: string;
+  /**
+   * PR-123 review P0-1 (gpt5.5): receipt tuple persisted onto the
+   * `outbox_pending` ledger row so `RecoveryCoordinator` can backfill an
+   * `AgentRunReceipt` from the canonical pending row (no separate side
+   * channel). All four fields together identify the receipt slot
+   * (`intents/<session>-<turn>.receipt.json`) plus the parent_loop the
+   * receipt records. Invokers (lead/reviewer) always set these; recovery
+   * tests previously seeded a side-loaded `outbox_pending` row directly to
+   * compensate for the missing fields.
+   */
+  sessionId?: string;
+  turnIndex?: number;
+  agentProfileId?: string;
+  loopKind?: "outer" | "middle" | "inner";
 }
 
 export interface OutboxCompleteInput {
@@ -320,6 +334,11 @@ export class Outbox {
       idempotencyKey: this.outboxKey(input.opKind, input.idempotencyKey, "begin"),
       opKind: input.opKind,
       surfaceRef: input.surfaceRef,
+      // PR-123 P0-1: receipt tuple onto the pending row.
+      sessionId: input.sessionId,
+      turnIndex: input.turnIndex,
+      agentProfileId: input.agentProfileId,
+      loopKind: input.loopKind,
       detail: input.payload ? safeJson(input.payload) : null,
     });
   }
@@ -511,6 +530,11 @@ interface AppendOutboxArgs {
   surfaceRef?: string;
   externalReviewId?: string;
   detail: string | null;
+  // PR-123 P0-1: receipt tuple — populated only on `outbox_pending` rows.
+  sessionId?: string;
+  turnIndex?: number;
+  agentProfileId?: string;
+  loopKind?: "outer" | "middle" | "inner";
 }
 
 async function appendOutboxRow(
@@ -524,15 +548,15 @@ async function appendOutboxRow(
     object_kind: "system",
     from_state: null,
     to_state: args.action,
-    loop_kind: null,
+    loop_kind: args.loopKind ?? null,
     phase: null,
     slice_id: null,
     slice_kind: null,
     dod_revision: null,
-    session_id: null,
-    turn_index: null,
+    session_id: args.sessionId ?? null,
+    turn_index: args.turnIndex ?? null,
     slot_kind: null,
-    agent_profile_id: null,
+    agent_profile_id: args.agentProfileId ?? null,
     contribution_kind: null,
     action_kind: args.action,
     final_verdict: null,
