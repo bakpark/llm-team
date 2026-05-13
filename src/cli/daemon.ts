@@ -64,6 +64,12 @@ import { runRecoverySweep } from "../application/recovery.js";
 import { runScoutScannerSweep } from "../application/scout-observer.js";
 import { runOneInnerTurn } from "../application/turn-worker.js";
 import { SystemClock } from "../ports/clock.js";
+import {
+  buildPrFirstWiring,
+  resolveMachineBlockSecretIfPrFirstEnabled,
+  resolvePrFirstSettings,
+} from "./pr-first-wiring.js";
+import { runPrWatcherCyclePrelude } from "./pr-watcher-cycle.js";
 
 type DaemonRole =
   | "turn-worker"
@@ -190,6 +196,22 @@ async function main(argv: readonly string[]): Promise<number> {
   const args = parseArgs(argv);
   const targetRaw = JSON.parse(await readFile(args.targetPath, "utf8"));
   const cfg = validateOrThrow(targetRaw);
+
+  // Phase 5 (audit §5-D): fail-loud machine-block secret check at startup.
+  // Throws when the configured env var (default
+  // `LLM_TEAM_MACHINE_BLOCK_SECRET`) is unset so PR-first signing/verify is
+  // never silently bypassed in production. The secret is held in this scope
+  // only — never logged, persisted, or threaded into prompts/ledger.
+  //
+  // PR #125 self-review P1-1: toggle-gated. Envelope-only deployments
+  // (both `experiments.lead_pr_first` and `experiments.reviewer_pr_first`
+  // = false) skip the secret check — PR-first signing is inactive so the
+  // fail-loud requirement does not apply. Operators flipping a toggle on
+  // MUST provide the secret env var; otherwise startup aborts at the next
+  // boot (matching the audit §5-D DoD for active PR-first deployments).
+  const machineBlockSecret = resolveMachineBlockSecretIfPrFirstEnabled(cfg);
+  const prFirstSettings = resolvePrFirstSettings(cfg);
+
   const workdir = resolve(
     args.workdir ?? cfg.identity.workdir_path ?? process.cwd(),
   );
@@ -293,6 +315,26 @@ async function main(argv: readonly string[]): Promise<number> {
       "actor_team_membership_unreachable",
     );
 
+    // Phase 5 (audit §5-D, P0-1): build the PR-first invoker/dispatcher/
+    // watcher graph. Default `experiments.{lead,reviewer}_pr_first === false`
+    // keeps the legacy envelope path active until operators opt in. The
+    // `FsMirrorGitHost` adapter is wired here too — production GitHub-API
+    // adapter selection is a separate concern (Phase 6+).
+    const gitHost = new FsMirrorGitHost(store);
+    const prFirstWiring = buildPrFirstWiring({
+      store,
+      clock,
+      ledger,
+      llmRunner,
+      workspace,
+      gitHost,
+      verification,
+      callerId: args.callerId,
+      targetId: cfg.identity.target_id,
+      machineBlockSecret,
+      settings: prFirstSettings,
+    });
+
     do {
       // Every cycle starts with a recovery sweep (RGC-RECOVERY).
       const sweep = await runRecoverySweep({
@@ -388,6 +430,44 @@ async function main(argv: readonly string[]): Promise<number> {
           await new Promise((r) => setTimeout(r, args.cycleIntervalMs));
         continue;
       }
+
+      // Phase 5 (audit §5-D): cycle prelude — PrWatcher polls every open
+      // ReviewSurface and routes 5-gate passing reviews through
+      // PrFirstDispatcher. Gated on `reviewer_pr_first` so the envelope path
+      // does not pay the per-cycle scan cost. Only roles that progress an
+      // object run the prelude (recovery / drift / scout do their own work).
+      if (
+        prFirstSettings.reviewerPrFirst &&
+        (args.role === "turn-worker" ||
+          args.role === "dialogue-coordinator" ||
+          args.role === "outer-coordinator")
+      ) {
+        const summary = await runPrWatcherCyclePrelude({
+          store,
+          prWatcher: prFirstWiring.prWatcher,
+          prFirstDispatcher: prFirstWiring.prFirstDispatcher,
+          // Production wiring resolves the trunk via the workspace adapter;
+          // for cycle-prelude purposes any branch name slot works since
+          // `PrFirstDispatcher.dispatchSlice` only reads it for reverify.
+          trunkRevision: "trunk",
+          reverifyTestCommands: testCommands,
+          environmentFingerprint: `node${process.version}`,
+        });
+        if (summary.dispatches > 0 || summary.reviewsDropped > 0) {
+          logger.log({
+            level: "info",
+            event: "pr_watcher.cycle",
+            fields: {
+              role: args.role,
+              surfaces: summary.surfacesPolled,
+              applied: summary.reviewsApplied,
+              dropped: summary.reviewsDropped,
+              duplicate: summary.reviewsDuplicate,
+              dispatches: summary.dispatches,
+            },
+          });
+        }
+      }
       let outcomeJson: string;
       switch (args.role) {
         case "turn-worker": {
@@ -407,12 +487,22 @@ async function main(argv: readonly string[]): Promise<number> {
               // incident-10: per-phase timeout overrides + lr_invoke retry cap.
               contextBudget: cfg.context_budget,
               failurePolicy: cfg.failure_policy,
+              // Phase 5 (audit §5-D): toggle the PR-first lead path.
+              // Default `experiments.lead_pr_first === false` keeps the
+              // legacy envelope path active.
+              leadPath: prFirstSettings.leadPrFirst ? "pr_first" : "envelope",
             },
             lease,
             leaseConfig: cfg.lease,
             // phase-0-stabilization C: persist composed prompts under
             // `<workdir>/prompts/<session>/<turn>.md` instead of OS-tmp.
             workdirRoot: workdir,
+            // Wire the LeadInvoker only when PR-first is active so the
+            // legacy envelope path stays untouched. `prFirstWiring.leadInvoker`
+            // is non-null for any role that supplies `llmRunner`.
+            ...(prFirstSettings.leadPrFirst && prFirstWiring.leadInvoker != null
+              ? { leadInvoker: prFirstWiring.leadInvoker }
+              : {}),
           });
           outcomeJson = JSON.stringify({ role: args.role, outcome });
           break;
@@ -437,6 +527,14 @@ async function main(argv: readonly string[]): Promise<number> {
             // phase-0-stabilization C: persist composed prompts under
             // `<workdir>/prompts/<session>/<turn>.md` instead of OS-tmp.
             workdirRoot: workdir,
+            // Phase 5 (audit §5-D): toggle the PR-first reviewer path.
+            reviewerPath: prFirstSettings.reviewerPrFirst
+              ? "pr_first"
+              : "envelope",
+            ...(prFirstSettings.reviewerPrFirst &&
+            prFirstWiring.reviewerInvoker != null
+              ? { reviewerInvoker: prFirstWiring.reviewerInvoker }
+              : {}),
           });
           outcomeJson = JSON.stringify({ role: args.role, outcome });
           break;
@@ -462,6 +560,12 @@ async function main(argv: readonly string[]): Promise<number> {
             // phase-0-stabilization C: persist composed prompts under
             // `<workdir>/prompts/<session>/<turn>.md` instead of OS-tmp.
             workdirRoot: workdir,
+            // Phase 5 (audit §5-D): toggle the PR-first lead path for outer
+            // phases (Discovery / Specification / Planning / Validation).
+            leadPath: prFirstSettings.leadPrFirst ? "pr_first" : "envelope",
+            ...(prFirstSettings.leadPrFirst && prFirstWiring.leadInvoker != null
+              ? { leadInvoker: prFirstWiring.leadInvoker }
+              : {}),
           });
           outcomeJson = JSON.stringify({ role: args.role, outcome });
           break;
@@ -485,8 +589,22 @@ async function main(argv: readonly string[]): Promise<number> {
           break;
         }
         case "recovery": {
-          // Recovery sweep already ran above — emit a noop outcome.
-          outcomeJson = JSON.stringify({ role: args.role, outcome: { kind: "swept" } });
+          // Phase 4 lease-sweep already ran above. Phase 5 audit P0-1
+          // additionally invokes the PR-first `RecoveryCoordinator` so
+          // outbox crash-recovery (Case A pending_without_posted, Case B
+          // posted_without_receipt) ledger rows are surfaced. The default
+          // `buildProbe` returns null (no provider-specific probe is wired
+          // here yet) so candidates report `recovered_skipped: no_probe`
+          // until a probe builder lands — but the sweep itself runs.
+          const recoveryResult = await prFirstWiring.recoveryCoordinator.runOnce();
+          outcomeJson = JSON.stringify({
+            role: args.role,
+            outcome: {
+              kind: "swept",
+              pr_first_scanned: recoveryResult.scanned,
+              pr_first_items: recoveryResult.items.length,
+            },
+          });
           break;
         }
         case "scout-scanner": {

@@ -105,11 +105,16 @@ async function readLedgerRows(store: FsStore): Promise<LedgerRow[]> {
 describe("Phase 7b — daemon control-state prelude gate", () => {
   let prevAllowFake: string | undefined;
   let prevFixtureDir: string | undefined;
+  let prevMachineSecret: string | undefined;
 
   beforeEach(() => {
     prevAllowFake = process.env.LLM_TEAM_ALLOW_FAKE_RUNNER;
     prevFixtureDir = process.env.LLM_TEAM_FAKE_FIXTURE_DIR;
+    prevMachineSecret = process.env.LLM_TEAM_MACHINE_BLOCK_SECRET;
     process.env.LLM_TEAM_ALLOW_FAKE_RUNNER = "1";
+    // Phase 5 (audit §5-D): daemon boots fail-loud without the machine-block
+    // secret. Tests opt in with a deterministic placeholder.
+    process.env.LLM_TEAM_MACHINE_BLOCK_SECRET = "test-machine-block-secret";
   });
 
   afterEach(() => {
@@ -117,6 +122,9 @@ describe("Phase 7b — daemon control-state prelude gate", () => {
     else process.env.LLM_TEAM_ALLOW_FAKE_RUNNER = prevAllowFake;
     if (prevFixtureDir == null) delete process.env.LLM_TEAM_FAKE_FIXTURE_DIR;
     else process.env.LLM_TEAM_FAKE_FIXTURE_DIR = prevFixtureDir;
+    if (prevMachineSecret == null)
+      delete process.env.LLM_TEAM_MACHINE_BLOCK_SECRET;
+    else process.env.LLM_TEAM_MACHINE_BLOCK_SECRET = prevMachineSecret;
   });
 
   it("(a) pause signal drop → next pickup emits noop outcome + pause_resume ledger row", async () => {

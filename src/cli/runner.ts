@@ -12,12 +12,18 @@ import { FakeVerification } from "../adapters/verification/fake.js";
 import { ShellVerification } from "../adapters/verification/shell.js";
 import { GitWorktreeWorkspace } from "../adapters/workspace/git-worktree.js";
 import { FakeWorkspace } from "../adapters/workspace/fake.js";
+import { FsMirrorGitHost } from "../adapters/git-host/fs-mirror.js";
 import { validateOrThrow } from "../application/config-validator.js";
 import { FileLedger } from "../application/ledger.js";
 import { LOG_DAEMON_PATH } from "../application/persistence-layout.js";
 import { runOneInnerTurn } from "../application/turn-worker.js";
 import { runOneMiddleReviewTurn } from "../application/dialogue-coordinator.js";
 import { SystemClock } from "../ports/clock.js";
+import {
+  buildPrFirstWiring,
+  resolveMachineBlockSecretIfPrFirstEnabled,
+  resolvePrFirstSettings,
+} from "./pr-first-wiring.js";
 
 /**
  * CLI entrypoint — runs a single coordinator iteration and exits.
@@ -117,6 +123,19 @@ async function main(argv: readonly string[]): Promise<number> {
   const args = parseArgs(argv);
   const targetRaw = JSON.parse(await readFile(args.targetPath, "utf8"));
   const cfg = validateOrThrow(targetRaw);
+
+  // Phase 5 (audit §5-D): fail-loud machine-block secret check at startup.
+  // Throws when the configured env var (default
+  // `LLM_TEAM_MACHINE_BLOCK_SECRET`) is unset so PR-first signing/verify is
+  // never silently bypassed.
+  //
+  // PR #125 self-review P1-1: toggle-gated. Envelope-only deployments skip
+  // the secret check; deployments with either `experiments.lead_pr_first`
+  // or `experiments.reviewer_pr_first` = true MUST provide the secret env
+  // var or startup aborts.
+  const machineBlockSecret = resolveMachineBlockSecretIfPrFirstEnabled(cfg);
+  const prFirstSettings = resolvePrFirstSettings(cfg);
+
   const workdir = resolve(
     args.workdir ?? cfg.identity.workdir_path ?? process.cwd(),
   );
@@ -173,6 +192,24 @@ async function main(argv: readonly string[]): Promise<number> {
         : { argv: ["npm", "test"], cwd },
     ];
 
+    // Phase 5 (audit §5-D, P0-1): construct the PR-first wiring once per
+    // runner invocation. `experiments.{lead,reviewer}_pr_first` toggles in
+    // target.json decide whether the invokers are actually consumed.
+    const gitHost = new FsMirrorGitHost(store);
+    const prFirstWiring = buildPrFirstWiring({
+      store,
+      clock,
+      ledger,
+      llmRunner,
+      workspace,
+      gitHost,
+      verification,
+      callerId: args.callerId,
+      targetId: cfg.identity.target_id,
+      machineBlockSecret,
+      settings: prFirstSettings,
+    });
+
     if (args.dialogueCoordinator) {
       const outcome = await runOneMiddleReviewTurn({
         store,
@@ -188,6 +225,12 @@ async function main(argv: readonly string[]): Promise<number> {
         // phase-0-stabilization C: persist composed prompts under
         // `<workdir>/prompts/<session>/<turn>.md` instead of OS-tmp.
         workdirRoot: workdir,
+        // Phase 5 (audit §5-D): toggle the PR-first reviewer path.
+        reviewerPath: prFirstSettings.reviewerPrFirst ? "pr_first" : "envelope",
+        ...(prFirstSettings.reviewerPrFirst &&
+        prFirstWiring.reviewerInvoker != null
+          ? { reviewerInvoker: prFirstWiring.reviewerInvoker }
+          : {}),
       });
       process.stdout.write(`${JSON.stringify(outcome)}\n`);
       // P0-2 fix (PR #62 review): dispatch_no_match exits non-zero so CI
@@ -209,10 +252,15 @@ async function main(argv: readonly string[]): Promise<number> {
         targetId: cfg.identity.target_id,
         testCommands,
         environmentFingerprint: `node${process.version}`,
+        // Phase 5 (audit §5-D): toggle the PR-first lead path.
+        leadPath: prFirstSettings.leadPrFirst ? "pr_first" : "envelope",
       },
       // phase-0-stabilization C: persist composed prompts under
       // `<workdir>/prompts/<session>/<turn>.md` instead of OS-tmp.
       workdirRoot: workdir,
+      ...(prFirstSettings.leadPrFirst && prFirstWiring.leadInvoker != null
+        ? { leadInvoker: prFirstWiring.leadInvoker }
+        : {}),
     });
     process.stdout.write(`${JSON.stringify(outcome)}\n`);
     return outcome.kind === "noop" ||

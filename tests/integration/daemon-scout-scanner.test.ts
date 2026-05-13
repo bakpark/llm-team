@@ -127,15 +127,23 @@ async function persistInProgressSlice(
 
 describe("Phase 9b — scout-scanner daemon role", () => {
   let prevAllowFake: string | undefined;
+  let prevMachineSecret: string | undefined;
 
   beforeEach(() => {
     prevAllowFake = process.env.LLM_TEAM_ALLOW_FAKE_RUNNER;
+    prevMachineSecret = process.env.LLM_TEAM_MACHINE_BLOCK_SECRET;
     process.env.LLM_TEAM_ALLOW_FAKE_RUNNER = "1";
+    // Phase 5 (audit §5-D): daemon boots fail-loud without the machine-block
+    // secret. Tests opt in with a deterministic placeholder.
+    process.env.LLM_TEAM_MACHINE_BLOCK_SECRET = "test-machine-block-secret";
   });
 
   afterEach(() => {
     if (prevAllowFake == null) delete process.env.LLM_TEAM_ALLOW_FAKE_RUNNER;
     else process.env.LLM_TEAM_ALLOW_FAKE_RUNNER = prevAllowFake;
+    if (prevMachineSecret == null)
+      delete process.env.LLM_TEAM_MACHINE_BLOCK_SECRET;
+    else process.env.LLM_TEAM_MACHINE_BLOCK_SECRET = prevMachineSecret;
   });
 
   it("(a) runScoutScannerSweep persists PROPOSED RefactorBacklog row + ledger external_observation row, dedups on second pass", async () => {
