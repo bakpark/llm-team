@@ -99,6 +99,30 @@ export function requireMachineBlockSecretFromCfg(
   return requireMachineBlockSecret(settings.machineBlockSecretEnvName, env);
 }
 
+/**
+ * PR #125 self-review P1-1: toggle-gated fail-loud secret resolution.
+ *
+ * The audit §5-D DoD requires fail-loud when PR-first signing is active.
+ * Calling `requireMachineBlockSecretFromCfg` unconditionally at daemon boot
+ * caused a migration hazard: existing deployments running the legacy
+ * envelope path (both `experiments.lead_pr_first` and
+ * `experiments.reviewer_pr_first` = false, default) would abort on the next
+ * deploy if they had not pre-seeded `LLM_TEAM_MACHINE_BLOCK_SECRET`.
+ *
+ * This helper preserves the fail-loud intent for PR-first-enabled
+ * deployments while keeping envelope-only deployments operable without the
+ * secret. Returns `null` when both PR-first toggles are off — the wiring
+ * then skips invoker construction (which is the only consumer that signs).
+ */
+export function resolveMachineBlockSecretIfPrFirstEnabled(
+  cfg: TargetConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const settings = resolvePrFirstSettings(cfg);
+  if (!settings.leadPrFirst && !settings.reviewerPrFirst) return null;
+  return requireMachineBlockSecret(settings.machineBlockSecretEnvName, env);
+}
+
 export interface PrFirstWiringDeps {
   store: StorePort;
   clock: ClockPort;
@@ -109,7 +133,16 @@ export interface PrFirstWiringDeps {
   verification: VerificationPort;
   callerId: string;
   targetId: string;
-  machineBlockSecret: string;
+  /**
+   * Machine-block HMAC secret. Required when invokers are constructed
+   * (lead/reviewer PR-first signing). Pass `null` when both
+   * `experiments.{lead,reviewer}_pr_first` toggles are off — the wiring
+   * skips invoker construction and PR-watcher signature verification falls
+   * back to a never-matching key (verifyMachineBlock will reject any signed
+   * input, which is the safe default when the deployment opted out of
+   * PR-first). See PR #125 self-review P1-1.
+   */
+  machineBlockSecret: string | null;
   settings: PrFirstSettings;
   /** Trunk branch for lead PR open. */
   baseBranch?: string;
@@ -135,8 +168,14 @@ export function buildPrFirstWiring(deps: PrFirstWiringDeps): PrFirstWiring {
 
   // `llmRunner` is required for the invokers; recovery / watcher / dispatcher
   // do not need it. The recovery role omits llmRunner entirely (Phase 7a).
+  //
+  // PR #125 self-review P1-1: when `machineBlockSecret` is null (envelope-
+  // only deployment with both PR-first toggles off) the invokers + watcher
+  // are not constructed. The daemon/runner already gates invoker
+  // consumption on the same toggle state, so callers see `null` and fall
+  // back to the legacy envelope path.
   const leadInvoker =
-    deps.llmRunner != null
+    deps.llmRunner != null && deps.machineBlockSecret != null
       ? new LeadInvoker(
           {
             callerId: deps.callerId,
@@ -157,7 +196,7 @@ export function buildPrFirstWiring(deps: PrFirstWiringDeps): PrFirstWiring {
       : null;
 
   const reviewerInvoker =
-    deps.llmRunner != null
+    deps.llmRunner != null && deps.machineBlockSecret != null
       ? new ReviewerInvoker(
           {
             callerId: deps.callerId,
@@ -176,11 +215,18 @@ export function buildPrFirstWiring(deps: PrFirstWiringDeps): PrFirstWiring {
         )
       : null;
 
+  // PrWatcher signature verification requires the secret. When the secret
+  // is null (PR-first toggles off) the daemon/runner does not invoke the
+  // cycle prelude, but a non-null secret is still required by the watcher
+  // type. Pass an empty string sentinel so any accidental verify call
+  // rejects every signature (machine-block.verify uses constant-time
+  // compare against the supplied key — empty key never matches a real HMAC).
+  const watcherSecret = deps.machineBlockSecret ?? "";
   const prWatcher = new PrWatcher(
     {
       callerId: deps.callerId,
       targetId: deps.targetId,
-      machineBlockSecret: deps.machineBlockSecret,
+      machineBlockSecret: watcherSecret,
       ...(deps.settings.expectedBotAccount != null
         ? { expectedBotAccount: deps.settings.expectedBotAccount }
         : {}),

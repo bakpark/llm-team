@@ -21,7 +21,7 @@ import { runOneMiddleReviewTurn } from "../application/dialogue-coordinator.js";
 import { SystemClock } from "../ports/clock.js";
 import {
   buildPrFirstWiring,
-  requireMachineBlockSecretFromCfg,
+  resolveMachineBlockSecretIfPrFirstEnabled,
   resolvePrFirstSettings,
 } from "./pr-first-wiring.js";
 
@@ -128,7 +128,12 @@ async function main(argv: readonly string[]): Promise<number> {
   // Throws when the configured env var (default
   // `LLM_TEAM_MACHINE_BLOCK_SECRET`) is unset so PR-first signing/verify is
   // never silently bypassed.
-  const machineBlockSecret = requireMachineBlockSecretFromCfg(cfg);
+  //
+  // PR #125 self-review P1-1: toggle-gated. Envelope-only deployments skip
+  // the secret check; deployments with either `experiments.lead_pr_first`
+  // or `experiments.reviewer_pr_first` = true MUST provide the secret env
+  // var or startup aborts.
+  const machineBlockSecret = resolveMachineBlockSecretIfPrFirstEnabled(cfg);
   const prFirstSettings = resolvePrFirstSettings(cfg);
 
   const workdir = resolve(

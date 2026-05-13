@@ -18,7 +18,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FsMirrorGitHost } from "../../src/adapters/git-host/fs-mirror.js";
 import { FsStore } from "../../src/adapters/store/fs.js";
 import { FakeVerification } from "../../src/adapters/verification/fake.js";
@@ -27,6 +27,7 @@ import { FileLedger } from "../../src/application/ledger.js";
 import { validateOrThrow } from "../../src/application/config-validator.js";
 import {
   buildPrFirstWiring,
+  resolveMachineBlockSecretIfPrFirstEnabled,
   resolvePrFirstSettings,
 } from "../../src/cli/pr-first-wiring.js";
 import { MACHINE_BLOCK_SECRET_ENV_DEFAULT } from "../../src/application/machine-block.js";
@@ -183,5 +184,57 @@ describe("Phase 5 — buildPrFirstWiring", () => {
     expect(wiring.prWatcher).toBeDefined();
     expect(wiring.prFirstDispatcher).toBeDefined();
     expect(wiring.recoveryCoordinator).toBeDefined();
+  });
+
+  it("(j) PR #125 P1-1 — machineBlockSecret null + llmRunner non-null → invokers null (envelope-only deployment)", () => {
+    const { deps } = buildDeps({ withLlm: true });
+    const wiring = buildPrFirstWiring({ ...deps, machineBlockSecret: null });
+    expect(wiring.leadInvoker).toBeNull();
+    expect(wiring.reviewerInvoker).toBeNull();
+    // Non-invoker components still build so recovery role parity works.
+    expect(wiring.prWatcher).toBeDefined();
+    expect(wiring.prFirstDispatcher).toBeDefined();
+    expect(wiring.recoveryCoordinator).toBeDefined();
+    expect(wiring.outbox).toBeDefined();
+  });
+});
+
+describe("Phase 5 — resolveMachineBlockSecretIfPrFirstEnabled (PR #125 P1-1)", () => {
+  const ENV_NAME = "LLM_TEAM_MACHINE_BLOCK_SECRET";
+  let prev: string | undefined;
+  beforeEach(() => {
+    prev = process.env[ENV_NAME];
+  });
+  afterEach(() => {
+    if (prev == null) delete process.env[ENV_NAME];
+    else process.env[ENV_NAME] = prev;
+  });
+
+  it("(k) both toggles off + secret unset → returns null (envelope-only deploy boots)", () => {
+    delete process.env[ENV_NAME];
+    const cfg = validateOrThrow(targetWith({}));
+    expect(resolveMachineBlockSecretIfPrFirstEnabled(cfg, process.env)).toBeNull();
+  });
+
+  it("(l) lead_pr_first=true + secret unset → throws", () => {
+    delete process.env[ENV_NAME];
+    const cfg = validateOrThrow(
+      targetWith({ experiments: { lead_pr_first: true } }),
+    );
+    expect(() =>
+      resolveMachineBlockSecretIfPrFirstEnabled(cfg, process.env),
+    ).toThrow(/LLM_TEAM_MACHINE_BLOCK_SECRET/);
+  });
+
+  it("(m) reviewer_pr_first=true + secret set → returns the secret", () => {
+    const cfg = validateOrThrow(
+      targetWith({ experiments: { reviewer_pr_first: true } }),
+    );
+    expect(
+      resolveMachineBlockSecretIfPrFirstEnabled(cfg, {
+        ...process.env,
+        [ENV_NAME]: "live-secret",
+      }),
+    ).toBe("live-secret");
   });
 });

@@ -66,7 +66,7 @@ import { runOneInnerTurn } from "../application/turn-worker.js";
 import { SystemClock } from "../ports/clock.js";
 import {
   buildPrFirstWiring,
-  requireMachineBlockSecretFromCfg,
+  resolveMachineBlockSecretIfPrFirstEnabled,
   resolvePrFirstSettings,
 } from "./pr-first-wiring.js";
 import { runPrWatcherCyclePrelude } from "./pr-watcher-cycle.js";
@@ -202,7 +202,14 @@ async function main(argv: readonly string[]): Promise<number> {
   // `LLM_TEAM_MACHINE_BLOCK_SECRET`) is unset so PR-first signing/verify is
   // never silently bypassed in production. The secret is held in this scope
   // only — never logged, persisted, or threaded into prompts/ledger.
-  const machineBlockSecret = requireMachineBlockSecretFromCfg(cfg);
+  //
+  // PR #125 self-review P1-1: toggle-gated. Envelope-only deployments
+  // (both `experiments.lead_pr_first` and `experiments.reviewer_pr_first`
+  // = false) skip the secret check — PR-first signing is inactive so the
+  // fail-loud requirement does not apply. Operators flipping a toggle on
+  // MUST provide the secret env var; otherwise startup aborts at the next
+  // boot (matching the audit §5-D DoD for active PR-first deployments).
+  const machineBlockSecret = resolveMachineBlockSecretIfPrFirstEnabled(cfg);
   const prFirstSettings = resolvePrFirstSettings(cfg);
 
   const workdir = resolve(

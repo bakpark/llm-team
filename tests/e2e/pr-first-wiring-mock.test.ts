@@ -118,12 +118,17 @@ describe("Phase 5 — daemon PR-first wiring (audit P0-1)", () => {
     else process.env.LLM_TEAM_MACHINE_BLOCK_SECRET = prevMachineSecret;
   });
 
-  it("(a) daemon boot fails loud when LLM_TEAM_MACHINE_BLOCK_SECRET is unset", async () => {
+  it("(a) daemon boot fails loud when LLM_TEAM_MACHINE_BLOCK_SECRET is unset AND a PR-first toggle is on", async () => {
+    // PR #125 self-review P1-1: fail-loud is gated on at least one
+    // `experiments.{lead,reviewer}_pr_first` being true. Envelope-only
+    // deployments tolerate a missing secret (see (g)).
     delete process.env.LLM_TEAM_MACHINE_BLOCK_SECRET;
     const workdir = mkdtempSync(join(tmpdir(), "phase5-secret-"));
     const fixtureDir = mkdtempSync(join(tmpdir(), "phase5-fxt-"));
     process.env.LLM_TEAM_FAKE_FIXTURE_DIR = fixtureDir;
-    const targetPath = writeTarget(workdir);
+    const targetPath = writeTarget(workdir, {
+      experiments: { lead_pr_first: true },
+    });
 
     await expect(
       daemonMain([
@@ -144,13 +149,14 @@ describe("Phase 5 — daemon PR-first wiring (audit P0-1)", () => {
     ).rejects.toThrow(/LLM_TEAM_MACHINE_BLOCK_SECRET/);
   });
 
-  it("(b) custom governance.machine_block_secret_env_name routes the fail-loud check", async () => {
+  it("(b) custom governance.machine_block_secret_env_name routes the fail-loud check (PR-first toggle on)", async () => {
     delete process.env.LLM_TEAM_MACHINE_BLOCK_SECRET;
     delete process.env.LLM_TEAM_CUSTOM_SECRET;
     const workdir = mkdtempSync(join(tmpdir(), "phase5-secret-custom-"));
     const fixtureDir = mkdtempSync(join(tmpdir(), "phase5-fxt-"));
     process.env.LLM_TEAM_FAKE_FIXTURE_DIR = fixtureDir;
     const targetPath = writeTarget(workdir, {
+      experiments: { reviewer_pr_first: true },
       governance: {
         machine_block_secret_env_name: "LLM_TEAM_CUSTOM_SECRET",
       } as TargetOverrides["governance"],
@@ -173,6 +179,49 @@ describe("Phase 5 — daemon PR-first wiring (audit P0-1)", () => {
         "phase5-custom-secret",
       ]),
     ).rejects.toThrow(/LLM_TEAM_CUSTOM_SECRET/);
+  });
+
+  it("(g) PR #125 P1-1 — envelope-only cfg (both toggles off) boots without the secret env", async () => {
+    // Migration safety: a deployment running the legacy envelope path
+    // (default `experiments.{lead,reviewer}_pr_first === false`) must NOT
+    // abort on the next deploy when `LLM_TEAM_MACHINE_BLOCK_SECRET` is
+    // unset. Fail-loud only kicks in once an operator opts into PR-first
+    // by flipping a toggle.
+    delete process.env.LLM_TEAM_MACHINE_BLOCK_SECRET;
+    const workdir = mkdtempSync(join(tmpdir(), "phase5-envelope-only-"));
+    const fixtureDir = mkdtempSync(join(tmpdir(), "phase5-fxt-"));
+    process.env.LLM_TEAM_FAKE_FIXTURE_DIR = fixtureDir;
+    const targetPath = writeTarget(workdir);
+
+    const cap = captureStdout();
+    let code: number;
+    try {
+      code = await daemonMain([
+        "--role",
+        "turn-worker",
+        "--target",
+        targetPath,
+        "--workdir",
+        workdir,
+        "--once",
+        "--cycle-interval-ms",
+        "0",
+        "--fake-workspace",
+        "--fake-verification",
+        "--caller-id",
+        "phase5-envelope-only",
+      ]);
+    } finally {
+      cap.restore();
+    }
+    expect(code).toBe(0);
+    const last = cap.lines().at(-1) ?? "";
+    const parsed = JSON.parse(last) as {
+      role: string;
+      outcome: { kind: string };
+    };
+    expect(parsed.role).toBe("turn-worker");
+    expect(parsed.outcome.kind).toBe("noop");
   });
 
   it("(c) default cfg (no experiments) boots without invoking the PR-first path", async () => {
