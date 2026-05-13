@@ -170,15 +170,100 @@ describe("buildProductionProbeBuilder · per-op_kind routing", () => {
     expect(probeRes.externalId).toBe(opened.id);
   });
 
-  it("pr_open_op without surface → null (no_probe fallback for first-attempt crash)", async () => {
+  it("pr_open_op without surface AND without payload hints → null (no_probe)", async () => {
     const { store, gitHost, workspace } = makeDeps();
-    // No surface seeded.
+    // No surface seeded; pending row carries no `branch` payload hint.
     const build = buildProductionProbeBuilder({ store, workspace, gitHost });
     const probe = await build(
       candidate("pr_open_op"),
       pending("pr_open_op"),
     );
     expect(probe).toBeNull();
+  });
+
+  it("pr_open_op without surface but WITH payload branch hint → non-null probe (PR #127 review P1-1 surface-less fallback)", async () => {
+    const { store, gitHost, workspace } = makeDeps();
+    // No surface — Case A crash window between `outbox.begin(pr_open_op)`
+    // and the Step 8 ReviewSurface write. Lead-invoker persists `branch`
+    // on the pending row payload so recovery can still probe.
+    const idemKey = "K-OPEN-NO-SURFACE";
+    const opened = await gitHost.openPullRequest({
+      title: "t",
+      body: `body\n<!-- llm-team:pr-machine\nidempotency_key: ${idemKey}\n-->`,
+      headBranch: BRANCH,
+      baseBranch: "main",
+      draft: false,
+      labels: [],
+    });
+    const build = buildProductionProbeBuilder({ store, workspace, gitHost });
+    const probe = await build(
+      candidate("pr_open_op", idemKey),
+      pending("pr_open_op", {
+        idempotencyKey: idemKey,
+        surfaceRef: null,
+        resultDetail: JSON.stringify({ branch: BRANCH }),
+      }),
+    );
+    expect(probe).not.toBeNull();
+    expect(probe!.opKind).toBe("pr_open_op");
+    const probeRes = await runOutboxProbe({
+      ...(probe!),
+      idempotencyKey: idemKey,
+    } as unknown as Parameters<typeof runOutboxProbe>[0]);
+    expect(probeRes.recovered).toBe(true);
+    expect(probeRes.externalId).toBe(opened.id);
+  });
+
+  it("commit_op without surface but WITH payload branch hint → non-null probe (PR #127 review P1-1)", async () => {
+    const { store, gitHost, workspace } = makeDeps();
+    // No surface seeded — first-attempt crash window for commit_op.
+    const idemKey = "K-COMMIT-NO-SURFACE";
+    workspace.seedCommitTrailer(BRANCH, "commit-sha-X", {
+      "Idempotency-Key": idemKey,
+    });
+    const build = buildProductionProbeBuilder({ store, workspace, gitHost });
+    const probe = await build(
+      candidate("commit_op", idemKey),
+      pending("commit_op", {
+        idempotencyKey: idemKey,
+        surfaceRef: null,
+        resultDetail: JSON.stringify({
+          branch: BRANCH,
+          trailerKey: "Idempotency-Key",
+        }),
+      }),
+    );
+    expect(probe).not.toBeNull();
+    const probeRes = await runOutboxProbe({
+      ...(probe!),
+      idempotencyKey: idemKey,
+    } as unknown as Parameters<typeof runOutboxProbe>[0]);
+    expect(probeRes.recovered).toBe(true);
+    expect(probeRes.externalId).toBe("commit-sha-X");
+  });
+
+  it("push_op without surface but WITH payload branch+headSha hints → non-null probe (PR #127 review P1-1)", async () => {
+    const { store, gitHost, workspace } = makeDeps();
+    // No surface seeded — Case A crash window for push_op.
+    const expectedSha = "push-sha-X";
+    workspace.seedRemoteHead("origin", BRANCH, expectedSha);
+    const build = buildProductionProbeBuilder({ store, workspace, gitHost });
+    const probe = await build(
+      candidate("push_op", "K-PUSH-NO-SURFACE"),
+      pending("push_op", {
+        idempotencyKey: "K-PUSH-NO-SURFACE",
+        surfaceRef: null,
+        resultDetail: JSON.stringify({
+          branch: BRANCH,
+          headSha: expectedSha,
+          remote: "origin",
+        }),
+      }),
+    );
+    expect(probe).not.toBeNull();
+    const probeRes = await runOutboxProbe(probe!);
+    expect(probeRes.recovered).toBe(true);
+    expect(probeRes.externalId).toBe(expectedSha);
   });
 
   it("pr_update_op → non-null probe; routes to gitHost.findPullRequestByBodyMachineKey", async () => {

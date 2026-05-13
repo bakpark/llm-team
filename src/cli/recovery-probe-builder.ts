@@ -35,12 +35,16 @@
  *     and reads:
  *       - `surface.branch`         → commit_op/push_op/pr_open_op headBranch
  *       - `surface.pr_ref`         → ExternalRefHandle for PR ops
- *   - When the surface is absent (e.g. `pr_open_op` first attempt that
- *     crashed before the surface was persisted) the probe builder returns
- *     `null`, and the coordinator emits `recovered_skipped: no_probe` for
- *     that candidate. This is the correct fallback — the recovery path is
- *     only deterministic when the originating invoker persisted enough
- *     context onto the pending row / surface.
+ *   - When the surface is absent (PR #127 review P1-1, gpt5.5): for
+ *     `commit_op` / `push_op` / `pr_open_op` we fall back to the routing
+ *     hints persisted on the `outbox_pending` row's `result_detail`
+ *     payload (`branch`, `headSha`, `trailerKey`, `remote`). Lead-invoker
+ *     populates these on `outbox.begin` so the Case A crash window between
+ *     `outbox.begin(commit_op|push_op|pr_open_op)` and the ReviewSurface
+ *     write at Step 8 is recoverable without a surface. The other
+ *     `op_kinds` (pr_update/submit_review/merge/label/dismiss) require the
+ *     `pr_ref` from a previously-persisted ReviewSurface and still return
+ *     null when the surface is missing — that is the correct fallback.
  *
  * Configuration:
  *
@@ -99,41 +103,49 @@ export function buildProductionProbeBuilder(
   return async (candidate, pending) => {
     if (pending == null) return null;
     const surface = await loadReviewSurface(deps.store, pending);
+    // PR #127 review P1-1: surface-less fallback hints persisted on the
+    // outbox_pending row's payload by lead-invoker.
+    const hints = readPayloadHints(pending);
 
     switch (candidate.opKind) {
       case "commit_op": {
-        if (surface == null) return null;
+        const branch = surface?.branch ?? hints.branch;
+        if (branch == null) return null;
         const ctx: ProbeContext = {
           opKind: "commit_op",
           workspace: deps.workspace,
-          branch: surface.branch,
-          trailerKey,
+          branch,
+          trailerKey: hints.trailerKey ?? trailerKey,
           value: candidate.idempotencyKey,
           depth: commitDepth,
         };
         return ctx;
       }
       case "push_op": {
-        if (surface == null) return null;
+        const branch = surface?.branch ?? hints.branch;
+        // expectedSha must be known: surface.head_sha after Step 8, or the
+        // headSha hint persisted by lead-invoker on outbox.begin(push_op).
+        const expectedSha = surface?.head_sha ?? hints.headSha;
+        if (branch == null || expectedSha == null) return null;
         const ctx: ProbeContext = {
           opKind: "push_op",
           workspace: deps.workspace,
-          remote: remoteName,
-          branch: surface.branch,
+          remote: hints.remote ?? remoteName,
+          branch,
           // Outbox push_op completes by re-reading the remote head; the
-          // expected sha is the head-of-branch as recorded on the surface.
-          // For pending_without_posted (no completed write), `surface.head_sha`
-          // is the local sha the lead-invoker committed before pushing.
-          expectedSha: surface.head_sha,
+          // expected sha is the head-of-branch as recorded on the surface
+          // (or the lead-invoker hint when the surface is not yet written).
+          expectedSha,
         };
         return ctx;
       }
       case "pr_open_op": {
-        if (surface == null) return null;
+        const headBranch = surface?.branch ?? hints.branch;
+        if (headBranch == null) return null;
         const ctx: ProbeContext = {
           opKind: "pr_open_op",
           gitHost: deps.gitHost,
-          headBranch: surface.branch,
+          headBranch,
         };
         return ctx;
       }
@@ -268,4 +280,45 @@ function pickPayloadString(
   } catch {
     return null;
   }
+}
+
+/**
+ * PR #127 review P1-1 (gpt5.5): surface-less routing hints.
+ *
+ * Lead-invoker populates these on `outbox.begin` for commit_op / push_op /
+ * pr_open_op so a crash between begin and the Step 8 ReviewSurface write is
+ * still recoverable. All fields are optional — missing fields fall through
+ * to defaults (trailerKey/remote) or force a `no_probe` outcome (branch /
+ * headSha when no surface).
+ */
+interface PendingProbeHints {
+  branch?: string;
+  headSha?: string;
+  trailerKey?: string;
+  remote?: string;
+}
+
+function readPayloadHints(pending: PendingOutboxRow): PendingProbeHints {
+  const raw = pending.resultDetail;
+  if (raw == null || raw.length === 0) return {};
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+  const out: PendingProbeHints = {};
+  if (typeof parsed.branch === "string" && parsed.branch.length > 0) {
+    out.branch = parsed.branch;
+  }
+  if (typeof parsed.headSha === "string" && parsed.headSha.length > 0) {
+    out.headSha = parsed.headSha;
+  }
+  if (typeof parsed.trailerKey === "string" && parsed.trailerKey.length > 0) {
+    out.trailerKey = parsed.trailerKey;
+  }
+  if (typeof parsed.remote === "string" && parsed.remote.length > 0) {
+    out.remote = parsed.remote;
+  }
+  return out;
 }

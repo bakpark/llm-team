@@ -341,6 +341,11 @@ export class LeadInvoker {
       turnIndex: input.turnIndex,
       agentProfileId: input.agentProfileId,
       loopKind: input.parentLoop,
+      // PR #127 review P1-1 (gpt5.5): persist routing hints so the
+      // recovery probe builder can recover the Case A crash window
+      // between this `outbox.begin` and the Step 8 ReviewSurface write.
+      // Without these the probe builder fell back to `no_probe`.
+      payload: { branch: input.branch, trailerKey },
     });
     let commitSha: string;
     try {
@@ -396,6 +401,8 @@ export class LeadInvoker {
       turnIndex: input.turnIndex,
       agentProfileId: input.agentProfileId,
       loopKind: input.parentLoop,
+      // PR #127 review P1-1: surface-less probe hints.
+      payload: { branch: input.branch, headSha: commitSha, remote: remoteName },
     });
     try {
       await this.deps.workspace.push({
@@ -485,6 +492,11 @@ export class LeadInvoker {
       turnIndex: input.turnIndex,
       agentProfileId: input.agentProfileId,
       loopKind: input.parentLoop,
+      // PR #127 review P1-1: surface-less probe hints for the initial
+      // pr_open_op crash window (Case A). pr_update_op already has a
+      // persisted surface via input.existingSurface so the branch hint is
+      // harmless redundancy there.
+      payload: { branch: input.branch, headSha: commitSha },
     });
     let prRef: ExternalRefHandle;
     try {

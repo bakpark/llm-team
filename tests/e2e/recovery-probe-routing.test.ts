@@ -581,4 +581,158 @@ describe("recovery probe routing · e2e per-op_kind (issue #126)", () => {
     );
     expect(noProbe).toHaveLength(0);
   });
+
+  it("PR #127 review P1-1: pr_open_op surface-less Case A → recovered via payload hints", async () => {
+    // Crash window: outbox.begin(pr_open_op) succeeded but the ReviewSurface
+    // write at Step 8 never landed. Lead-invoker persists `branch` on the
+    // pending row payload so recovery still resolves the headBranch and
+    // probes `findOpenPullRequestByMachineKey` correctly.
+    const deps = makeBase();
+    // NOTE: NO seedSurface — this is the bug window.
+    const idemKey = "K-OPEN-CASEA";
+    await deps.gitHost.openPullRequest({
+      title: "t",
+      body: `body\n<!-- llm-team:pr-machine\nidempotency_key: ${idemKey}\n-->`,
+      headBranch: BRANCH,
+      baseBranch: "main",
+      draft: false,
+      labels: [],
+    });
+    await appendPending(deps.ledger, deps.clock, {
+      opKind: "pr_open_op",
+      idempotencyKey: idemKey,
+      surfaceRef: null,
+      resultDetail: JSON.stringify({ branch: BRANCH }),
+      loopKind: "inner",
+    });
+    const coordinator = makeCoordinator(deps);
+    const sweep = await coordinator.runOnce();
+    expect(
+      sweep.items.find(
+        (i) => i.kind === "recovered_skipped" && i.reason === "no_probe",
+      ),
+    ).toBeUndefined();
+    expect(
+      sweep.items.find((i) => i.kind === "recovered_backfilled"),
+    ).toBeDefined();
+  });
+
+  it("PR #127 review P1-2: Case B scan skips commit_op/push_op rows when the (session,turn) slot already has a receipt", async () => {
+    // Live lead happy path: commit_op (k1) and push_op (k2) are posted, but
+    // the live receipt stores only the terminal pr_open_op key (k3). Without
+    // slot-scoped dedup the scan would re-list k1/k2 as Case B candidates
+    // every sweep. With the fix, the receipt at slot (SESSION_ID, TURN_INDEX)
+    // covers them.
+    const deps = makeBase();
+    await seedSurface(deps.store);
+    // Append commit_op + push_op pending+posted rows (no recovery yet — we
+    // are simulating the live happy path, not Case A recovery).
+    await appendPending(deps.ledger, deps.clock, {
+      opKind: "commit_op",
+      idempotencyKey: "K1-COMMIT",
+      surfaceRef: null,
+      loopKind: "inner",
+    });
+    await deps.outbox.complete({
+      opKind: "commit_op",
+      idempotencyKey: "K1-COMMIT",
+      status: "posted",
+      externalId: "commit-sha",
+      callerId: CALLER,
+      targetId: TARGET,
+      objectId: SURFACE_ID,
+      manifestId: null,
+    });
+    await appendPending(deps.ledger, deps.clock, {
+      opKind: "push_op",
+      idempotencyKey: "K2-PUSH",
+      surfaceRef: null,
+      loopKind: "inner",
+    });
+    await deps.outbox.complete({
+      opKind: "push_op",
+      idempotencyKey: "K2-PUSH",
+      status: "posted",
+      externalId: HEAD_SHA,
+      callerId: CALLER,
+      targetId: TARGET,
+      objectId: SURFACE_ID,
+      manifestId: null,
+    });
+    // Live receipt — keyed by terminal `k3`, NOT k1/k2.
+    const receipt = AgentRunReceipt.parse({
+      session_id: SESSION_ID,
+      turn_index: TURN_INDEX,
+      parent_loop: "inner",
+      agent_profile_id: AGENT_PROFILE,
+      agent_role_in_session: "lead",
+      idempotency_key: "K3-PR-OPEN",
+      diagnostics_ref: "live",
+      external_review_id: null,
+      external_pr_id: "1",
+      commit_sha: "commit-sha",
+      exit_status: "ok",
+      recorded_at: ISO,
+    });
+    await deps.store.writeAtomic(
+      layout.agentRunReceipt(SESSION_ID, TURN_INDEX),
+      JSON.stringify(receipt),
+    );
+
+    const coordinator = makeCoordinator(deps);
+    const sweep = await coordinator.runOnce();
+    // No Case B candidates for commit_op / push_op — the slot is covered.
+    expect(sweep.scanned).toBe(0);
+    expect(sweep.items).toHaveLength(0);
+  });
+
+  it("PR #127 review P1-2: once outbox_recovered is emitted, subsequent sweeps do not re-list the same Case B candidate", async () => {
+    // Seed a posted_without_receipt scenario, run sweep 1 (recovers + emits
+    // outbox_recovered), then run sweep 2 — must not re-list the same row.
+    const deps = makeBase();
+    const surface = await seedSurface(deps.store);
+    const opened = await deps.gitHost.openPullRequest({
+      title: "t",
+      body: "x",
+      headBranch: surface.branch,
+      baseBranch: "main",
+      draft: false,
+      labels: [],
+    });
+    const idemKey = "K-CASEB-DEDUP";
+    const submitted = await deps.gitHost.submitPullRequestReview({
+      prRef: opened,
+      intent: "approve",
+      body: `ok\n<!-- llm-team:review-machine\nidempotency_key: ${idemKey}\n-->`,
+      idempotencyKey: idemKey,
+    });
+    await appendPending(deps.ledger, deps.clock, {
+      opKind: "submit_review_op",
+      idempotencyKey: idemKey,
+      loopKind: "middle",
+    });
+    await deps.outbox.complete({
+      opKind: "submit_review_op",
+      idempotencyKey: idemKey,
+      status: "posted",
+      externalId: submitted.externalReviewId,
+      externalReviewId: submitted.externalReviewId,
+      callerId: CALLER,
+      targetId: TARGET,
+      objectId: SURFACE_ID,
+      manifestId: null,
+      surfaceRef: SURFACE_ID,
+    });
+    const coordinator = makeCoordinator(deps);
+    const first = await coordinator.runOnce();
+    expect(first.scanned).toBe(1);
+    expect(
+      first.items.find((i) => i.kind === "recovered_backfilled"),
+    ).toBeDefined();
+    // Second sweep — `outbox_recovered` row already exists for this
+    // (op_kind, key); scan must skip the duplicate Case B candidate.
+    const second = await coordinator.runOnce();
+    expect(second.scanned).toBe(0);
+    expect(second.items).toHaveLength(0);
+  });
 });

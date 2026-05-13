@@ -189,9 +189,14 @@ export class RecoveryCoordinator {
    */
   async runOnce(): Promise<RecoverySweepResult> {
     // Cache receipts once per sweep.
-    const receipts = await this.indexReceipts();
+    const { keys: receiptKeys, slots: receiptSlots } = await this.indexReceipts();
     const candidates = await this.deps.outbox.scanRecoveryCandidatesFromLedger({
-      hasMatchingReceipt: async (k) => receipts.has(k),
+      hasMatchingReceipt: async (k) => receiptKeys.has(k),
+      // PR #127 review P1-2: turn-scoped fallback so commit_op/push_op
+      // posted rows aren't re-listed forever just because the live lead
+      // receipt only stores the terminal pr_open_op key.
+      hasReceiptForSlot: async (sessionId, turnIndex) =>
+        receiptSlots.has(`${sessionId}::${turnIndex}`),
     });
     const items: RecoveryItemOutcome[] = [];
     const pendingRows = await this.indexPendingOutboxRows();
@@ -330,13 +335,17 @@ export class RecoveryCoordinator {
   // Ledger introspection helpers
   // -------------------------------------------------------------
 
-  private async indexReceipts(): Promise<Set<string>> {
-    const out = new Set<string>();
+  private async indexReceipts(): Promise<{
+    keys: Set<string>;
+    slots: Set<string>;
+  }> {
+    const keys = new Set<string>();
+    const slots = new Set<string>();
     let names: string[];
     try {
       names = await this.deps.store.list("intents");
     } catch {
-      return out;
+      return { keys, slots };
     }
     for (const n of names) {
       if (!n.endsWith(".receipt.json")) continue;
@@ -348,9 +357,13 @@ export class RecoveryCoordinator {
       } catch {
         continue;
       }
-      out.add(receipt.idempotency_key);
+      keys.add(receipt.idempotency_key);
+      // PR #127 review P1-2: index by `(session_id, turn_index)` slot so
+      // the Case B scan can recognise a turn as covered even when the
+      // pending row's per-op key doesn't match the receipt's key.
+      slots.add(`${receipt.session_id}::${receipt.turn_index}`);
     }
-    return out;
+    return { keys, slots };
   }
 
   /**
