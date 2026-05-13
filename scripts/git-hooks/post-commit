@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# llm-team monitoring hook — POST commit metadata to infra ingest.
+# 실패해도 commit 자체는 성공해야 한다 — 모든 에러를 swallow.
+set -u
+
+INGEST_URL="${MONITORING_INGEST_URL:-http://localhost:8080}"
+
+# git common dir points to main .git regardless of worktree; its parent is the main repo root.
+common_git_dir="$(git rev-parse --git-common-dir 2>/dev/null || echo "")"
+if [ -n "$common_git_dir" ] && [ -d "$common_git_dir" ]; then
+  main_repo_root="$(cd "$common_git_dir/.." && pwd -P)"
+else
+  main_repo_root="$(git rev-parse --show-toplevel 2>/dev/null || echo unknown)"
+fi
+repo="$(basename "$main_repo_root")"
+sha="$(git rev-parse HEAD)"
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+author_email="$(git log -1 --pretty=format:'%ae')"
+committed_at="$(git log -1 --pretty=format:'%aI')"
+subject="$(git log -1 --pretty=format:'%s')"
+body="$(git log -1 --pretty=format:'%b')"
+files="$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null | jq -R . | jq -s . 2>/dev/null || echo '[]')"
+
+payload="$(jq -n \
+  --arg repo "$repo" \
+  --arg sha "$sha" \
+  --arg branch "$branch" \
+  --arg author_email "$author_email" \
+  --arg committed_at "$committed_at" \
+  --arg subject "$subject" \
+  --arg body "$body" \
+  --argjson files "$files" \
+  '{repo: $repo, sha: $sha, branch: $branch, author_email: $author_email,
+    committed_at: $committed_at, subject: $subject, body: $body, files_changed: $files}' \
+  2>/dev/null)"
+
+if [ -n "$payload" ]; then
+  curl -s -m 3 -o /dev/null \
+    -X POST "$INGEST_URL/git_commits" \
+    -H 'content-type: application/json' \
+    -d "$payload" 2>/dev/null || true
+fi
+
+exit 0
