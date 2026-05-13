@@ -101,6 +101,13 @@ export interface PendingOutboxRow {
   targetId: string;
   objectId: string;
   manifestId: string | null;
+  /**
+   * Raw `result_detail` from the pending ledger row. Issue #126: production
+   * probe routing for label/dismiss op_kinds reads `{ label }` /
+   * `{ externalReviewId }` from this field once Phase 6+ invokers populate
+   * it via `Outbox.begin({ payload })`. Null for current invokers.
+   */
+  resultDetail: string | null;
 }
 
 export interface RecoveryCoordinatorDeps {
@@ -154,10 +161,25 @@ export interface RecoverySweepResult {
 // --------------------------------------------------------------------------
 
 export class RecoveryCoordinator {
+  private buildProbe: ProbeBuilder;
+
   constructor(
     private readonly cfg: RecoveryCoordinatorCfg,
     private readonly deps: RecoveryCoordinatorDeps,
-  ) {}
+  ) {
+    this.buildProbe = deps.buildProbe;
+  }
+
+  /**
+   * Issue #126: late-bound probe builder. `buildPrFirstWiring` constructs
+   * the coordinator with a stub probe builder so non-recovery daemon
+   * roles can still receive the wiring without paying the production
+   * probe construction cost. The recovery role calls this once per sweep
+   * to install the role-specific routing.
+   */
+  setProbeBuilder(builder: ProbeBuilder): void {
+    this.buildProbe = builder;
+  }
 
   /**
    * One sweep. Daemon invokes this at boot and on a periodic timer.
@@ -167,9 +189,14 @@ export class RecoveryCoordinator {
    */
   async runOnce(): Promise<RecoverySweepResult> {
     // Cache receipts once per sweep.
-    const receipts = await this.indexReceipts();
+    const { keys: receiptKeys, slots: receiptSlots } = await this.indexReceipts();
     const candidates = await this.deps.outbox.scanRecoveryCandidatesFromLedger({
-      hasMatchingReceipt: async (k) => receipts.has(k),
+      hasMatchingReceipt: async (k) => receiptKeys.has(k),
+      // PR #127 review P1-2: turn-scoped fallback so commit_op/push_op
+      // posted rows aren't re-listed forever just because the live lead
+      // receipt only stores the terminal pr_open_op key.
+      hasReceiptForSlot: async (sessionId, turnIndex) =>
+        receiptSlots.has(`${sessionId}::${turnIndex}`),
     });
     const items: RecoveryItemOutcome[] = [];
     const pendingRows = await this.indexPendingOutboxRows();
@@ -198,7 +225,7 @@ export class RecoveryCoordinator {
         reason: "missing_pending_row",
       };
     }
-    const probe = await this.deps.buildProbe(candidate, pending);
+    const probe = await this.buildProbe(candidate, pending);
     if (probe == null) {
       return { kind: "recovered_skipped", candidate, reason: "no_probe" };
     }
@@ -308,13 +335,17 @@ export class RecoveryCoordinator {
   // Ledger introspection helpers
   // -------------------------------------------------------------
 
-  private async indexReceipts(): Promise<Set<string>> {
-    const out = new Set<string>();
+  private async indexReceipts(): Promise<{
+    keys: Set<string>;
+    slots: Set<string>;
+  }> {
+    const keys = new Set<string>();
+    const slots = new Set<string>();
     let names: string[];
     try {
       names = await this.deps.store.list("intents");
     } catch {
-      return out;
+      return { keys, slots };
     }
     for (const n of names) {
       if (!n.endsWith(".receipt.json")) continue;
@@ -326,9 +357,13 @@ export class RecoveryCoordinator {
       } catch {
         continue;
       }
-      out.add(receipt.idempotency_key);
+      keys.add(receipt.idempotency_key);
+      // PR #127 review P1-2: index by `(session_id, turn_index)` slot so
+      // the Case B scan can recognise a turn as covered even when the
+      // pending row's per-op key doesn't match the receipt's key.
+      slots.add(`${receipt.session_id}::${receipt.turn_index}`);
     }
-    return out;
+    return { keys, slots };
   }
 
   /**
@@ -370,6 +405,7 @@ export class RecoveryCoordinator {
         targetId: row.target_id,
         objectId: row.object_id,
         manifestId: row.manifest_id,
+        resultDetail: row.result_detail,
       });
     }
     return map;

@@ -173,6 +173,26 @@ export interface OutboxScanInput {
    * receipt schema; receipt knowledge stays in the caller (plan §7-3).
    */
   hasMatchingReceipt: (idempotencyKey: string) => Promise<boolean>;
+  /**
+   * PR #127 review P1-2 (gpt5.5): slot-scoped receipt check.
+   *
+   * Live lead receipt records only the terminal `pr_open_op` / `pr_update_op`
+   * idempotency key (`k3`), not the per-step `commit_op` (`k1`) or `push_op`
+   * (`k2`) keys. Without this hook, every normally-completed lead turn
+   * resurfaces its commit/push posted rows as `posted_without_receipt`
+   * candidates on every sweep (the live receipt does not match `k1`/`k2`).
+   * The receipt's `(session_id, turn_index)` slot is the canonical
+   * "turn covered" marker — if any receipt exists for the slot tied to a
+   * pending outbox row, the lead/reviewer chain is considered covered and
+   * we skip the duplicate Case B candidate.
+   *
+   * Optional: callers that only have the key→presence index can omit this
+   * (legacy behaviour preserved).
+   */
+  hasReceiptForSlot?: (
+    sessionId: string,
+    turnIndex: number,
+  ) => Promise<boolean>;
 }
 
 export interface OutboxDeps {
@@ -451,6 +471,11 @@ export class Outbox {
         hasPosted: boolean;
         hasFailed: boolean;
         hasRecovered: boolean;
+        // PR #127 review P1-2: slot tuple captured from the pending row so
+        // the Case B scan can fall back to a turn-scoped receipt check when
+        // the per-op key (k1/k2) doesn't match the live receipt's k3.
+        sessionId: string | null;
+        turnIndex: number | null;
       }
     >();
 
@@ -470,10 +495,20 @@ export class Outbox {
         hasPosted: false,
         hasFailed: false,
         hasRecovered: false,
+        sessionId: null,
+        turnIndex: null,
       };
       switch (row.action_kind) {
         case "outbox_pending":
           cur.hasPending = true;
+          // Only the pending row carries the receipt slot tuple (invokers
+          // populate session_id / turn_index on outbox.begin). Capture once.
+          if (cur.sessionId == null && row.session_id != null) {
+            cur.sessionId = row.session_id;
+          }
+          if (cur.turnIndex == null && row.turn_index != null) {
+            cur.turnIndex = row.turn_index;
+          }
           break;
         case "outbox_posted":
           cur.hasPosted = true;
@@ -504,14 +539,36 @@ export class Outbox {
           mode: "pending_without_posted",
         });
       } else if (v.hasPosted) {
+        // PR #127 review P1-2 (gpt5.5): dedup — once a recovery sweep has
+        // emitted `outbox_recovered` for this (op_kind, key), do not re-list
+        // it as a Case B candidate on subsequent sweeps. The
+        // RecoveryCoordinator handles the receipt backfill itself; further
+        // sweeps would only repeat that no-op.
+        if (v.hasRecovered) continue;
         const receiptOk = await input.hasMatchingReceipt(v.key);
-        if (!receiptOk) {
-          candidates.push({
-            opKind: v.opKind,
-            idempotencyKey: v.key,
-            mode: "posted_without_receipt",
-          });
+        if (receiptOk) continue;
+        // Slot-scoped fallback: lead-invoker writes one receipt per turn
+        // keyed by the terminal `k3` (pr_open/pr_update). The earlier
+        // `commit_op` / `push_op` posted rows carry distinct keys (`k1`/`k2`)
+        // and never match `hasMatchingReceipt`. If any receipt exists for
+        // the same `(session_id, turn_index)` slot as the pending row, the
+        // turn is covered and we skip the duplicate candidate.
+        if (
+          input.hasReceiptForSlot != null &&
+          v.sessionId != null &&
+          v.turnIndex != null
+        ) {
+          const slotOk = await input.hasReceiptForSlot(
+            v.sessionId,
+            v.turnIndex,
+          );
+          if (slotOk) continue;
         }
+        candidates.push({
+          opKind: v.opKind,
+          idempotencyKey: v.key,
+          mode: "posted_without_receipt",
+        });
       }
     }
     return candidates;
