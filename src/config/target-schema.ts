@@ -35,6 +35,26 @@ export const Governance = z
     human_team_cache_ttl_seconds: z.number().int().positive().default(300),
     human_team_provider: HumanTeamProvider.default("fs-mirror"),
     unauthorized_author_alert: z.boolean().default(false),
+    /**
+     * Phase 5 (cli-spicy-anchor.md §11-3 + audit §5-D): env var name from
+     * which `requireMachineBlockSecret` reads the HMAC secret used to sign
+     * and verify `<!-- llm-team:{pr,review}-machine ... -->` blocks. The
+     * daemon fails loud at startup if the named variable is unset. Default
+     * keeps the historical name `LLM_TEAM_MACHINE_BLOCK_SECRET`.
+     */
+    machine_block_secret_env_name: z.string().min(1).optional(),
+    /**
+     * Phase 5 PR-watcher gate ④(a): authorized GitHub bot account
+     * (review.author) for the orchestrator's reviewer surface. When set the
+     * watcher rejects reviews authored by anyone else.
+     */
+    bot_account: z.string().min(1).optional(),
+    /**
+     * Phase 5 PR-watcher gate ④(b): whitelist of `agent_profile_id` values
+     * that may author the canonical machine review. Defaults to the four
+     * built-in profiles (atlas / forge / sentinel / scout).
+     */
+    known_agent_profile_ids: z.array(z.string().min(1)).optional(),
   })
   .strict()
   .refine(
@@ -415,6 +435,23 @@ export const FailurePolicy = z
   .strict();
 export type FailurePolicy = z.infer<typeof FailurePolicy>;
 
+/**
+ * Phase 5 (cli-spicy-anchor.md §1 + audit §5-D): per-path PR-first
+ * activation toggles. Both default `false` so the legacy envelope path
+ * remains the production default until operators opt in. Toggling either
+ * field activates the corresponding invoker wire-up inside the daemon
+ * (turn-worker / outer-coordinator for lead, dialogue-coordinator for
+ * reviewer); the toggle has no effect when the daemon role does not
+ * consume it.
+ */
+export const Experiments = z
+  .object({
+    lead_pr_first: z.boolean().default(false),
+    reviewer_pr_first: z.boolean().default(false),
+  })
+  .strict();
+export type Experiments = z.infer<typeof Experiments>;
+
 export const TargetConfig = z
   .object({
     identity: Identity,
@@ -433,6 +470,7 @@ export const TargetConfig = z
     invariant_enforcement: InvariantEnforcement.optional(),
     context_budget: ContextBudget.optional(),
     failure_policy: FailurePolicy.optional(),
+    experiments: Experiments.optional(),
   })
   .strict();
 
