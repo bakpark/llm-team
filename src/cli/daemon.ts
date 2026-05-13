@@ -70,6 +70,7 @@ import {
   resolvePrFirstSettings,
 } from "./pr-first-wiring.js";
 import { runPrWatcherCyclePrelude } from "./pr-watcher-cycle.js";
+import { buildProductionProbeBuilder } from "./recovery-probe-builder.js";
 
 type DaemonRole =
   | "turn-worker"
@@ -592,10 +593,19 @@ async function main(argv: readonly string[]): Promise<number> {
           // Phase 4 lease-sweep already ran above. Phase 5 audit P0-1
           // additionally invokes the PR-first `RecoveryCoordinator` so
           // outbox crash-recovery (Case A pending_without_posted, Case B
-          // posted_without_receipt) ledger rows are surfaced. The default
-          // `buildProbe` returns null (no provider-specific probe is wired
-          // here yet) so candidates report `recovered_skipped: no_probe`
-          // until a probe builder lands — but the sweep itself runs.
+          // posted_without_receipt) ledger rows are surfaced. Issue #126:
+          // production probe routing is wired here (role-specific port
+          // resolution per pr-first-wiring.ts contract) — the coordinator
+          // built by `buildPrFirstWiring` defaults to a stub `buildProbe`
+          // that the daemon overrides before each sweep so candidates
+          // actually recover instead of reporting `recovered_skipped: no_probe`.
+          prFirstWiring.recoveryCoordinator.setProbeBuilder(
+            buildProductionProbeBuilder({
+              store,
+              workspace,
+              gitHost,
+            }),
+          );
           const recoveryResult = await prFirstWiring.recoveryCoordinator.runOnce();
           outcomeJson = JSON.stringify({
             role: args.role,

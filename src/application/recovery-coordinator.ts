@@ -101,6 +101,13 @@ export interface PendingOutboxRow {
   targetId: string;
   objectId: string;
   manifestId: string | null;
+  /**
+   * Raw `result_detail` from the pending ledger row. Issue #126: production
+   * probe routing for label/dismiss op_kinds reads `{ label }` /
+   * `{ externalReviewId }` from this field once Phase 6+ invokers populate
+   * it via `Outbox.begin({ payload })`. Null for current invokers.
+   */
+  resultDetail: string | null;
 }
 
 export interface RecoveryCoordinatorDeps {
@@ -154,10 +161,25 @@ export interface RecoverySweepResult {
 // --------------------------------------------------------------------------
 
 export class RecoveryCoordinator {
+  private buildProbe: ProbeBuilder;
+
   constructor(
     private readonly cfg: RecoveryCoordinatorCfg,
     private readonly deps: RecoveryCoordinatorDeps,
-  ) {}
+  ) {
+    this.buildProbe = deps.buildProbe;
+  }
+
+  /**
+   * Issue #126: late-bound probe builder. `buildPrFirstWiring` constructs
+   * the coordinator with a stub probe builder so non-recovery daemon
+   * roles can still receive the wiring without paying the production
+   * probe construction cost. The recovery role calls this once per sweep
+   * to install the role-specific routing.
+   */
+  setProbeBuilder(builder: ProbeBuilder): void {
+    this.buildProbe = builder;
+  }
 
   /**
    * One sweep. Daemon invokes this at boot and on a periodic timer.
@@ -198,7 +220,7 @@ export class RecoveryCoordinator {
         reason: "missing_pending_row",
       };
     }
-    const probe = await this.deps.buildProbe(candidate, pending);
+    const probe = await this.buildProbe(candidate, pending);
     if (probe == null) {
       return { kind: "recovered_skipped", candidate, reason: "no_probe" };
     }
@@ -370,6 +392,7 @@ export class RecoveryCoordinator {
         targetId: row.target_id,
         objectId: row.object_id,
         manifestId: row.manifest_id,
+        resultDetail: row.result_detail,
       });
     }
     return map;
