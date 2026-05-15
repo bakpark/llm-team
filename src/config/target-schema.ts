@@ -26,6 +26,17 @@ export type ProfileCfg = z.infer<typeof ProfileCfg>;
 export const HumanTeamProvider = z.enum(["github", "fs-mirror"]);
 export type HumanTeamProvider = z.infer<typeof HumanTeamProvider>;
 
+/**
+ * TCC-GOVERNANCE `git_host_provider` (Phase 6.0a) — selects the
+ * `GitHostPort` adapter the daemon binds. `fs-mirror` (default) keeps the
+ * Phase 1-5 in-process PR mirror used by tests and self-hosting smoke;
+ * `github` opts the deployment into the `gh pr` CLI adapter for real PR
+ * lifecycle on a target repo. The schema default preserves backward
+ * compatibility — deployments that never set the field stay on fs-mirror.
+ */
+export const GitHostProvider = z.enum(["github", "fs-mirror"]);
+export type GitHostProvider = z.infer<typeof GitHostProvider>;
+
 export const Governance = z
   .object({
     human_team: z.string().min(1),
@@ -55,6 +66,26 @@ export const Governance = z
      * built-in profiles (atlas / forge / sentinel / scout).
      */
     known_agent_profile_ids: z.array(z.string().min(1)).optional(),
+    /**
+     * Phase 6.0a — `GitHostPort` adapter selector. `fs-mirror` (default)
+     * keeps the in-process PR mirror used by tests/self-host smoke;
+     * `github` routes PR open/update/merge/review through the `gh pr` CLI
+     * against `git_host_repo`. See `[[git-host-factory]]`.
+     */
+    git_host_provider: GitHostProvider.default("fs-mirror"),
+    /**
+     * Phase 6.0a — `<owner>/<name>` repo identifier passed to
+     * `gh pr --repo`. Required when `git_host_provider="github"`; ignored
+     * for `fs-mirror`. Cross-field validation enforces presence at
+     * `validateOrThrow`.
+     */
+    git_host_repo: z.string().min(1).optional(),
+    /**
+     * Phase 6.0a — optional label prefix applied to every PR label
+     * (`<prefix>/<label>`). Mirrors `GitHubGitHostOptions.labelPrefix`.
+     * Useful for isolating bot-authored PRs from production labels.
+     */
+    git_host_label_prefix: z.string().min(1).optional(),
   })
   .strict()
   .refine(
@@ -63,6 +94,14 @@ export const Governance = z
       message:
         "control_issue_number and contract_change_issue_number must differ",
       path: ["contract_change_issue_number"],
+    },
+  )
+  .refine(
+    (g) => g.git_host_provider !== "github" || g.git_host_repo != null,
+    {
+      message:
+        "git_host_repo (\"<owner>/<name>\") is required when git_host_provider=\"github\"",
+      path: ["git_host_repo"],
     },
   );
 

@@ -12,7 +12,7 @@ import { FakeVerification } from "../adapters/verification/fake.js";
 import { ShellVerification } from "../adapters/verification/shell.js";
 import { GitWorktreeWorkspace } from "../adapters/workspace/git-worktree.js";
 import { FakeWorkspace } from "../adapters/workspace/fake.js";
-import { FsMirrorGitHost } from "../adapters/git-host/fs-mirror.js";
+import { buildGitHost } from "../adapters/git-host/factory.js";
 import { validateOrThrow } from "../application/config-validator.js";
 import { FileLedger } from "../application/ledger.js";
 import { LOG_DAEMON_PATH } from "../application/persistence-layout.js";
@@ -195,7 +195,9 @@ async function main(argv: readonly string[]): Promise<number> {
     // Phase 5 (audit §5-D, P0-1): construct the PR-first wiring once per
     // runner invocation. `experiments.{lead,reviewer}_pr_first` toggles in
     // target.json decide whether the invokers are actually consumed.
-    const gitHost = new FsMirrorGitHost(store);
+    //
+    // Phase 6.0a: GitHostPort selector via `governance.git_host_provider`.
+    const gitHost = buildGitHost(cfg.governance, { store });
     const prFirstWiring = buildPrFirstWiring({
       store,
       clock,

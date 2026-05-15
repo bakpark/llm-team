@@ -49,6 +49,7 @@ import { FakeWorkspace } from "../adapters/workspace/fake.js";
 import { FsHumanSignal } from "../adapters/human-signal/fs.js";
 import { FsMirrorIssueTracker } from "../adapters/issue-tracker/fs-mirror.js";
 import { FsMirrorGitHost } from "../adapters/git-host/fs-mirror.js";
+import { buildGitHost } from "../adapters/git-host/factory.js";
 import { buildTeamMembership } from "../adapters/team-membership/factory.js";
 import { resolveEnforcementLevel } from "../application/invariant-enforcement.js";
 import { validateOrThrow } from "../application/config-validator.js";
@@ -318,10 +319,13 @@ async function main(argv: readonly string[]): Promise<number> {
 
     // Phase 5 (audit §5-D, P0-1): build the PR-first invoker/dispatcher/
     // watcher graph. Default `experiments.{lead,reviewer}_pr_first === false`
-    // keeps the legacy envelope path active until operators opt in. The
-    // `FsMirrorGitHost` adapter is wired here too — production GitHub-API
-    // adapter selection is a separate concern (Phase 6+).
-    const gitHost = new FsMirrorGitHost(store);
+    // keeps the legacy envelope path active until operators opt in.
+    //
+    // Phase 6.0a: GitHostPort adapter is now resolved from
+    // `governance.git_host_provider` (default `fs-mirror`). Set
+    // `git_host_provider: "github"` + `git_host_repo: "<owner>/<name>"`
+    // for production PR lifecycle on a real repo.
+    const gitHost = buildGitHost(cfg.governance, { store });
     const prFirstWiring = buildPrFirstWiring({
       store,
       clock,
