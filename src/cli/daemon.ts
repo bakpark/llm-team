@@ -273,10 +273,16 @@ async function main(argv: readonly string[]): Promise<number> {
         ? new MultiProfileLlmRunner(buildRunnerRegistry(cfg, { allowFake }))
         : null;
 
+    // Phase 6.0b: `repoRoot` derives from `identity.agent_cwd` (external
+    // target) or falls back to `process.cwd()` (self-hosting / legacy).
+    // Without this fallthrough the worktree is anchored to the orchestrator
+    // process cwd and `git push` runs from the wrong repository — see
+    // bakpark/claude real-cycle attempt where push targeted the llm-team
+    // origin instead of the external target's `bakpark/claude` remote.
     const workspace = args.fakeWorkspace
       ? new FakeWorkspace(resolve(workdir, "workspaces"))
       : new GitWorktreeWorkspace({
-          repoRoot: process.cwd(),
+          repoRoot: cfg.identity.agent_cwd ?? process.cwd(),
           workspacesDir: resolve(workdir, "workspaces"),
         });
 

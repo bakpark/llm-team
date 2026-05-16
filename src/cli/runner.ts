@@ -178,7 +178,8 @@ async function main(argv: readonly string[]): Promise<number> {
     const workspace = args.fakeWorkspace
       ? new FakeWorkspace(resolve(workdir, "workspaces"))
       : new GitWorktreeWorkspace({
-          repoRoot: process.cwd(),
+          // Phase 6.0b: external target → agent_cwd; self-hosting → cwd.
+          repoRoot: cfg.identity.agent_cwd ?? process.cwd(),
           workspacesDir: resolve(workdir, "workspaces"),
         });
 
