@@ -47,6 +47,17 @@ export interface WorkspacePort {
   prepareInnerWorkspace(input: {
     sliceId: string;
     trunkBaseRevision: string;
+    /**
+     * Phase 6.0c — explicit branch name override. When omitted, adapters
+     * fall back to their default `<branchPrefix><sliceId>` (e.g. `slice/<id>`
+     * for `GitWorktreeWorkspace`). Outer phases (parent_kind=milestone)
+     * pass through the lead-invoker's `branch` so the worktree is created
+     * on the same ref that `push_op` later targets — without this the
+     * worktree branch (`slice/<m>`) and push branch (`spec/<m>/discovery`)
+     * diverge and `git push` fails with "src refspec ... does not match
+     * any".
+     */
+    branch?: string;
   }): Promise<PreparedWorkspace>;
 
   /**

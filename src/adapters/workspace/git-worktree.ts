@@ -39,9 +39,13 @@ export class GitWorktreeWorkspace implements WorkspacePort {
   async prepareInnerWorkspace(input: {
     sliceId: string;
     trunkBaseRevision: string;
+    branch?: string;
   }): Promise<PreparedWorkspace> {
     const wt = this.worktreePath(input.sliceId);
-    const branch = this.branchName(input.sliceId);
+    // Phase 6.0c: callers (outer-turn) override the default `slice/<id>`
+    // when they need a phase-specific branch (e.g. `spec/<m>/discovery`)
+    // that matches the eventual `push_op` refspec.
+    const branch = input.branch ?? this.branchName(input.sliceId);
     if (!(await pathExists(wt))) {
       mkdirSync(dirname(wt), { recursive: true });
       await git(this.cfg.repoRoot, [

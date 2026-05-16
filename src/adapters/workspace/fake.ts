@@ -77,6 +77,7 @@ export class FakeWorkspace implements WorkspacePort {
   async prepareInnerWorkspace(input: {
     sliceId: string;
     trunkBaseRevision: string;
+    branch?: string;
   }): Promise<PreparedWorkspace> {
     const dir = resolve(this.rootDir, input.sliceId);
     mkdirSync(dir, { recursive: true });

@@ -221,9 +221,13 @@ export class LeadInvoker {
     let leadIntent: LeadIntent | null = null;
 
     // --- Step 1+2: workspace prepare + callAgent with dirty-worktree retry --
+    // Phase 6.0c: pass `input.branch` through so the worktree is created on
+    // the same ref that the eventual `push_op` targets (outer phases use
+    // `spec/<m>/discovery` etc., not the default `slice/<m>`).
     const prep = await this.deps.workspace.prepareInnerWorkspace({
       sliceId: input.sliceId,
       trunkBaseRevision: input.trunkBaseRevision,
+      branch: input.branch,
     });
 
     while (attempt < retryCap) {
@@ -292,6 +296,32 @@ export class LeadInvoker {
             : "agent_call_failed",
         detail: lastFailure?.detail ?? "unknown",
         attempts: attempt,
+      };
+    }
+
+    // ---- Step 3.5: Phase 6.0d — outer phase synthetic spec file ---------
+    // Outer phases (parent_kind=milestone) produce LeadIntent envelopes
+    // that describe a spec proposal in `artifacts.problem_framing`,
+    // `scope_boundary`, etc., but rarely declare `artifacts.files`. With
+    // a real `WorkspacePort` (i.e. `git-worktree`) an empty `files` ⇒
+    // empty commit ⇒ `git push` of an unchanged branch fails the refspec
+    // match. We synthesize `docs/specs/<milestone_id>/<phase>.md` from
+    // the envelope/LeadIntent so every outer turn produces a real diff
+    // and the PR has reviewable content. Inner slice paths
+    // (parent_kind=slice) keep the legacy "agent must declare files"
+    // contract — code changes can't be safely synthesized.
+    if (
+      input.parentKind === "milestone" &&
+      extractTrackedFilesFromEnvelope(agentOut.envelope).length === 0
+    ) {
+      injectOuterPhaseSpecFile(agentOut.envelope, {
+        milestoneId: input.parentId,
+        phase: input.parentPhase ?? input.phaseOrPurpose,
+        leadIntent,
+      });
+      leadIntent = {
+        ...leadIntent,
+        changed_files: extractTrackedFilesFromEnvelope(agentOut.envelope),
       };
     }
 
@@ -773,6 +803,110 @@ interface EnvelopePatchArtifacts {
   decision_needed?: string;
   verification_notes?: string;
   open_questions?: string;
+}
+
+/**
+ * Phase 6.0d — synthesize `docs/specs/<milestone_id>/<phase>.md` from the
+ * envelope's narrative artifacts when an outer-phase atlas turn produces
+ * no `artifacts.files`. Mutates `envelope.artifacts.files` in place so the
+ * downstream `extractPatchFiles` / `extractTrackedFilesFromEnvelope`
+ * helpers stay the single source of truth for the commit payload.
+ *
+ * The synthesized markdown serializes LeadIntent.summary +
+ * envelope.artifacts narrative fields. Mirrors the
+ * `outer Discovery → docs/specs/<milestone>/discovery.md` mapping in
+ * `cli-spicy-anchor.md §12 PR surface table` — the plan documented this
+ * convention but the lead-invoker bridge never enforced it, so real-GH
+ * outer cycles produced empty commits and `git push` rejected the
+ * refspec as unmatched.
+ */
+function injectOuterPhaseSpecFile(
+  envelope: Envelope,
+  input: {
+    milestoneId: string;
+    phase: string;
+    leadIntent: LeadIntent;
+  },
+): void {
+  const slug = (input.phase ?? "draft").toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+  const path = `docs/specs/${input.milestoneId}/${slug}.md`;
+  const content = renderOuterPhaseMarkdown({
+    milestoneId: input.milestoneId,
+    phase: input.phase,
+    leadIntent: input.leadIntent,
+    artifacts: envelope.artifacts,
+  });
+  // Defensive: build/extend `artifacts.files` without trampling other
+  // fields the agent emitted (problem_framing, scope_boundary, etc.).
+  const artifacts =
+    envelope.artifacts != null && typeof envelope.artifacts === "object"
+      ? { ...(envelope.artifacts as Record<string, unknown>) }
+      : ({} as Record<string, unknown>);
+  const existing = Array.isArray((artifacts as { files?: unknown }).files)
+    ? ((artifacts as { files?: unknown }).files as unknown[])
+    : [];
+  artifacts.files = [...existing, { path, content }];
+  envelope.artifacts = artifacts as Envelope["artifacts"];
+}
+
+function renderOuterPhaseMarkdown(input: {
+  milestoneId: string;
+  phase: string;
+  leadIntent: LeadIntent;
+  artifacts: unknown;
+}): string {
+  const a =
+    input.artifacts != null && typeof input.artifacts === "object"
+      ? (input.artifacts as Record<string, unknown>)
+      : {};
+  const lines: string[] = [];
+  lines.push(`# ${input.phase} — ${input.milestoneId}`);
+  lines.push("");
+  if (input.leadIntent.summary.length > 0) {
+    lines.push("## Summary");
+    lines.push("");
+    lines.push(input.leadIntent.summary);
+    lines.push("");
+  }
+  const sections: Array<[string, unknown]> = [
+    ["Problem framing", a.problem_framing],
+    ["User value", a.user_value],
+    ["Scope boundary", a.scope_boundary],
+    ["Assumptions", a.assumptions],
+    ["Open questions", a.open_questions],
+    ["Review notes", a.review_notes],
+    ["Review history", a.review_history],
+  ];
+  for (const [title, value] of sections) {
+    if (value == null) continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    if (typeof value === "string" && value.length === 0) continue;
+    lines.push(`## ${title}`);
+    lines.push("");
+    lines.push(
+      typeof value === "string" ? value : "```json\n" + JSON.stringify(value, null, 2) + "\n```",
+    );
+    lines.push("");
+  }
+  if (
+    input.leadIntent.decision_needed != null &&
+    input.leadIntent.decision_needed.length > 0
+  ) {
+    lines.push("## Decision needed");
+    lines.push("");
+    lines.push(input.leadIntent.decision_needed);
+    lines.push("");
+  }
+  if (
+    input.leadIntent.open_questions != null &&
+    input.leadIntent.open_questions.length > 0
+  ) {
+    lines.push("## Open questions (LeadIntent)");
+    lines.push("");
+    lines.push(input.leadIntent.open_questions);
+    lines.push("");
+  }
+  return lines.join("\n");
 }
 
 function extractPatchFiles(
