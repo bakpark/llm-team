@@ -42,6 +42,8 @@ import {
 } from "../domain/schema/agent-run-receipt.js";
 import { LeadIntent as LeadIntentSchema } from "../domain/schema/lead-intent.js";
 import type { LeadIntent } from "../domain/schema/lead-intent.js";
+import { Milestone } from "../domain/schema/milestone.js";
+import type { Milestone as MilestoneT } from "../domain/schema/milestone.js";
 import {
   ReviewSurface,
   type ReviewSurface as ReviewSurfaceT,
@@ -643,6 +645,21 @@ export class LeadInvoker {
       JSON.stringify(surface, null, 2),
     );
 
+    // Phase 6.0e: link the ReviewSurface back to the parent milestone so
+    // subsequent outer turns find `existingSurface` via
+    // `loadExistingReviewSurfaceForLead` and route to pr_update_op instead
+    // of pr_open_op. Without this, every outer turn after the first hits
+    // "PR already exists" from `gh pr create` (bakpark/claude real-cycle
+    // turn 2 reproduced this exact failure mode).
+    if (input.parentKind === "milestone" && input.parentPhase != null) {
+      await linkMilestoneReviewSurfaceId(
+        this.deps.store,
+        input.parentId,
+        input.parentPhase,
+        surfaceId,
+      );
+    }
+
     // ---- Step 9: AgentRunReceipt + LeadIntent persist + ledger row --------
     const receipt: AgentRunReceiptT = AgentRunReceipt.parse({
       session_id: input.sessionId,
@@ -803,6 +820,53 @@ interface EnvelopePatchArtifacts {
   decision_needed?: string;
   verification_notes?: string;
   open_questions?: string;
+}
+
+/**
+ * Phase 6.0e — link a freshly-created ReviewSurface back to its parent
+ * milestone's `review_surface_ids[<phase_key>]`. Without this, the lookup
+ * in `loadExistingReviewSurfaceForLead` returns `null` on every
+ * subsequent outer turn and the lead path re-issues `pr_open_op` against
+ * an already-existing PR. Idempotent: rewrites the milestone even if the
+ * slot is already populated (always-current invariant).
+ */
+async function linkMilestoneReviewSurfaceId(
+  store: StorePort,
+  milestoneId: string,
+  phase: "Discovery" | "Specification" | "Planning" | "Validation",
+  reviewSurfaceId: string,
+): Promise<void> {
+  const milestonePath = layout.milestone(milestoneId);
+  await store.withFileLock(milestonePath, async () => {
+    const body = await store.readText(milestonePath);
+    if (body == null) {
+      throw new Error(
+        `linkMilestoneReviewSurfaceId: milestone ${milestoneId} not found`,
+      );
+    }
+    const existing = Milestone.parse(JSON.parse(body));
+    const phaseKey: "discovery" | "specification" | "planning" | "validation" =
+      phase === "Discovery"
+        ? "discovery"
+        : phase === "Specification"
+          ? "specification"
+          : phase === "Planning"
+            ? "planning"
+            : "validation";
+    const currentMap = existing.review_surface_ids ?? {};
+    if (currentMap[phaseKey] === reviewSurfaceId) {
+      return; // Already linked — idempotent noop.
+    }
+    const next: MilestoneT = Milestone.parse({
+      ...existing,
+      review_surface_ids: {
+        ...currentMap,
+        [phaseKey]: reviewSurfaceId,
+      },
+      updated_at: new Date().toISOString(),
+    });
+    await store.writeAtomic(milestonePath, JSON.stringify(next, null, 2));
+  });
 }
 
 /**
